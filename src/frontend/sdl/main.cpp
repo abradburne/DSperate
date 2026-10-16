@@ -52,6 +52,7 @@
 
 #include <SDL2/SDL.h>
 #include <sched.h>
+#include <sys/resource.h>
 #include <cctype>
 #include <cerrno>
 #include <cstring>
@@ -1939,6 +1940,44 @@ sdl_ready:
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
   int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
+  // RLIMIT_RTTIME: PipeWire's client library sets it to 200 ms in every
+  // process it joins, and the kernel kills a real-time thread that runs that
+  // long without sleeping. Only a sleep taken *as* a real-time thread resets
+  // the count; the emulation thread's waits are taken as SCHED_OTHER (the
+  // present's vsync wait, the pacer's spin), so on its own it was killed
+  // within a second. Paced, it naps briefly once a frame as a real-time
+  // thread (rt_nap below). Unpaced (fast forward, or the limiter off) it
+  // never waits at all, so it is an ordinary task until pacing resumes.
+  bool was_unpaced = false;
+  int paced_policy = SCHED_OTHER; sched_param paced_sp{};
+  auto set_unpaced = [&](bool on) {
+#if defined(__linux__)
+    if (on) {
+      if (pthread_getschedparam(pthread_self(), &paced_policy, &paced_sp) != 0 || (paced_policy != SCHED_RR && paced_policy != SCHED_FIFO)) { paced_policy = SCHED_OTHER; return; }
+      sched_param z{};
+      if (const int e = pthread_setschedparam(pthread_self(), SCHED_OTHER, &z)) { std::fprintf(stderr, "unpaced: real-time policy not dropped: %s\n", std::strerror(e)); paced_policy = SCHED_OTHER; return; }
+      VLOG("unpaced: emulation thread SCHED_OTHER until pacing resumes\n");
+    } else if (paced_policy != SCHED_OTHER) {
+      pthread_setschedparam(pthread_self(), paced_policy, &paced_sp);
+      paced_policy = SCHED_OTHER;
+    }
+#else
+    (void)on;
+#endif
+  };
+  auto rt_nap = [&] {
+#if defined(__linux__)
+    // Long enough that the thread really leaves the CPU: a timer that has
+    // expired before the thread schedules out is no sleep.
+    if (was_unpaced) return;
+    int pol = 0; sched_param sp{};
+    if (pthread_getschedparam(pthread_self(), &pol, &sp) != 0 || (pol != SCHED_RR && pol != SCHED_FIFO)) return;
+    rlimit rl{};
+    if (getrlimit(RLIMIT_RTTIME, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return;
+    timespec ts{0, 20000};
+    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {}
+#endif
+  };
   int ff_since = 0;           // frames since the last present, for fast forward's ff_skip
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // primary screen with the slot digit / FPS counter
@@ -3461,6 +3500,7 @@ sdl_ready:
       if (!said) { said = true; std::fprintf(stderr, "fast forward: not during a network session\n"); }
       fast = false;
     }
+    if ((fast || limiter_off) != was_unpaced) { was_unpaced = fast || limiter_off; set_unpaced(was_unpaced); }
     if (fast != was_fast) {
       was_fast = fast;
       pacer.reset();
@@ -3907,6 +3947,7 @@ sdl_ready:
       }
     }
     ++frames;
+    rt_nap();
     if (frames == 1) mark("first frame presented");
     // DS_SHOT_AT=N: a screenshot after frame N, for offscreen/replay runs.
     if (static const long shot_at = [] { const char* v = std::getenv("DS_SHOT_AT"); return v ? std::atol(v) : -1L; }(); shot_at >= 0 && frames == static_cast<u64>(shot_at)) shot_pending = true;
