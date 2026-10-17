@@ -3867,7 +3867,7 @@ sdl_ready:
             gf.scr = -1; gf.now = false; gf.cap_kind = 0; gf.cap_serial = 0; gf.show[0] = gf.show[1] = 0;
             if (gl_hires) {
               const int scr = nds.gpu.screen_a();
-              const auto& ref = nds.gpu.frame_3d();
+              const auto& ref = nds.gpu.frame_3d_shown();
               const u32 mode = nds.gpu.display_mode_a();
               ++hr_n;
               for (int sc = 0; sc < 2; ++sc)

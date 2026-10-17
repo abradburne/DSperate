@@ -91,10 +91,15 @@ public:
   // resolution from the frame's polygon list (Renderer3D::set_display_list).
   void set_hires(bool on);
   bool hires_on() const { return !hires_lines_.empty(); }
-  // The frame just run's lines. Two sets, alternating per frame: a reader of
-  // this frame's (the present thread) is not overwritten until the frame after next.
-  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data() + hl_cur_; }
+  // The frame just run's lines, read by the frontend once the frame is ready --
+  // after the next frame's begin_frame(), so the set it does not write now. Two
+  // sets, alternating per frame: a reader of this frame's (the present thread)
+  // is not overwritten until the frame after next.
+  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data() + (hl_cur_ ^ SCREEN_H); }
+  // The 3D frame the display lines read: frame_3d() for the frame begun,
+  // frame_3d_shown() for the frame just run (with hires_lines()).
   const Renderer3D::FrameRef& frame_3d() const { return ref3d_; }
+  const Renderer3D::FrameRef& frame_3d_shown() const { return ref3d_shown_; }
   // Display capture, for hi-res 3D shown through VRAM (display mode 2): the
   // DISPCAPCNT of the frame just run and of the one before (bit 31 set when
   // it captured; 0 when it did not). hires_capture(cap) says whether such a
@@ -378,6 +383,7 @@ private:
   bool bscale_defer_ = false;           // output_engine stashes engine B's line instead of scaling it
   bool scale_inflight_ = false;         // the worker holds a stash to scale
   Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
+  Renderer3D::FrameRef ref3d_shown_;    // the frame before's, for the frontend
   std::vector<Engine2D::HiresLine> hires_lines_;   // set_hires(): two sets of one per display line
   u32 hl_cur_ = 0;                                 // the set this frame writes (0 or SCREEN_H)
   // Lag mode: per-line frames hand BOTH engines' line to the
