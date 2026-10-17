@@ -2777,6 +2777,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (gpu_on_ && lean_ && lean_aa_ != aa_) gpu_rebuild();
   if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; pending_bands_ = 0; return; }
   gpu_frame_ = false;
+  if (dl_on_) build_display_list(gx, polys, npoly, display_ ^ 1);
   if (prof::enabled && !prep_done) { prof::add_timed(prof::R3D_PREP, prof::now_ns() - t_prep0); prep_done = true; }
 
   u32 nb = band_count(live);
@@ -2954,6 +2955,7 @@ Renderer3D::FrameRef Renderer3D::frame_ref(bool allow_lag) const {
   f.nbins = pending_bands_;
   if (pending_bands_) f.bin_y = bin_y_;
   f.out = out_[display_].data();
+  if (dl_on_ && dl_[display_].valid) f.dlist = &dl_[display_];
   return f;
 }
 
@@ -3020,17 +3022,23 @@ GpuTrace g_gpu_trace;
 inline double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
-bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly) {
+// The frame's polygon list in the GPU raster's layout (vk_layout.h): polygons,
+// flattened vertices, the post tables, the frame record, and each texture
+// decoded once into `arena` (append-only, `res` remembers what is where).
+// False when the frame cannot be taken: too many polygons or vertices, a
+// texture the cache cannot give, a full arena (`arena_full` set: start a new
+// one), or the rear-plane bitmap.
+bool Renderer3D::build_gpu_list(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, gpu::vk::GpuPoly* gp, gpu::vk::GpuVert* gv,
+                                u32* tex, u32 texcap, std::unordered_map<u32, GpuResident>& res_map, u32& arena_top,
+                                gpu::vk::GpuPost* ps, gpu::vk::GpuFrame& f, u32& np_out, u32& nv_out, bool& arena_full) {
   using namespace ds::gpu::vk;
-  const double t0 = g_gpu_trace.on ? now_ms() : 0;
-  struct Done { double t0; vk::Lean& lean; bool ok = false; ~Done() { if (g_gpu_trace.on) { if (!ok) ++g_gpu_trace.refused; g_gpu_trace.tick(lean); } } } done{t0, *lean_};
-  gpu_job_wait();   // the previous submit is done with the staging buffers (long since: it takes ~1 ms)
-  GpuPoly* const gp = lean_->poly_buffer();
-  GpuVert* const gv = lean_->vert_buffer();
-  u32 texcap = 0; u32* const tex = lean_->texel_buffer(&texcap);
-  GpuPost* const ps = lean_->post_buffer();
+  arena_full = false;
   u32 np = 0, nv = 0, nrows = 0, first_ordered = ~0u, opaque_rows = 0;
   const bool alpha_all_fail = rs_->alpha_ref >= 31;
+  // Runs of polygons share a texture: the last one's lookup (texture cache
+  // and arena residency) answers the next with the same image and palette.
+  // Repeat/flip bits are per polygon and don't change the decoded image.
+  struct Last { u32 key = ~0u, pal = ~0u, off = 0, w = 0, h = 0; bool transparent = false; } last;
   for (u32 i = 0; i < npoly; ++i) {
     const Polygon& p = *polys[i];
     if (p.degenerate) continue;
@@ -3056,19 +3064,23 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     nrows += ry1 >= ry0 ? static_cast<u32>(ry1 - ry0) + 1 : 0;
     const u32 fmt = (p.texparam >> 26) & 7;
     if ((dispcnt_ & 1) && fmt != 0) {
-      Shade sh; texture_fields(sh, p);
-      const TextureCache::Ref r = texcache_.lookup_ref(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
-      if (!r.texels) return false;
-      GpuResident& res = gpu_resident_[r.id];
-      if (res.words != r.words || res.version != r.version) {
-        if (gpu_arena_top_ + r.words > texcap) { gpu_job_wait(); lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0; return false; }
-        std::memcpy(tex + gpu_arena_top_, r.texels, static_cast<size_t>(r.words) * sizeof(u32));
-        res.off = gpu_arena_top_; res.words = r.words; res.version = r.version;
-        gpu_arena_top_ += r.words;
+      const u32 key = p.texparam & ~0x000F0000u;   // without repeat/flip
+      if (key != last.key || p.texpal != last.pal) {
+        Shade sh; texture_fields(sh, p);
+        const TextureCache::Ref r = texcache_.lookup_ref(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
+        if (!r.texels) return false;
+        GpuResident& res = res_map[r.id];
+        if (res.words != r.words || res.version != r.version) {
+          if (arena_top + r.words > texcap) { arena_full = true; return false; }
+          std::memcpy(tex + arena_top, r.texels, static_cast<size_t>(r.words) * sizeof(u32));
+          res.off = arena_top; res.words = r.words; res.version = r.version;
+          arena_top += r.words;
+        }
+        last = Last{key, p.texpal, res.off, static_cast<u32>(sh.width), static_cast<u32>(sh.height), r.transparent};
       }
-      o.tex_offset = res.off; o.tex_w = static_cast<u32>(sh.width); o.tex_h = static_cast<u32>(sh.height); o.flags |= DS_PF_TEXTURED;
+      o.tex_offset = last.off; o.tex_w = last.w; o.tex_h = last.h; o.flags |= DS_PF_TEXTURED;
       const bool may_alpha = (p.texparam & (1u << 29)) || fmt == 5 || fmt == 7 || fmt == 1 || fmt == 6;
-      if (may_alpha && r.transparent) o.flags |= DS_PF_TEX_ALPHA;
+      if (may_alpha && last.transparent) o.flags |= DS_PF_TEX_ALPHA;
     }
     ++np;
   }
@@ -3078,7 +3090,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   for (u32 i = 0; i < rs_->fog_density.size() && i < 34; ++i) ps->density[i] = rs_->fog_density[i];
   for (u32 i = 0; i < rs_->edge.size() && i < 8; ++i) ps->edge[i] = rs_->edge[i];
   for (u32 i = 0; i < rs_->toon.size() && i < 32; ++i) ps->toon[i] = rs_->toon[i];
-  GpuFrame f{};
+  f = GpuFrame{};
   f.npoly = np; f.scale = 1; f.dispcnt = dispcnt_; f.alpha_ref = rs_->alpha_ref;
   f.first_ordered = first_ordered; f.opaque_rows = opaque_rows; f.nrows = nrows;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) f.flags |= DS_FF_WBUFFER; break; }
@@ -3090,16 +3102,54 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     f.clear_attr = (rs_->clear_attr1 & 0x3F000000) | (rs_->clear_attr1 & 0x8000);
   }
   if (rs_->dispcnt & (1u << 14)) return false;   // rear-plane bitmap: the CPU draws it
+  np_out = np; nv_out = nv;
+  return true;
+}
+
+bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly) {
+  using namespace ds::gpu::vk;
+  const double t0 = g_gpu_trace.on ? now_ms() : 0;
+  struct Done { double t0; vk::Lean& lean; bool ok = false; ~Done() { if (g_gpu_trace.on) { if (!ok) ++g_gpu_trace.refused; g_gpu_trace.tick(lean); } } } done{t0, *lean_};
+  gpu_job_wait();   // the previous submit is done with the staging buffers (long since: it takes ~1 ms)
+  u32 texcap = 0; u32* const tex = lean_->texel_buffer(&texcap);
+  GpuFrame f{};
+  u32 np = 0, nv = 0;
+  bool full = false;
+  if (!build_gpu_list(gx, polys, npoly, lean_->poly_buffer(), lean_->vert_buffer(), tex, texcap, gpu_resident_, gpu_arena_top_, lean_->post_buffer(), f, np, nv, full)) {
+    if (full) { gpu_job_wait(); lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0; }
+    return false;
+  }
   // A frame the lean raster cannot take (too many polygons / vertices) is
   // refused here, synchronously, so the CPU bands draw it; the submit itself
   // goes to the GPU job thread. Its own failure (a driver error) shows as a
   // dropped frame at the next read, never as a CPU fallback.
-  if (np > DS_MAX_POLYS || nv > DS_MAX_VERTS) return false;
   const double t1 = g_gpu_trace.on ? now_ms() : 0;
   gpu_job_post(np, nv, gpu_arena_top_, f);
   done.ok = true;
   if (g_gpu_trace.on) { g_gpu_trace.draws += lean_->draws(); const double t2 = now_ms(); g_gpu_trace.build_ms += t1 - t0; g_gpu_trace.submit_ms += t2 - t1; }   // draws: the frame before's
   return done.ok;
+}
+
+// Display list (hi-res 3D for the display): the CPU raster draws the frame as
+// usual, and its polygon list is also kept, in the slot of the output it
+// draws, for the frontend to draw again at a higher resolution.
+void Renderer3D::set_display_list(bool on) {
+  dl_on_ = on;
+  dl_resident_.clear(); dl_arena_top_ = 0; ++dl_epoch_;
+  if (on) { dl_arena_.assign(kDlArenaWords, 0); for (auto& l : dl_) { l.polys.resize(DS_MAX_POLYS); l.verts.resize(DS_MAX_VERTS); l.valid = false; } }
+  else { dl_arena_.clear(); dl_arena_.shrink_to_fit(); for (auto& l : dl_) { l = DisplayList{}; } }
+}
+
+void Renderer3D::build_display_list(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, u32 slot) {
+  DisplayList& l = dl_[slot];
+  bool full = false;
+  l.valid = build_gpu_list(gx, polys, npoly, l.polys.data(), l.verts.data(), dl_arena_.data(), kDlArenaWords, dl_resident_, dl_arena_top_, &l.post, l.frame, l.npoly, l.nvert, full);
+  if (!l.valid && full) {   // a new arena: every frame's offsets before this are void
+    dl_resident_.clear(); dl_arena_top_ = 0; ++dl_epoch_;
+    dl_[slot ^ 1].valid = false;
+    l.valid = build_gpu_list(gx, polys, npoly, l.polys.data(), l.verts.data(), dl_arena_.data(), kDlArenaWords, dl_resident_, dl_arena_top_, &l.post, l.frame, l.npoly, l.nvert, full);
+  }
+  l.epoch = dl_epoch_;
 }
 
 // Wait only for the band that owns display line `y` of frame `f`: bands are
