@@ -86,6 +86,15 @@ public:
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
+  // Hi-res 3D: engine A's 3D lines are kept (Engine2D::HiresLine) so that,
+  // after the frame, compose_hires() can composite them again with the 3D
+  // layer at the GPU raster's internal resolution. compose_hires() writes
+  // engine A's screen at (256S x 192S) ARGB8888 into `out` and returns false
+  // when the frame has nothing at hi-res (no GPU hi-res record, display mode
+  // not 1): show the 1x framebuffer then.
+  void set_hires(bool on);
+  bool hires_on() const { return !hires_lines_.empty(); }
+  bool compose_hires(std::vector<u32>& out, u32* scale, int* screen) const;
 
   // A screen the frontend does not show. Its driving engine skips drawing but
   // keeps journal/latches/windows/lazy-2D bookkeeping running so it's exact
@@ -345,6 +354,7 @@ private:
   bool bscale_defer_ = false;           // output_engine stashes engine B's line instead of scaling it
   bool scale_inflight_ = false;         // the worker holds a stash to scale
   Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
+  std::vector<Engine2D::HiresLine> hires_lines_;   // set_hires(): one per display line
   // Lag mode: per-line frames hand BOTH engines' line to the
   // worker at its HBlank without waiting, joining at that line's HBlank or
   // earlier if observed. The last display line always joins. Past

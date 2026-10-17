@@ -317,6 +317,7 @@ void Display::close() {
   frame_px_ = nullptr;
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+  if (hires_tex_) { SDL_DestroyTexture(hires_tex_); hires_tex_ = nullptr; hires_tw_ = hires_th_ = 0; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
   if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
 }
@@ -478,14 +479,24 @@ void Display::draw(const u32* const fb[SCREENS]) {
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (!v.shown) continue;
-    SDL_UpdateTexture(tex_[v.screen], nullptr, fb[v.screen], static_cast<int>(SCREEN_W) * 4);
+    SDL_Texture* tex = tex_[v.screen];
+    if (hires_px_ && v.screen == hires_screen_) {
+      if (!hires_tex_ || hires_tw_ != hires_w_ || hires_th_ != hires_h_) {
+        if (hires_tex_) SDL_DestroyTexture(hires_tex_);
+        hires_tex_ = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, static_cast<int>(hires_w_), static_cast<int>(hires_h_));
+        hires_tw_ = hires_w_; hires_th_ = hires_h_;
+      }
+      if (hires_tex_) { tex = hires_tex_; SDL_UpdateTexture(tex, nullptr, hires_px_, static_cast<int>(hires_w_) * 4); }
+    }
+    if (tex == tex_[v.screen]) SDL_UpdateTexture(tex, nullptr, fb[v.screen], static_cast<int>(SCREEN_W) * 4);
     // Textures are per screen, not per view, so the alpha mod is scoped to
     // the inset's copy or a screen swap would carry it to the large view.
     const bool translucent = !v.direct && inset_alpha_ < 255;
-    if (translucent) { SDL_SetTextureBlendMode(tex_[v.screen], SDL_BLENDMODE_BLEND); SDL_SetTextureAlphaMod(tex_[v.screen], inset_alpha_); }
-    SDL_RenderCopy(ren_, tex_[v.screen], nullptr, reinterpret_cast<const SDL_Rect*>(&v.rect));
-    if (translucent) { SDL_SetTextureAlphaMod(tex_[v.screen], 255); SDL_SetTextureBlendMode(tex_[v.screen], SDL_BLENDMODE_NONE); }
+    if (translucent) { SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND); SDL_SetTextureAlphaMod(tex, inset_alpha_); }
+    SDL_RenderCopy(ren_, tex, nullptr, reinterpret_cast<const SDL_Rect*>(&v.rect));
+    if (translucent) { SDL_SetTextureAlphaMod(tex, 255); SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE); }
   }
+  hires_px_ = nullptr;
   SDL_RenderPresent(ren_);
 }
 

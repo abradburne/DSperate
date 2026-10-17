@@ -804,6 +804,60 @@ void Gpu::step_engine(int e, u32 line) {
 // The output stage for one engine's line: display mode, master brightness,
 // 6->8 bit expansion, into the screen POWCNT1 bit 15 gives it (or scaled
 // straight into the frontend's buffer).
+void Gpu::set_hires(bool on) {
+  if (on == hires_on()) return;
+  if (on) hires_lines_.assign(SCREEN_H, Engine2D::HiresLine{});
+  else hires_lines_.clear();
+  engine[0].set_hires_export(on ? hires_lines_.data() : nullptr);
+}
+
+bool Gpu::compose_hires(std::vector<u32>& out, u32* scale, int* screen) const {
+  const u32* hi = ref3d_.hires;
+  const u32 S = ref3d_.hires_scale;
+  if (!hi || S < 2 || hires_lines_.empty() || !screens_on_ || ((engine[0].dispcnt() >> 16) & 3) != 1) return false;
+  const int scr = engine[0].screen();
+  const u32* fb = fb_[scr].data();
+  const u32 W = SCREEN_W * S;
+  out.resize(static_cast<size_t>(W) * SCREEN_H * S);
+  alignas(16) Pixel top[256], second[256], px[256];
+  alignas(16) u8 top_id[256], kind[256], alpha[256];
+  alignas(16) u32 rgb[256];
+  u16 on_top[256], on_second[256];
+  for (u32 y = 0; y < SCREEN_H; ++y) {
+    const Engine2D::HiresLine& h = hires_lines_[y];
+    u32* row0 = out.data() + static_cast<size_t>(y) * S * W;
+    if (!h.valid) {   // no 3D on the line: the finished 1x pixels, each SxS
+      for (u32 x = 0; x < SCREEN_W; ++x) for (u32 k = 0; k < S; ++k) row0[x * S + k] = fb[y * SCREEN_W + x];
+      for (u32 r = 1; r < S; ++r) std::memcpy(row0 + r * W, row0, W * sizeof(u32));
+      continue;
+    }
+    // The pixels where the 3D layer is the top or the second target: the only
+    // ones a hi-res sample changes. Everything else composites as at 1x.
+    u32 nt = 0, ns = 0;
+    for (u32 x = 0; x < 256; ++x) { if (h.top_kind[x] == K_3D) on_top[nt++] = static_cast<u16>(x); else if (h.second_id[x] == L_BG0) on_second[ns++] = static_cast<u16>(x); }
+    for (u32 r = 0; r < S; ++r) {
+      const u32* hrow = hi + static_cast<size_t>(y * S + r) * W;
+      u32* orow = row0 + r * W;
+      for (u32 k = 0; k < S; ++k) {
+        std::memcpy(top, h.top, sizeof top); std::memcpy(second, h.second, sizeof second);
+        std::memcpy(top_id, h.top_id, 256); std::memcpy(kind, h.top_kind, 256); std::memcpy(alpha, h.top_alpha, 256);
+        for (u32 i = 0; i < nt; ++i) {
+          const u32 x = on_top[i], v = hrow[x * S + k], a = (v >> 24) & 0x1F;
+          if (a) { top[x] = v; alpha[x] = static_cast<u8>(a); }
+          else { top[x] = second[x]; top_id[x] = h.second_id[x]; kind[x] = K_NORMAL; alpha[x] = 0; }   // past the polygon's hi-res edge: what lay beneath
+        }
+        for (u32 i = 0; i < ns; ++i) { const u32 x = on_second[i], v = hrow[x * S + k]; if ((v >> 24) & 0x1F) second[x] = v; }
+        kern::active::composite_line(h.bldcnt, h.eva, h.evb, h.evy, top, second, top_id, kind, alpha, h.second_id, h.win, px);
+        kern::active::output_line(px, h.mbright, rgb);
+        for (u32 x = 0; x < 256; ++x) orow[x * S + k] = rgb[x];
+      }
+    }
+  }
+  if (scale) *scale = S;
+  if (screen) *screen = scr;
+  return true;
+}
+
 void Gpu::output_engine(int e, u32 line) {
   prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];

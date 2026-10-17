@@ -194,6 +194,20 @@ void Engine2D::render_line(u32 line) {
     if (cur_.dispcnt & 0xE000) prof::add(prof::C_2D_WIN_PRESENT, 1);
   }
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
+  if (hires_lines_ && line < 192) {
+    HiresLine& h = hires_lines_[line];
+    h.valid = !num_ && (cur_.dispcnt & 8) && bg_[0].any;
+    if (h.valid) {
+      { DS_PROF(SELECT); select_layers(); }
+      std::memcpy(h.top, top_.data(), sizeof h.top); std::memcpy(h.second, second_.data(), sizeof h.second);
+      std::memcpy(h.top_id, top_id_.data(), 256); std::memcpy(h.top_kind, top_kind_.data(), 256);
+      std::memcpy(h.top_alpha, top_alpha_.data(), 256); std::memcpy(h.second_id, second_id_.data(), 256);
+      std::memcpy(h.win, win_.data(), 256);
+      h.bldcnt = cur_.bldcnt; h.eva = cur_.eva; h.evb = cur_.evb; h.evy = cur_.evy; h.mbright = master_bright();
+      { DS_PROF(EFFECTS); colour_effects(); }
+      return;
+    }
+  }
   if (!effect_possible()) {
     // No colour effect touches this line: skip second-layer bookkeeping and
     // pick the cheapest applicable pass below.

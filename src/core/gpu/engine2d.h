@@ -77,6 +77,20 @@ public:
   // Engine A: 256 RGB666 with 5-bit alpha in bits 24-28 (0 = transparent), or null.
   void set_3d_line(const Pixel* line) { line3d_ = line; }
 
+  // Hi-res 3D (Gpu::compose_hires): while set, a line whose 3D layer is
+  // present takes the full select and leaves what the colour effects read
+  // in lines[line] -- the resolved top and second records, ids, kind, alpha,
+  // window byte and the line's effect registers -- so the line can be
+  // composited again with the 3D taken from a hi-res frame. The CPU
+  // composite still runs: output(), capture and the 1x picture are as before.
+  struct HiresLine {
+    alignas(16) Pixel top[256], second[256];
+    alignas(16) u8 top_id[256], top_kind[256], top_alpha[256], second_id[256], win[256];
+    u16 bldcnt = 0, mbright = 0; u8 eva = 0, evb = 0, evy = 0;
+    bool valid = false;
+  };
+  void set_hires_export(HiresLine* lines) { hires_lines_ = lines; }
+
   u32 bldcnt() const { return regs_.bldcnt(); }
   u32 eva() const { return regs_.eva(); }
   u32 evb() const { return regs_.evb(); }
@@ -137,6 +151,7 @@ private:
   alignas(16) std::array<u8, 256> top_tid_{}, second_tid_{};
   alignas(16) std::array<Pixel, 256> top_{}, second_{};
   alignas(16) std::array<u8, 256> top_id_{}, top_kind_{}, top_alpha_{}, second_id_{};
+  HiresLine* hires_lines_ = nullptr;
   alignas(16) std::array<Pixel, 256> out_{};
   const Pixel* line3d_ = nullptr;
 

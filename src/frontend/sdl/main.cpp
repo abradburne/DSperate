@@ -1530,7 +1530,18 @@ sdl_ready:
     nds.gpu3d.renderer().set_aa(aa_on(cfg.str("video.aa", "false")));   // before the raster starts: its MSAA is fixed at creation
     // video.gpu3d_scale (DS_GPU3D_SCALE overrides): the GPU raster's internal resolution, 1-4.
     { const char* gs = std::getenv("DS_GPU3D_SCALE"); nds.gpu3d.renderer().set_gpu_scale(static_cast<u32>(std::clamp(gs ? std::atoi(gs) : cfg.num("video.gpu3d_scale", 1), 1, 4))); }
-    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on\n"); }
+    if (want) {
+      std::string why;
+      if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str());
+      else {
+        std::fprintf(stderr, "gpu3d: on\n");
+        // Above 1x the frame is shown through the renderer tier at that size.
+        if (nds.gpu3d.renderer().gpu_scale() > 1) {
+          if (display.hires_capable()) { nds.gpu.set_hires(true); std::fprintf(stderr, "gpu3d: %ux internal resolution\n", nds.gpu3d.renderer().gpu_scale()); }
+          else std::fprintf(stderr, "gpu3d: %ux needs video.sink = renderer; showing 1x\n", nds.gpu3d.renderer().gpu_scale());
+        }
+      }
+    }
   }
   // Let fullscreen windows take their final size before the ROM loads (see
   // Display::settle_step); bounded, in case no configure comes.
@@ -3802,6 +3813,16 @@ sdl_ready:
           int rt_pol = 0; sched_param rt_sp{};
           const bool drop_rt = present_nort && pthread_getschedparam(pthread_self(), &rt_pol, &rt_sp) == 0 && (rt_pol == SCHED_RR || rt_pol == SCHED_FIFO);
           if (drop_rt) { sched_param z{}; sched_setscheduler(0, SCHED_OTHER, &z); }
+          // Hi-res 3D (video.gpu3d_scale > 1): engine A's screen composited again
+          // with the GPU raster's hi-res frame, shown instead of its 1x picture.
+          if (nds.gpu.hires_on()) {
+            static std::vector<u32> hires_buf;
+            u32 hs = 0; int hscr = -1;
+            if (nds.gpu.compose_hires(hires_buf, &hs, &hscr)) {
+              display.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
+              if (dual_window) display2.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
+            }
+          }
           display.draw(fb);
           if (dual_window) display2.draw(fb);
           if (drop_rt) sched_setscheduler(0, rt_pol, &rt_sp);
