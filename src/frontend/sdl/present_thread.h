@@ -50,6 +50,12 @@ public:
     return t;
   }
 
+  // Whether the job with `ticket` (and every one before it) has run.
+  bool done(u64 ticket) {
+    std::lock_guard<std::mutex> lk(m_);
+    return done_ >= ticket;
+  }
+
   // Blocks until the job with `ticket` (and every one before it) has run.
   void wait(u64 ticket) {
     if (!ticket) return;

@@ -2012,6 +2012,7 @@ sdl_ready:
   bool fs_period_warned = false;
   int fs_drawn_run = 0;       // drawn frames since the last skipped one
   u64 fs_skipped = 0;         // reported with the frame statistics
+  u64 gl_late = 0;            // GLES present: frames not shown, the GPU still drawing the one before
   double fs_debt_ms = 0;      // adaptive: how far behind real time we are
   // One state to the unlisted ".auto" slot when the session ends, so a
   // kill/Ctrl-C can be resumed via --load-state. Nothing written while playing.
@@ -3908,6 +3909,22 @@ sdl_ready:
             static GlFrame gf;
             static u64 gl_job = 0;
             ds::sdl::PresentThread& pt = ds::sdl::PresentThread::get();
+            // The GPU still drawing the frame before: show that one longer rather
+            // than hold the emulation, and its sound, back for it (at 2x Golden
+            // Sun's field takes ~21 ms of GPU a frame, and waiting ran the whole
+            // game at 47 fps). Decided per display period, so a game that moves
+            // engine A between the screens through captures keeps each pair whole.
+            // DS_PRESENT_WAIT=1: always wait, as before.
+            static const bool gl_hold = std::getenv("DS_PRESENT_WAIT") != nullptr;
+            static int gl_left = 0;
+            static bool gl_skipping = false;
+            if (gl_left <= 0) {
+              gl_skipping = !gl_hold && !pt.done(gl_job);
+              gl_left = std::max<int>(1, nds.gpu.display_phase_period());
+            }
+            --gl_left;
+            if (gl_skipping) ++gl_late;
+            else {
             pt.wait(gl_job);
             gf.scr = -1; gf.mode = 0; gf.cap_kind = 0; gf.has_dl = false;
             if (gl_hires) {
@@ -3977,6 +3994,7 @@ sdl_ready:
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
             });
+            }
           } else {
             display.draw(fb);
             if (dual_window) display2.draw(fb);
@@ -4181,6 +4199,8 @@ sdl_ready:
     if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
     else std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
   }
+  if (gl_late) VLOG("present: %llu of %llu frames not shown, the GPU still drawing the one before\n",
+                    static_cast<unsigned long long>(gl_late), static_cast<unsigned long long>(frames));
   if (fs_limit > 0)
     VLOG("frameskip (%s, limit %d): %llu of %llu frames not drawn\n", fs_adaptive ? "adaptive" : "fixed", fs_limit,
          static_cast<unsigned long long>(fs_skipped), static_cast<unsigned long long>(frames));
