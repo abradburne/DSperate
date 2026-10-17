@@ -3898,7 +3898,8 @@ sdl_ready:
               GlFrame& g = gf;
               const u32* const sfb[2] = {g.fb[0].data(), g.fb[1].data()};
               ds::sdl::Display* dd = nullptr;
-              if (gh && g.scr >= 0) dd = (wins[1] && !wins[0]->shows(g.scr)) ? wins[1] : wins[0];
+              static const bool no_gl = std::getenv("DS_HIRES_NOGL") != nullptr;   // debug: the bookkeeping without the GL work
+              if (gh && g.scr >= 0 && !no_gl) dd = (wins[1] && !wins[0]->shows(g.scr)) ? wins[1] : wins[0];
               if (dd && dd->gl()) {
                 dd->gl()->make_current();
                 const unsigned prev_cap = g.cap_tex;
