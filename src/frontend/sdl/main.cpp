@@ -3888,7 +3888,8 @@ sdl_ready:
                   if (static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr; tr) {
                     u32 d0 = 0, d1 = 0;
                     for (u32 k = 0; k < 256 * 192; ++k) { d0 += ((fb[0][k] ^ c.img[k]) & 0xF8F8F8u) != 0; d1 += ((fb[1][k] ^ c.img[k]) & 0xF8F8F8u) != 0; }
-                    std::fprintf(stderr, "hrtrace this capture differs from screen 0 in %u px, screen 1 in %u\n", d0, d1);
+                    auto mean = [](const u32* q) { u64 t = 0; for (u32 k = 0; k < 256 * 192; k += 7) t += (q[k] & 0xFF) + (q[k] >> 8 & 0xFF) + (q[k] >> 16 & 0xFF); return (unsigned)(t / (3 * 256 * 192 / 7)); };
+                    std::fprintf(stderr, "hrtrace this capture differs from screen 0 in %u px, screen 1 in %u; means cap %u fb %u %u\n", d0, d1, mean(c.img.data()), mean(fb[0]), mean(fb[1]));
                   }
                 }
                 if (ref.dlist && (gf.now || gf.cap_kind)) {
