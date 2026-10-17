@@ -574,7 +574,10 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glBindVertexArray(d.vao);
   glBindBuffer(GL_ARRAY_BUFFER, d.vbo);
   const size_t bytes = std::max<size_t>(d.vb.size(), 1) * sizeof(Vtx);
-  if (bytes > d.vbo_cap) { d.vbo_cap = bytes * 2; glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(d.vbo_cap), nullptr, GL_STREAM_DRAW); }
+  // A new store every frame (orphaned): writing the one the GPU still reads
+  // from last frame stalled or copied it, ~3.5 ms a frame in Golden Sun.
+  if (bytes > d.vbo_cap) d.vbo_cap = bytes * 2;
+  glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(d.vbo_cap), nullptr, GL_STREAM_DRAW);
   if (!d.vb.empty()) glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(d.vb.size() * sizeof(Vtx)), d.vb.data());
 
   const auto T3 = clk::now();
