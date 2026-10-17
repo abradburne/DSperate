@@ -15,6 +15,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -419,6 +420,19 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glBindVertexArray(d.vao_empty);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   glBindVertexArray(0);
+  // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
+  static u32 renders = 0;
+  ++renders;
+  if (static const char* dump = std::getenv("DS_HIRES_PPM"); dump && std::strchr(dump, ':') && renders == static_cast<u32>(std::atoi(dump))) {
+    std::vector<u8> px(static_cast<size_t>(W) * H * 4);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    if (std::FILE* o = std::fopen(std::strchr(dump, ':') + 1, "wb")) {
+      std::fprintf(o, "P6\n%d %d\n255\n", W, H);
+      for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
+      std::fclose(o);
+      std::fprintf(stderr, "hires3d: frame %u written to %s\n", renders, std::strchr(dump, ':') + 1);
+    }
+  }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   return d.out;
 }
