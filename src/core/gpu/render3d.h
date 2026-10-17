@@ -81,6 +81,22 @@ public:
   // The GPU raster's internal resolution (1-4), taken when it is next created
   // (set before set_gpu; video.gpu3d_scale).
   void set_gpu_scale(u32 s) { gpu_scale_ = s; }
+  // Hi-res 3D for the display: while on, every frame the CPU raster draws
+  // also leaves its polygon list in the GPU raster's layout (FrameRef::dlist)
+  // for the frontend to draw again at a higher resolution. Textures go into
+  // one append-only arena; a full arena starts over and bumps the epoch, so a
+  // reader re-uploads it from the start. Emulation thread only.
+  void set_display_list(bool on);
+  struct DisplayList {
+    std::vector<gpu::vk::GpuPoly> polys;
+    std::vector<gpu::vk::GpuVert> verts;
+    gpu::vk::GpuPost post{};
+    gpu::vk::GpuFrame frame{};
+    u32 npoly = 0, nvert = 0;
+    u64 epoch = 0;     // the arena generation its texture offsets point into
+    bool valid = false;
+  };
+  const std::vector<u32>& display_arena(u32* top, u64* epoch) const { *top = dl_arena_top_; *epoch = dl_epoch_; return dl_arena_; }
   u32 gpu_scale() const { return gpu_scale_; }
   bool gpu_active() const { return gpu_on_; }
 private:
@@ -369,11 +385,13 @@ public:
   // generation's bands to wait on before reading a line. Taken at the start
   // of the display frame (Gpu::begin_frame); nbins is 0 when nothing is
   // outstanding (rendered inline or kept).
+  struct DisplayList;
   struct FrameRef {
     // A GPU frame's record is picked on the first line read, not when the
     // ref is taken at the start of the display frame: the GPU gets the lines
     // before the compositor's batch as well (see sync_line).
     mutable const u32* out = nullptr;
+    const DisplayList* dlist = nullptr;   // set_display_list(): this frame's polygon list (CPU frames)
     mutable const u32* hires = nullptr;   // a GPU frame above 1x: the same frame at hires_scale (256S x 192S words)
     mutable u32 hires_scale = 1;
     bool gpu = false, allow_lag = true;
@@ -425,6 +443,17 @@ private:
   bool gpu_on_ = false;
   bool gpu_frame_ = false;   // the last drawn frame went to the GPU: lean_ holds the picture, not out_[]
   struct GpuResident { u32 off = 0, words = 0, version = 0; };
+  bool build_gpu_list(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, gpu::vk::GpuPoly* gp, gpu::vk::GpuVert* gv,
+                      u32* tex, u32 texcap, std::unordered_map<u32, GpuResident>& res_map, u32& arena_top,
+                      gpu::vk::GpuPost* ps, gpu::vk::GpuFrame& f, u32& np_out, u32& nv_out, bool& arena_full);
+  void build_display_list(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, u32 slot);
+  static constexpr u32 kDlArenaWords = 2u << 20;   // 8 MB, as the GPU raster's
+  bool dl_on_ = false;
+  DisplayList dl_[2];
+  std::vector<u32> dl_arena_;
+  std::unordered_map<u32, GpuResident> dl_resident_;
+  u32 dl_arena_top_ = 0;
+  u64 dl_epoch_ = 0;
   std::unordered_map<u32, GpuResident> gpu_resident_;   // decoded texture (cache id) -> arena offset
   u32 gpu_arena_top_ = 0;
   bool gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly);   // false: draw on the CPU instead
