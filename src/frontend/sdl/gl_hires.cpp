@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/gl_hires.h"
+#include "core/gpu/kernels.h"
 
 #if !DSPERATE_GLES
 namespace ds::sdl {
@@ -113,6 +114,28 @@ void main() {
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
   v_uv = p;
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+// Pass 1 of the composite, every S x pixel: u_base is the finished 1x pixel
+// (RGB, from the CPU's output_line) with the pixel's class in alpha: 0 = the
+// 3D layer plays no part, so the 1x pixel is exact; 1 = the 3D layer on top
+// with nothing applied after it, so the hi-res sample is the pixel; 2 = the
+// whole composite, left (discarded) for pass 2.
+const char* kFastFS = R"(#version 310 es
+precision highp float; precision highp sampler2D;
+uniform highp sampler2D u_base, u_3d;
+uniform int u_scale;
+out vec4 o_col;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 b = texelFetch(u_base, p / u_scale, 0);
+  if (b.a > 0.75) discard;               // class 2
+  if (b.a > 0.25) {                       // class 1
+    vec4 h = texelFetch(u_3d, p, 0);
+    if (h.a > 0.0) { vec3 c6 = round(h.rgb * 255.0); o_col = vec4((c6 * 4.0 + floor(c6 / 16.0)) / 255.0, 1.0); return; }
+  }
+  o_col = vec4(b.rgb, 1.0);
 }
 )";
 
@@ -239,7 +262,10 @@ GLuint tex2d(GLenum fmt, GLsizei w, GLsizei h) {
 
 struct GlHires::Impl {
   u32 S = 2;
-  GLuint raster = 0, raster_early = 0, comp = 0;
+  GLuint raster = 0, raster_early = 0, comp = 0, fast = 0;
+  GLint f_scale = -1;
+  GLuint t_base = 0, dep_out = 0;
+  std::vector<u32> base;
   GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1;
   std::vector<std::pair<float, u32>> order;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
@@ -267,6 +293,9 @@ struct GlHires::Impl {
     if (raster) glDeleteProgram(raster);
     if (raster_early) glDeleteProgram(raster_early);
     if (comp) glDeleteProgram(comp);
+    if (fast) glDeleteProgram(fast);
+    if (t_base) glDeleteTextures(1, &t_base);
+    if (dep_out) glDeleteRenderbuffers(1, &dep_out);
   }
 };
 
@@ -289,6 +318,12 @@ bool GlHires::init(u32 scale, std::string* why) {
   glUseProgram(d.raster_early);
   glUniform1i(glGetUniformLocation(d.raster_early, "u_texels"), 0);
   d.comp = program(kFullVS, kCompositeFS, why);
+  d.fast = program(kFullVS, kFastFS, why);
+  if (!d.fast) return false;
+  glUseProgram(d.fast);
+  glUniform1i(glGetUniformLocation(d.fast, "u_base"), 0);
+  glUniform1i(glGetUniformLocation(d.fast, "u_3d"), 1);
+  glUniform1i(glGetUniformLocation(d.fast, "u_scale"), static_cast<GLint>(d.S));
   if (!d.raster || !d.comp) return false;
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
   d.u_alpha_ref = glGetUniformLocation(d.raster, "u_alpha_ref");
@@ -309,16 +344,19 @@ bool GlHires::init(u32 scale, std::string* why) {
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.col3d, 0);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, d.dep3d);
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "3D framebuffer incomplete"; return false; }
+  // The composite's depth: pass 1 marks what it drew, so pass 2 shades only the rest.
+  glGenRenderbuffers(1, &d.dep_out); glBindRenderbuffer(GL_RENDERBUFFER, d.dep_out); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, W, H);
   for (int i = 0; i < 2; ++i) {
     d.out[i] = tex2d(GL_RGBA8, W, H);
     glGenFramebuffers(1, &d.fbo_out[i]); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[i]);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.out[i], 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, d.dep_out);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "output framebuffer incomplete"; return false; }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   d.t_top = tex2d(GL_R32UI, 256, 192); d.t_second = tex2d(GL_R32UI, 256, 192); d.t_meta = tex2d(GL_R32UI, 256, 192);
-  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192); d.t_class = tex2d(GL_R8UI, 256, 192);
-  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.regs.resize(192 * 2);
+  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192); d.t_class = tex2d(GL_R8UI, 256, 192); d.t_base = tex2d(GL_RGBA8, 256, 192);
+  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.base.resize(256 * 192); d.regs.resize(192 * 2);
 
   glGenVertexArrays(1, &d.vao_empty);
   glGenVertexArrays(1, &d.vao); glBindVertexArray(d.vao);
@@ -470,6 +508,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   if (finish_each) { const auto F0 = clk::now(); glFinish(); t_gpu_raster += ms(F0, clk::now()); }
   const auto T4 = clk::now();
   // Engine A's planes for the composite.
+  u32 n_full = 0;   // class-2 pixels: none, and pass 2 and its planes are skipped
   for (u32 y = 0; y < 192; ++y) {
     const gpu::Engine2D::HiresLine& h = lines[y];
     d.regs[y * 2] = static_cast<u32>(h.bldcnt) | (static_cast<u32>(h.eva) << 16) | (static_cast<u32>(h.evb) << 21) | (static_cast<u32>(h.evy) << 26);
@@ -488,6 +527,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
       const bool blend3d = (h.bldcnt & (static_cast<u32>(h.second_id[x]) << 8)) != 0;
       const bool fx = (h.bldcnt & 1u) && (h.win[x] & 0x20) && effect != 0;
       cl[x] = (blend3d || fx || bright) ? 2 : 1;
+      n_full += cl[x] == 2;
     }
     std::memcpy(&d.top[y * 256], h.top, 256 * 4);
     std::memcpy(&d.second[y * 256], h.second, 256 * 4);
@@ -495,6 +535,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     for (u32 x = 0; x < 256; ++x) d.meta[y * 256 + x] = static_cast<u32>(h.top_id[x]) | (static_cast<u32>(h.top_kind[x]) << 8) | (static_cast<u32>(h.top_alpha[x]) << 16) | (static_cast<u32>(h.second_id[x]) << 24);
   }
   auto up = [](GLuint t, GLsizei w, GLsizei h, GLenum fmt, GLenum type, const void* px) { glBindTexture(GL_TEXTURE_2D, t); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, fmt, type, px); };
+  if (n_full) {
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   up(d.t_top, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.top.data());
   up(d.t_second, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.second.data());
@@ -503,20 +544,45 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   up(d.t_regs, 192, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, d.regs.data());
   for (u32 y = 0; y < 192; ++y) std::memcpy(&d.top[y * 256], lines[y].out, 256 * 4);   // reuse: engine A's own lines
   up(d.t_fb, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.top.data());
+  }
   up(d.t_class, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_BYTE, d.cls.data());
+  // Pass 1's input: each line's finished 1x pixels (master brightness unless a capture), RGBA bytes, class in alpha.
+  for (u32 y = 0; y < 192; ++y) {
+    u32* row = &d.base[y * 256];
+    gpu::kern::active::output_line(lines[y].out, mode == 1 ? 0 : lines[y].mbright, row);
+    const u8* cl = &d.cls[y * 256];
+    for (u32 x = 0; x < 256; ++x) {   // 0xAARRGGBB -> R, G, B, class bytes in memory
+      const u32 c = row[x];
+      row[x] = ((c >> 16) & 0xFF) | (c & 0xFF00) | ((c & 0xFF) << 16) | (static_cast<u32>(cl[x] * 127) << 24);
+    }
+  }
+  up(d.t_base, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, d.base.data());
 
   const auto T5 = clk::now();
   // The composite at S x.
   d.slot ^= 1;
   glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
   glViewport(0, 0, W, H);
-  glUseProgram(d.comp);
-  glUniform1i(d.u_mode, mode);
-  const GLuint ts[8] = {d.t_top, d.t_second, d.t_meta, d.t_win, d.t_regs, d.t_fb, d.col3d, d.t_class};
-  for (int i = 0; i < 8; ++i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
-  glActiveTexture(GL_TEXTURE0);
   glBindVertexArray(d.vao_empty);
+  // Pass 1: depth 0 where it drew (gl_FragCoord.z of the full-screen triangle
+  // is 0.5; ALWAYS writes it), cleared 1 where it discarded.
+  glClearDepthf(1.f); glClear(GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
+  glUseProgram(d.fast);
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.t_base);
+  glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d.col3d);
   glDrawArrays(GL_TRIANGLES, 0, 3);
+  // Pass 2: the full composite, only where depth is still 1 (LESS against 0.5 fails elsewhere: early-Z skips them).
+  if (n_full) {
+    glDepthFunc(GL_LESS); glDepthMask(GL_FALSE);
+    glUseProgram(d.comp);
+    glUniform1i(d.u_mode, mode);
+    const GLuint ts[8] = {d.t_top, d.t_second, d.t_meta, d.t_win, d.t_regs, d.t_fb, d.col3d, d.t_class};
+    for (int i = 0; i < 8; ++i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
+    glActiveTexture(GL_TEXTURE0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+  }
+  glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
   glBindVertexArray(0);
   static const bool finish = std::getenv("DS_HIRES_FINISH") != nullptr;
   static double t_gpu = 0;
@@ -525,8 +591,8 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const auto T6 = clk::now();
     t_arena += ms(T0, T1); t_fans += ms(T1, T2); t_vbo += ms(T2, T3); t_raster += ms(T3, T4); t_planes += ms(T4, T5); t_comp += ms(T5, T6);
     if (++tn == 120) {
-      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f, gpu wait %.2f, of it raster %.2f (%zu verts)\n",
-                   t_arena / tn, t_fans / tn, t_vbo / tn, t_raster / tn, t_planes / tn, t_comp / tn, t_gpu / tn, t_gpu_raster / tn, d.vb.size());
+      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f, gpu wait %.2f, of it raster %.2f (%zu verts, %u full-composite pixels)\n",
+                   t_arena / tn, t_fans / tn, t_vbo / tn, t_raster / tn, t_planes / tn, t_comp / tn, t_gpu / tn, t_gpu_raster / tn, d.vb.size(), n_full);
       t_arena = t_fans = t_vbo = t_raster = t_planes = t_comp = t_gpu = t_gpu_raster = 0; tn = 0;
     }
   }
