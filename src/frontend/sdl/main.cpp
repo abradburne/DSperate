@@ -3915,7 +3915,7 @@ sdl_ready:
                 if (dual_window) display2.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
               }
             }
-  display.draw(fb);
+            display.draw(fb);
             if (dual_window) display2.draw(fb);
           }
           if (drop_rt) sched_setscheduler(0, rt_pol, &rt_sp);
