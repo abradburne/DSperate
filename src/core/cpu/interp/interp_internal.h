@@ -6,7 +6,19 @@
 #include "core/cpu/arm_decode.h"
 #include "core/cpu/cpu_cycles.h"
 
-namespace ds::interp {
+// The same interpreter is compiled a second time for the GBA machine
+// (core/gba/gba_interp_*.cpp): DS_INTERP_GBA set, everything in
+// ds::gba_interp, and the memory accessors there (core/gba/gba_cpu_mem.h)
+// hide cpu_mem.h's DS ones, so the DS build is untouched.
+#ifndef DS_INTERP_NS
+#define DS_INTERP_NS interp
+#define DS_INTERP_GBA 0
+#endif
+#if DS_INTERP_GBA
+#include "core/gba/gba_cpu_mem.h"
+#endif
+
+namespace ds::DS_INTERP_NS {
 
 // r15 holds instruction address + 8 (ARM) / + 4 (Thumb) on entry; handlers
 // that branch call cpu.jump(). Every handler charges its cycles through
@@ -99,4 +111,4 @@ inline s32 sat_sub(CpuContext& cpu, s32 a, s32 b) {
 
 inline u32 popcount16(u32 v) { return static_cast<u32>(__builtin_popcount(v & 0xFFFF)); }
 
-} // namespace ds::interp
+} // namespace ds::DS_INTERP_NS

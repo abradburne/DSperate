@@ -5,7 +5,7 @@
 // charges its cycles where melonDS does.
 #include "core/cpu/interp/interp_internal.h"
 
-namespace ds::interp {
+namespace ds::DS_INTERP_NS {
 
 using arm::TOp;
 
@@ -228,7 +228,9 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
     return;
   }
   case TOp::Swi:
+#if !DS_INTERP_GBA
     if ((cpu.nds->dsi_font_hle || cpu.nds->dsi_loader_watch) && cpu.nds->dsi_hle_swi(cpu, instr & 0xFF)) return;
+#endif
     cpu.raise_exception(CpuContext::Exception::Swi); return;
   case TOp::Bkpt:
     if (!is_arm9(cpu)) break;
@@ -258,4 +260,4 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
   cpu.raise_exception(CpuContext::Exception::Undefined);   // the vector jump charges the refill
 }
 
-} // namespace ds::interp
+} // namespace ds::DS_INTERP_NS

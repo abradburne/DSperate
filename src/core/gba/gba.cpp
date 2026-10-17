@@ -1,0 +1,610 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+#include "core/gba/gba.h"
+#include "core/gba/bios/cultbios.h"
+#include "core/gba/gba_interp.h"
+#include "core/cpu/timing_mode.h"
+#include "core/state/state.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+
+namespace ds::gba {
+
+namespace {
+u64 hash_bytes(const u8* p, size_t n) {
+  u64 h = 1469598103934665603ull;
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) { u64 w; std::memcpy(&w, p + i, 8); h = (h ^ w) * 1099511628211ull; h ^= h >> 29; }
+  for (; i < n; ++i) h = (h ^ p[i]) * 1099511628211ull;
+  return h ^ n;
+}
+inline u16 rd16(const u8* p) { return static_cast<u16>(p[0] | (p[1] << 8)); }
+inline u32 rd32(const u8* p) { u32 v; std::memcpy(&v, p, 4); return v; }
+inline void wr16(u8* p, u16 v) { p[0] = static_cast<u8>(v); p[1] = static_cast<u8>(v >> 8); }
+inline u32 vram_off(u32 addr) { u32 o = addr & 0x1FFFF; return o >= 0x18000 ? o - 0x8000 : o; }
+// The GBA's cycle model wants the exact cost tables (cpu_cycles.h), not the
+// DS recompiler's constant "fast" model; process-wide, so held only while running.
+struct ExactTiming {
+  bool saved = g_fast_timing;
+  ExactTiming() { g_fast_timing = false; }
+  ~ExactTiming() { g_fast_timing = saved; }
+};
+} // namespace
+
+// gba_cpu_mem.h's slow paths.
+u8   bus_read8 (CpuContext& c, u32 a) { return static_cast<Gba*>(c.host)->read8(a); }
+u16  bus_read16(CpuContext& c, u32 a) { return static_cast<Gba*>(c.host)->read16(a); }
+u32  bus_read32(CpuContext& c, u32 a) { return static_cast<Gba*>(c.host)->read32(a); }
+void bus_write8 (CpuContext& c, u32 a, u8 v)  { static_cast<Gba*>(c.host)->write8(a, v); }
+void bus_write16(CpuContext& c, u32 a, u16 v) { static_cast<Gba*>(c.host)->write16(a, v); }
+void bus_write32(CpuContext& c, u32 a, u32 v) { static_cast<Gba*>(c.host)->write32(a, v); }
+u32  bus_fetch(CpuContext& c, u32 a, u32 w)   { return static_cast<Gba*>(c.host)->fetch(a, w); }
+
+Gba::Gba()
+    : cpu(new CpuContext),
+      bios(mem::alloc_page_buf(BIOS_SIZE)), ewram(mem::alloc_page_buf(EWRAM_SIZE)), iwram(mem::alloc_page_buf(IWRAM_SIZE)),
+      palette(mem::alloc_page_buf(2 * PALETTE_SIZE)), vram(mem::alloc_page_buf(VRAM_SIZE)), oam(mem::alloc_page_buf(2 * OAM_SIZE)),
+      rom(mem::alloc_page_buf(ROM_MAX)), sram(mem::alloc_page_buf(SRAM_SIZE)),
+      ppu(*this), timing_(size_t{1} << 17) {
+  std::memcpy(bios.get(), kCultBios, BIOS_SIZE);
+  bios_id = hash_bytes(bios.get(), BIOS_SIZE);
+  std::memset(sram.get(), 0xFF, SRAM_SIZE);
+  for (u32 a = 0; a < ROM_MAX; a += 2) wr16(rom.get() + a, static_cast<u16>(a >> 1));   // open bus past the end of a cart
+  map_memory();
+  reset();
+}
+
+Gba::~Gba() = default;
+
+bool Gba::load_bios(const std::string& path, std::string* err) {
+  bios_native = false;
+  if (!path.empty()) {
+    std::ifstream f(path, std::ios::binary);
+    if (f) {
+      std::vector<u8> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      if (d.size() != BIOS_SIZE) { if (err) *err = path + ": a GBA BIOS is 16384 bytes"; return false; }
+      std::memcpy(bios.get(), d.data(), BIOS_SIZE);
+      bios_native = true;
+    }
+  }
+  if (!bios_native) std::memcpy(bios.get(), kCultBios, BIOS_SIZE);
+  bios_id = hash_bytes(bios.get(), BIOS_SIZE);
+  return true;
+}
+
+bool Gba::load_rom(std::vector<u8> image, std::string* err) {
+  if (image.size() < 0xC0) { if (err) *err = "too small for a GBA cartridge"; return false; }
+  if (image.size() > ROM_MAX) image.resize(ROM_MAX);
+  rom_size = static_cast<u32>(image.size());
+  for (u32 a = 0; a < ROM_MAX; a += 2) wr16(rom.get() + a, static_cast<u16>(a >> 1));
+  std::memcpy(rom.get(), image.data(), image.size());
+  rom_id = hash_bytes(image.data(), image.size());
+  return true;
+}
+
+std::string Gba::title() const {
+  std::string t(reinterpret_cast<const char*>(rom.get() + 0xA0), 12);
+  while (!t.empty() && (t.back() == '\0' || t.back() == ' ')) t.pop_back();
+  return t;
+}
+u32 Gba::game_code() const { return rd32(rom.get() + 0xAC); }
+
+std::vector<u8> Gba::save_data() const { return std::vector<u8>(sram.get(), sram.get() + 0x8000); }
+bool Gba::load_save(const u8* data, size_t n) {
+  if (!n || n > SRAM_SIZE) return false;
+  std::memcpy(sram.get(), data, n);
+  return true;
+}
+
+// ---- memory map --------------------------------------------------------------
+
+void Gba::map_memory() {
+  mem::PageTable& pt = cpu->page_table;
+  using mem::PAGE_READABLE; using mem::PAGE_WRITABLE; using mem::PAGE_SIZE;
+  // BIOS (read-protected), I/O and SRAM stay on the slow path.
+  for (u32 a = 0x02000000; a < 0x03000000; a += EWRAM_SIZE) pt.map(a, EWRAM_SIZE, ewram.get(), PAGE_READABLE | PAGE_WRITABLE);
+  for (u32 a = 0x03000000; a < 0x04000000; a += IWRAM_SIZE) pt.map(a, IWRAM_SIZE, iwram.get(), PAGE_READABLE | PAGE_WRITABLE);
+  // Palette and OAM are 1 KB, half a page: their buffers hold two copies, kept
+  // equal by the (slow-path) stores, so loads can be direct.
+  for (u32 a = 0x05000000; a < 0x06000000; a += PAGE_SIZE) pt.map(a, PAGE_SIZE, palette.get(), PAGE_READABLE);
+  for (u32 a = 0x07000000; a < 0x08000000; a += PAGE_SIZE) pt.map(a, PAGE_SIZE, oam.get(), PAGE_READABLE);
+  // VRAM: 96 KB in each 128 KB, the last 32 KB mirroring the OBJ 32 KB. Stores
+  // take the slow path (byte stores widen to halfwords or vanish).
+  for (u32 a = 0x06000000; a < 0x07000000; a += PAGE_SIZE) pt.map(a, PAGE_SIZE, vram.get() + vram_off(a), PAGE_READABLE);
+  for (u32 a = 0x08000000; a < 0x0E000000; a += ROM_MAX) pt.map(a, ROM_MAX, rom.get(), PAGE_READABLE);
+}
+
+void Gba::rebuild_timing() {
+  const u16 w = rd16(&io[0x204]);
+  static const u8 nws[4] = {4, 3, 2, 8};
+  auto fill = [&](u32 region, u8 n16, u8 s16, u8 n32, u8 s32) {
+    for (u32 i = region << 9; i < (region + 1) << 9; ++i) timing_[i] = {n16, s16, n32, s32};
+  };
+  for (u32 r = 0; r < 256; ++r) fill(r, 1, 1, 1, 1);
+  fill(0x02, 3, 3, 6, 6);
+  fill(0x05, 1, 1, 2, 2);
+  fill(0x06, 1, 1, 2, 2);
+  auto rom = [&](u32 region, u32 n, u32 s) {
+    const u8 N = static_cast<u8>(1 + n), S = static_cast<u8>(1 + s);
+    fill(region, N, S, static_cast<u8>(N + S), static_cast<u8>(2 * S));
+    fill(region + 1, N, S, static_cast<u8>(N + S), static_cast<u8>(2 * S));
+  };
+  rom(0x08, nws[(w >> 2) & 3], (w & 0x10) ? 1 : 2);
+  rom(0x0A, nws[(w >> 5) & 3], (w & 0x80) ? 1 : 4);
+  rom(0x0C, nws[(w >> 8) & 3], (w & 0x400) ? 1 : 8);
+  const u8 sr = static_cast<u8>(1 + nws[w & 3]);
+  fill(0x0E, sr, sr, sr, sr);
+  fill(0x0F, sr, sr, sr, sr);
+  cpu->timing7 = reinterpret_cast<const u8 (*)[4]>(timing_.data());
+}
+
+u32 Gba::open_bus() {
+  const u32 pc = cpu->hot.regs[15];
+  auto raw32 = [&](u32 a) -> u32 { if (u8* p = cpu->page_table.read_ptr(a & ~3u)) return rd32(p); if (a < BIOS_SIZE) return rd32(bios.get() + (a & ~3u)); return 0; };
+  if (cpu->thumb()) {
+    const u32 w = raw32(pc);
+    const u16 h = static_cast<u16>((pc & 2) ? w >> 16 : w);
+    return h | (u32{h} << 16);
+  }
+  return raw32(pc);
+}
+
+u32 Gba::fetch(u32 addr, u32 width) {
+  if (addr < BIOS_SIZE) {
+    const u32 v = width == 32 ? rd32(bios.get() + (addr & ~3u)) : rd16(bios.get() + (addr & ~1u));
+    // What the bus last carried from the BIOS: the CPU fetches two
+    // instructions ahead (gba_interp.cpp), so this is the prefetched opcode.
+    bios_latch_ = width == 32 ? v : (v | (v << 16));
+    if (!bios_native) {
+      // A game reading the BIOS sees what Nintendo's leaves on the bus, not
+      // the built-in one's own opcodes: its SWI and IRQ returns (cultbios
+      // 0x170, 0x124, prefetching 0x178 and 0x12C) stand for Nintendo's at
+      // 0x188 and 0x13C. Its IRQ call (0x11C) prefetches the same opcode as
+      // Nintendo's at 0x134.
+      if (addr == 0x178) bios_latch_ = 0xE3A02004;
+      else if (addr == 0x12C) bios_latch_ = 0xE55EC002;
+    }
+    return v;
+  }
+  return width == 32 ? read32(addr) : read16(addr);
+}
+
+u8 Gba::read8(u32 addr) {
+  switch (addr >> 24) {
+  case 0x00:
+    if (addr < BIOS_SIZE) return static_cast<u8>((cpu->hot.regs[15] < BIOS_SIZE + 8 ? rd32(bios.get() + (addr & ~3u)) : bios_latch_) >> ((addr & 3) * 8));
+    break;
+  case 0x04:
+    if ((addr & 0xFFFFFF) < IO_SIZE) return static_cast<u8>(io_read16(addr & 0x3FE) >> ((addr & 1) * 8));
+    break;
+  case 0x0E: case 0x0F: return sram[addr & 0x7FFF];
+  default:
+    if (u8* p = cpu->page_table.read_ptr(addr)) return *p;
+    break;
+  }
+  return static_cast<u8>(open_bus() >> ((addr & 3) * 8));
+}
+
+u16 Gba::read16(u32 addr) {
+  addr &= ~1u;
+  switch (addr >> 24) {
+  case 0x00:
+    if (addr < BIOS_SIZE) return static_cast<u16>((cpu->hot.regs[15] < BIOS_SIZE + 8 ? rd32(bios.get() + (addr & ~3u)) : bios_latch_) >> ((addr & 2) * 8));
+    break;
+  case 0x04:
+    if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FE);
+    break;
+  case 0x0E: case 0x0F: return static_cast<u16>(sram[addr & 0x7FFF] * 0x0101u);
+  default:
+    if (u8* p = cpu->page_table.read_ptr(addr)) return rd16(p);
+    break;
+  }
+  return static_cast<u16>(open_bus() >> ((addr & 2) * 8));
+}
+
+u32 Gba::read32(u32 addr) {
+  addr &= ~3u;
+  switch (addr >> 24) {
+  case 0x00:
+    if (addr < BIOS_SIZE) return cpu->hot.regs[15] < BIOS_SIZE + 8 ? rd32(bios.get() + addr) : bios_latch_;
+    break;
+  case 0x04:
+    if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FC) | (u32{io_read16((addr & 0x3FC) + 2)} << 16);
+    break;
+  case 0x0E: case 0x0F: return sram[addr & 0x7FFF] * 0x01010101u;
+  default:
+    if (u8* p = cpu->page_table.read_ptr(addr)) return rd32(p);
+    break;
+  }
+  return open_bus();
+}
+
+void Gba::write8(u32 addr, u8 v) {
+  switch (addr >> 24) {
+  case 0x02: ewram[addr & (EWRAM_SIZE - 1)] = v; return;
+  case 0x03: iwram[addr & (IWRAM_SIZE - 1)] = v; return;
+  case 0x04:
+    if ((addr & 0xFFFFFF) < IO_SIZE) io_write16(addr & 0x3FE, static_cast<u16>(v * 0x0101u), (addr & 1) ? 0xFF00 : 0x00FF);
+    return;
+  case 0x05: write16(addr, static_cast<u16>(v * 0x0101u)); return;   // a byte lands in both halves
+  case 0x06: {
+    // BG VRAM: both halves; OBJ VRAM: dropped.
+    const u32 bg_end = (io[0] & 7) >= 3 ? 0x14000 : 0x10000;
+    if (vram_off(addr) < bg_end) write16(addr, static_cast<u16>(v * 0x0101u));
+    return;
+  }
+  case 0x07: return;                                                 // OAM ignores byte stores
+  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = v; save_dirty = true; ++save_writes; return;
+  default: return;
+  }
+}
+
+void Gba::write16(u32 addr, u16 v) {
+  addr &= ~1u;
+  switch (addr >> 24) {
+  case 0x02: wr16(ewram.get() + (addr & (EWRAM_SIZE - 1)), v); return;
+  case 0x03: wr16(iwram.get() + (addr & (IWRAM_SIZE - 1)), v); return;
+  case 0x04: if ((addr & 0xFFFFFF) < IO_SIZE) io_write16(addr & 0x3FE, v); return;
+  case 0x05: wr16(palette.get() + (addr & 0x3FF), v); wr16(palette.get() + 0x400 + (addr & 0x3FF), v); return;
+  case 0x06: wr16(vram.get() + vram_off(addr), v); return;
+  case 0x07: wr16(oam.get() + (addr & 0x3FF), v); wr16(oam.get() + 0x400 + (addr & 0x3FF), v); return;
+  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 1) * 8)); save_dirty = true; ++save_writes; return;
+  default: return;   // ROM (GPIO and EEPROM are phase 3), unmapped
+  }
+}
+
+void Gba::write32(u32 addr, u32 v) {
+  addr &= ~3u;
+  if ((addr >> 24) == 0x0E || (addr >> 24) == 0x0F) { sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 3) * 8)); save_dirty = true; ++save_writes; return; }
+  write16(addr, static_cast<u16>(v));
+  write16(addr + 2, static_cast<u16>(v >> 16));
+}
+
+// ---- I/O ---------------------------------------------------------------------
+
+u16 Gba::io_read16(u32 off) {
+  switch (off) {
+  case 0x004: return static_cast<u16>((rd16(&io[4]) & 0xFF38) | (vcount_ >= 160 && vcount_ < 227 ? 1 : 0) | (in_hblank_ ? 2 : 0) |
+                                      (vcount_ == (rd16(&io[4]) >> 8) ? 4 : 0));
+  case 0x006: return static_cast<u16>(vcount_);
+  case 0x100: case 0x104: case 0x108: case 0x10C: return timer_read(static_cast<int>((off - 0x100) >> 2));
+  case 0x102: case 0x106: case 0x10A: case 0x10E: return timers_[(off - 0x100) >> 2].control;
+  case 0x130: return keyinput_;
+  case 0x200: return ie;
+  case 0x202: return if_;
+  case 0x208: return ime;
+  default: break;
+  }
+  if (off >= 0xB0 && off < 0xE0) {   // DMA: only CNT_H reads back
+    const u32 i = (off - 0xB0) / 12, r = (off - 0xB0) % 12;
+    return r == 10 ? dma_[i].control : 0;
+  }
+  // Write-only: BG offsets and affine, window rectangles, MOSAIC, BLDY, the FIFOs.
+  if ((off >= 0x10 && off < 0x48) || off == 0x4C || off == 0x4E || (off >= 0x54 && off < 0x60) || (off >= 0xA0 && off < 0xB0)) return 0;
+  return rd16(&io[off]);
+}
+
+void Gba::io_write16(u32 off, u16 v, u16 mask) {
+  const u16 old = rd16(&io[off]);
+  const u16 nv = static_cast<u16>((old & ~mask) | (v & mask));
+  switch (off) {
+  case 0x004: wr16(&io[off], static_cast<u16>((old & 0x0007) | (nv & 0xFF38))); return;
+  case 0x006: return;
+  case 0x100: case 0x104: case 0x108: case 0x10C: {
+    Timer& t = timers_[(off - 0x100) >> 2];
+    t.reload = static_cast<u16>((t.reload & ~mask) | (v & mask));
+    return;
+  }
+  case 0x102: case 0x106: case 0x10A: case 0x10E: {
+    const int i = static_cast<int>((off - 0x100) >> 2);
+    if (mask & 0xFF) timer_write_control(i, static_cast<u16>((timers_[i].control & ~mask) | (v & mask)));
+    return;
+  }
+  case 0x130: return;
+  case 0x132: wr16(&io[off], nv & 0xC3FF); check_keypad_irq(); return;
+  case 0x200: ie = nv & 0x3FFF; update_irq(); return;
+  case 0x202: if_ &= static_cast<u16>(~(v & mask)); update_irq(); return;
+  case 0x204: wr16(&io[off], static_cast<u16>((nv & 0x5FFF) | 0x8000)); rebuild_timing(); return;
+  case 0x208: ime = nv & 1; update_irq(); return;
+  case 0x300:
+    if (mask & 0x00FF) io[0x300] = static_cast<u8>(nv & 1);   // POSTFLG
+    if (mask & 0xFF00) {                                       // HALTCNT: halt (bit 7 clear) or stop; both wait for an IRQ here
+      io[0x301] = static_cast<u8>(nv >> 8);
+      cpu->halted = true;   // the run loop leaves after this instruction
+    }
+    return;
+  default: break;
+  }
+  if (off >= 0xB0 && off < 0xE0) {
+    const int i = static_cast<int>((off - 0xB0) / 12);
+    const u32 base = 0xB0 + static_cast<u32>(i) * 12, r = off - base;
+    Dma& d = dma_[i];
+    if (r == 10) { dma_write_control(i, static_cast<u16>((d.control & ~mask) | (v & mask))); return; }
+    wr16(&io[off], nv);
+    d.sad = rd32(&io[base]); d.dad = rd32(&io[base + 4]); d.count = rd16(&io[base + 8]);
+    return;
+  }
+  wr16(&io[off], nv);
+  if ((off >= 0x28 && off < 0x30) || (off >= 0x38 && off < 0x40)) ppu.ref_written(off);
+}
+
+void Gba::update_irq() {
+  const bool any = (ie & if_ & 0x3FFF) != 0;
+  cpu->hot.irq_pending = (any && (ime & 1)) ? 1u : 0u;
+  if (any && !in_cpu_) cpu->halted = false;
+}
+
+void Gba::set_keys(u16 keyinput) {
+  keyinput_ = keyinput & 0x3FF;
+  check_keypad_irq();
+}
+
+void Gba::check_keypad_irq() {
+  const u16 cnt = rd16(&io[0x132]);
+  if (!(cnt & 0x4000)) return;
+  const u16 want = cnt & 0x3FF, held = static_cast<u16>(~keyinput_ & 0x3FF);
+  if ((cnt & 0x8000) ? (held & want) == want : (held & want) != 0) raise_irq(IRQ_KEYPAD);
+}
+
+// ---- events -----------------------------------------------------------------
+
+void Gba::rescan() {
+  next_at_ = ~u64{0};
+  for (u64 t : ev_at_) next_at_ = std::min(next_at_, t);
+}
+
+void Gba::schedule(Ev e, u64 at) {
+  ev_at_[static_cast<size_t>(e)] = at;
+  next_at_ = std::min(next_at_, at);
+  if (in_cpu_ && at < slice_end_) {   // end the running slice there
+    const u64 t = std::max(at, now());
+    const s32 d = static_cast<s32>(slice_end_ - t);
+    cpu->hot.cycle_budget -= d; slice_budget_ -= d; slice_end_ = t;
+  }
+}
+
+void Gba::cancel(Ev e) { ev_at_[static_cast<size_t>(e)] = ~u64{0}; rescan(); }
+
+void Gba::fire(Ev e, u64 at) {
+  switch (e) {
+  case Ev::Ppu: if (in_hblank_) line_start(at); else hblank_start(at); break;
+  case Ev::Timer0: case Ev::Timer1: case Ev::Timer2: case Ev::Timer3:
+    timer_overflow(static_cast<int>(e) - static_cast<int>(Ev::Timer0), at); break;
+  default: break;
+  }
+}
+
+void Gba::line_start(u64 at) {
+  vcount_ = (vcount_ + 1) % LINES;
+  in_hblank_ = false;
+  const u16 stat = rd16(&io[4]);
+  if (vcount_ == 160) {
+    ppu.vblank();
+    if (stat & 0x08) raise_irq(IRQ_VBLANK);
+    dma_trigger(1);
+    frame_done_ = true;
+  }
+  if (vcount_ == (stat >> 8) && (stat & 0x20)) raise_irq(IRQ_VCOUNT);
+  schedule(Ev::Ppu, at + HDRAW_CYCLES);
+}
+
+void Gba::hblank_start(u64 at) {
+  in_hblank_ = true;
+  if (vcount_ < GBA_H) { ppu.render_line(vcount_); ppu.line_done(); }
+  if (rd16(&io[4]) & 0x10) raise_irq(IRQ_HBLANK);
+  if (vcount_ < GBA_H) dma_trigger(2);
+  schedule(Ev::Ppu, at + (CYCLES_PER_LINE - HDRAW_CYCLES));
+}
+
+// ---- timers -----------------------------------------------------------------
+
+u16 Gba::timer_read(int i) {
+  const Timer& t = timers_[i];
+  if (!timer_counting(i)) return t.counter;
+  return static_cast<u16>(t.counter + ((now() - t.start) >> timer_shift(t.control)));
+}
+
+void Gba::timer_freeze(int i) { timers_[i].counter = timer_read(i); timers_[i].start = now(); }
+
+void Gba::timer_schedule(int i) {
+  const Ev e = static_cast<Ev>(static_cast<int>(Ev::Timer0) + i);
+  if (!timer_counting(i)) { if (ev_at_[static_cast<size_t>(e)] != ~u64{0}) cancel(e); return; }
+  const Timer& t = timers_[i];
+  schedule(e, t.start + ((u64{0x10000} - t.counter) << timer_shift(t.control)));
+}
+
+void Gba::timer_write_control(int i, u16 v) {
+  Timer& t = timers_[i];
+  if (timer_counting(i)) timer_freeze(i);
+  const u16 old = t.control;
+  t.control = v & (i == 0 ? 0xC3 : 0xC7);
+  if (!(old & 0x80) && (v & 0x80)) t.counter = t.reload;
+  t.start = now();
+  timer_schedule(i);
+}
+
+void Gba::timer_overflow(int i, u64 at) {
+  Timer& t = timers_[i];
+  t.counter = t.reload;
+  t.start = at;
+  if (t.control & 0x40) raise_irq(static_cast<u16>(IRQ_TIMER0 << i));
+  // Phase 3: Direct Sound FIFO A/B are clocked from here (SOUNDCNT_H bits 10/14).
+  if (i < 3) timer_tick_cascade(i + 1, at);
+  timer_schedule(i);
+}
+
+void Gba::timer_tick_cascade(int i, u64 at) {
+  Timer& t = timers_[i];
+  if (!(t.control & 0x80) || !(t.control & 4)) return;
+  if (++t.counter == 0) timer_overflow(i, at);
+}
+
+// ---- DMA --------------------------------------------------------------------
+
+void Gba::dma_write_control(int i, u16 v) {
+  Dma& d = dma_[i];
+  const u16 old = d.control;
+  d.control = v & (i == 3 ? 0xFFE0 : 0xF7E0);
+  if (!(old & 0x8000) && (v & 0x8000)) {
+    d.src = d.sad & (i == 0 ? 0x07FFFFFFu : 0x0FFFFFFFu);
+    d.dst = d.dad & (i == 3 ? 0x0FFFFFFFu : 0x07FFFFFFu);
+    const u32 n = i == 3 ? d.count : (d.count & 0x3FFF);
+    d.left = n ? n : (i == 3 ? 0x10000u : 0x4000u);
+    if (((d.control >> 12) & 3) == 0) dma_run(i);
+  }
+}
+
+void Gba::dma_trigger(u32 timing) {
+  for (int i = 0; i < 4; ++i)
+    if ((dma_[i].control & 0x8000) && ((dma_[i].control >> 12) & 3) == timing) dma_run(i);
+}
+
+void Gba::dma_run(int i) {
+  Dma& d = dma_[i];
+  const u16 ctl = d.control;
+  const u32 timing = (ctl >> 12) & 3;
+  if (timing == 3) return;   // sound FIFO (DMA1/2) and video capture (DMA3): phase 3
+  const bool word = ctl & 0x400;
+  const s32 step = word ? 4 : 2;
+  const u32 dmode = (ctl >> 5) & 3, smode = (ctl >> 7) & 3;
+  s32 sinc = smode == 1 ? -step : smode == 2 ? 0 : step;
+  const s32 dinc = dmode == 1 ? -step : dmode == 2 ? 0 : step;
+  if (d.src >= 0x08000000 && d.src < 0x0E000000) sinc = step;   // cartridge reads always increment
+  const u32 n = d.left;
+  u32 src = d.src, dst = d.dst;
+  const u8* ts = timing_[src >> 15].data();
+  const u8* td = timing_[dst >> 15].data();
+  u64 cycles = 2;
+  for (u32 k = 0; k < n; ++k) {
+    if (word) {
+      const u32 v = src >= 0x02000000 ? read32(src) : dma_latch_;
+      write32(dst, v);
+      dma_latch_ = v;
+    } else {
+      const u16 v = src >= 0x02000000 ? read16(src) : static_cast<u16>(dma_latch_ >> ((dst & 2) * 8));
+      write16(dst, v);
+      dma_latch_ = v * 0x10001u;
+    }
+    src += static_cast<u32>(sinc); dst += static_cast<u32>(dinc);
+  }
+  cycles += word ? (ts[2] + td[2] + (n - 1) * (ts[3] + td[3])) : (ts[0] + td[0] + (n - 1) * (ts[1] + td[1]));
+  d.src = src;
+  d.dst = dmode == 3 ? (d.dad & (i == 3 ? 0x0FFFFFFFu : 0x07FFFFFFu)) : dst;
+  if ((ctl & 0x200) && timing != 0) {
+    const u32 c = i == 3 ? d.count : (d.count & 0x3FFF);
+    d.left = c ? c : (i == 3 ? 0x10000u : 0x4000u);
+  } else {
+    d.control &= 0x7FFF;
+  }
+  if (ctl & 0x4000) raise_irq(static_cast<u16>(IRQ_DMA0 << i));
+  if (in_cpu_) cpu->hot.cycle_budget -= static_cast<s32>(cycles);
+  else now_ += cycles;
+}
+
+// ---- running ----------------------------------------------------------------
+
+void Gba::reset() {
+  cpu->reset(Cpu::ARM7, nullptr);
+  cpu->host = this;
+  std::memset(ewram.get(), 0, EWRAM_SIZE);
+  std::memset(iwram.get(), 0, IWRAM_SIZE);
+  std::memset(palette.get(), 0, 2 * PALETTE_SIZE);
+  std::memset(vram.get(), 0, VRAM_SIZE);
+  std::memset(oam.get(), 0, 2 * OAM_SIZE);
+  io.fill(0);
+  wr16(&io[0x88], 0x0200);   // SOUNDBIAS
+  for (u32 m : {0x20u, 0x26u, 0x30u, 0x36u}) wr16(&io[m], 0x0100);   // BG2/BG3 PA and PD: identity
+  wr16(&io[0x204], 0x8000);
+  ie = if_ = ime = 0;
+  timers_ = {};
+  dma_ = {};
+  ev_at_.fill(~u64{0});
+  next_at_ = ~u64{0};
+  now_ = 0;
+  in_cpu_ = false;
+  vcount_ = 0;
+  in_hblank_ = false;
+  keyinput_ = 0x3FF;
+  dma_latch_ = 0;
+  bios_latch_ = 0;
+  pipe = {};
+  frame_count = 0;
+  rebuild_timing();
+  ppu.reset();
+  schedule(Ev::Ppu, HDRAW_CYCLES);
+  if (skip_bios) {
+    // Where the BIOS leaves things when it jumps to the cartridge.
+    cpu->hot.regs[13] = 0x03007FE0;           // SVC (the mode after reset)
+    cpu->bank_r13[2] = 0x03007FA0;            // IRQ
+    cpu->set_cpsr(0x1F);                      // SYS
+    cpu->hot.regs[13] = 0x03007F00;
+    cpu->hot.regs[15] = 0x08000000 + 8;
+    cpu->code_cycles = 0x08000000 >> 15; cpu->code_region = 0x08;
+    bios_latch_ = 0xE129F000;
+    io[0x300] = 1;                            // POSTFLG
+  }
+}
+
+void Gba::run_cpu_until(u64 until) {
+  if (cpu->halted) { now_ = until; return; }
+  const s64 slice = std::min<s64>(static_cast<s64>(until - now_), s64{1} << 20);
+  slice_budget_ = static_cast<s32>(slice);
+  cpu->hot.cycle_budget = slice_budget_;
+  slice_end_ = now_ + static_cast<u64>(slice);
+  in_cpu_ = true;
+  gba_interp::run(*cpu);
+  in_cpu_ = false;
+  now_ += static_cast<u64>(static_cast<s64>(slice_budget_) - cpu->hot.cycle_budget);
+  if (cpu->halted && (ie & if_ & 0x3FFF)) cpu->halted = false;   // halted with an IRQ already pending
+}
+
+void Gba::run_frame() {
+  ExactTiming exact;
+  frame_done_ = false;
+  while (!frame_done_) {
+    if (now_ < next_at_) run_cpu_until(next_at_);
+    while (next_at_ <= now_) {
+      size_t e = 0;
+      for (size_t k = 1; k < ev_at_.size(); ++k) if (ev_at_[k] < ev_at_[e]) e = k;
+      const u64 at = ev_at_[e];
+      ev_at_[e] = ~u64{0};
+      rescan();
+      fire(static_cast<Ev>(e), at);
+    }
+  }
+  ++frame_count;
+}
+
+// ---- save states ------------------------------------------------------------
+
+template <class S> void Gba::sync_state(S& s) {
+  s.begin("GBAM");
+  s.blob(ewram.get(), EWRAM_SIZE);
+  s.blob(iwram.get(), IWRAM_SIZE);
+  s.blob(palette.get(), 2 * PALETTE_SIZE);
+  s.blob(vram.get(), VRAM_SIZE);
+  s.blob(oam.get(), 2 * OAM_SIZE);
+  s.blob(sram.get(), SRAM_SIZE);
+  s.blob(io.data(), IO_SIZE);
+  s.fields(ie, if_, ime, ev_at_, now_, vcount_, in_hblank_, keyinput_, bios_latch_, dma_latch_, frame_count);
+  for (Timer& t : timers_) s.fields(t.reload, t.control, t.counter, t.start);
+  for (Dma& d : dma_) s.fields(d.sad, d.dad, d.count, d.control, d.src, d.dst, d.left);
+  s.end();
+  cpu->sync_state(s);
+  ppu.sync_state(s);
+}
+template void Gba::sync_state<state::Writer>(state::Writer&);
+template void Gba::sync_state<state::Reader>(state::Reader&);
+
+void Gba::after_load() {
+  cpu->host = this;
+  pipe = {};
+  rebuild_timing();
+  rescan();
+  update_irq();
+}
+
+} // namespace ds::gba

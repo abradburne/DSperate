@@ -1036,6 +1036,14 @@ void Gpu::emit_cells(int screen, u32 line, const u32* src) {
   cell_row_[screen] = j + 1;
 }
 
+void Gpu::show_gba(const u32* px) {
+  constexpr u32 W = 240, H = 160, X0 = (SCREEN_W - W) / 2, Y0 = (SCREEN_H - H) / 2;
+  fb_[0].fill(0xFF000000u);
+  fb_[1].fill(0xFF000000u);
+  for (u32 y = 0; y < H; ++y) std::memcpy(fb_[0].data() + (Y0 + y) * SCREEN_W + X0, px + y * W, W * sizeof(u32));
+  if (scaling()) for (int s = 0; s < 2; ++s) scale_image(s, fb_[s].data());
+}
+
 void Gpu::scale_image(int screen, const u32* src) {
   if (!scale_[screen].px) return;
   for (u32 line = 0; line < SCREEN_H; ++line) emit_scaled(screen, line, src + line * SCREEN_W);

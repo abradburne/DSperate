@@ -26,7 +26,7 @@ u16 rd16(const u8* p) { return static_cast<u16>(p[0] | (p[1] << 8)); }
 u32 rd32(const u8* p) { return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) |
                                (static_cast<u32>(p[2]) << 16) | (static_cast<u32>(p[3]) << 24); }
 
-enum class Kind { Other, Rom, Cia };   // case-insensitive extension match
+enum class Kind { Other, Rom, Cia, Gba };   // case-insensitive extension match
 
 Kind entry_kind(const char* name, size_t len) {
   if (len < 4) return Kind::Other;
@@ -38,6 +38,7 @@ Kind entry_kind(const char* name, size_t len) {
   if (a == 'd' && b == 's' && c == 'i') return Kind::Rom;
   if (a == 's' && b == 'r' && c == 'l') return Kind::Rom;
   if (a == 'c' && b == 'i' && c == 'a') return Kind::Cia;   // SRL in a CIA container
+  if (a == 'g' && b == 'b' && c == 'a') return Kind::Gba;   // a GBA cartridge (find_gba_rom)
   return Kind::Other;
 }
 
@@ -112,7 +113,16 @@ bool is_zip(const u8* data, size_t size) {
   return size >= 4 && rd32(data) == SIG_LOCAL;
 }
 
-bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
+namespace {
+bool find_entry(const u8* zip, size_t size, ZipEntry& entry, std::string& err, bool gba);
+}
+
+bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) { return find_entry(zip, size, entry, err, false); }
+bool find_gba_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) { return find_entry(zip, size, entry, err, true); }
+
+namespace {
+// DS images (.nds/.dsi/.srl/.cia), or with `gba` the first .gba.
+bool find_entry(const u8* zip, size_t size, ZipEntry& entry, std::string& err, bool gba) {
   err.clear();
   // EOCD is last, but a trailing comment of up to 64 KB may follow it.
   if (size < 22) { err = "not a zip archive (too short)"; return false; }
@@ -147,13 +157,13 @@ bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
     p = next;
 
     const Kind kind = entry_kind(reinterpret_cast<const char*>(zip + name_off), name_len);
-    if (kind == Kind::Other) continue;
+    if (kind == Kind::Other || (kind == Kind::Gba) != gba) continue;
     ++rom_seen;
     // Counted rather than fatal: a zip may hold one usable ROM beside another we can't read.
     if (flags & 1) { ++skipped_crypt; continue; }
     if (csize == 0xFFFFFFFFu || usize == 0xFFFFFFFFu || local_off == 0xFFFFFFFFu) { ++skipped_zip64; continue; }
     if (method != METHOD_STORE && method != METHOD_DEFLATE) { ++skipped_method; continue; }
-    if (usize < 0x160) continue;      // smaller than a DS header: not a ROM
+    if (usize < (gba ? 0xC0u : 0x160u)) continue;      // smaller than a header: not a ROM
     if (usize > MAX_ROM) { ++skipped_huge; continue; }
 
     Entry e;
@@ -165,7 +175,7 @@ bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   }
 
   if (cands.empty()) {
-    if (!rom_seen) err = "no .nds, .dsi, .srl or .cia file in the archive";
+    if (!rom_seen) err = gba ? "no .gba file in the archive" : "no .nds, .dsi, .srl or .cia file in the archive";
     else if (skipped_crypt) err = "the ROM in the archive is encrypted";
     else if (skipped_zip64) err = "the archive is zip64, which is not supported";
     else if (skipped_method) err = "the ROM uses an unsupported compression method";
@@ -180,7 +190,7 @@ bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   for (size_t i = 0; i < cands.size(); ++i) if (!cands[i].cia) bare.push_back(i);
 
   size_t best = bare.empty() ? 0 : bare[0];
-  if (bare.size() > 1) {
+  if (bare.size() > 1 && !gba) {
     int best_known = -1, best_rev = -1;
     for (size_t i : bare) {
       size_t off = 0;
@@ -208,6 +218,7 @@ bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   entry.csize = e.csize; entry.usize = e.usize; entry.crc32 = e.crc;
   return true;
 }
+} // namespace
 
 u32 crc32_update(u32 crc, const u8* data, size_t n) {
   static const u32* table = [] {
@@ -269,6 +280,21 @@ size_t peek_entry(const u8* zip, size_t size, const ZipEntry& entry, u8* out, si
 
 std::string cia_refusal(const std::string& name) {
   return "the archive holds " + name + ", a DSiWare CIA; it runs in DSi mode, which needs the DSi BIOS dumps";
+}
+
+bool extract_gba_rom(const u8* zip, size_t size, std::vector<u8>& out, std::string& err, std::string* chosen) {
+  ZipEntry e;
+  if (!find_gba_rom(zip, size, e, err)) return false;
+  out.clear();
+  out.reserve(static_cast<size_t>(e.usize));
+  auto sink = [](void* user, const u8* p, size_t n) {
+    auto& v = *static_cast<std::vector<u8>*>(user);
+    v.insert(v.end(), p, p + n);
+    return true;
+  };
+  if (!inflate_entry(zip, size, e, sink, &out, nullptr, nullptr, err)) { out.clear(); return false; }
+  if (chosen) *chosen = e.name;
+  return true;
 }
 
 bool extract_rom(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
