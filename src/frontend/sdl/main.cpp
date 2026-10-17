@@ -7,6 +7,7 @@
 // handheld needs (volume, layout, screenshots, save states), and the pause
 // key opens a blitted menu over the held frame (menu.h).
 #include "frontend/sdl/gl_hires.h"
+#include "core/gpu/kernels.h"
 #include "frontend/sdl/present_thread.h"
 #include "core/cpu/timing_mode.h"
 #include "core/nds.h"
