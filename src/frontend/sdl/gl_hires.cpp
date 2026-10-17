@@ -52,7 +52,9 @@ void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; 
 )";
 
 // ds_shade.glsl's shade_pixel; the texel arena is a 4096-wide R32UI texture.
-const char* kRasterFS = R"(#version 310 es
+// EARLY: for polygons whose alpha cannot fail the test -- no discard, so the
+// depth test (and Mali's forward pixel kill) runs before shading.
+const char* kRasterFS = R"(
 precision highp float; precision highp int; precision highp usampler2D;
 in vec3 v_rgb; in vec2 v_st; flat in uvec4 v_poly; flat in uint v_flags;
 uniform highp usampler2D u_texels;
@@ -96,7 +98,9 @@ void main() {
     uint tc = u_toon[vr >> 1];
     r = min(r + c15_to_18(tc, 0u), 63u); g = min(g + c15_to_18(tc, 4u), 63u); b = min(b + c15_to_18(tc, 9u), 63u);
   }
+#ifndef EARLY
   if (a <= u_alpha_ref) discard;
+#endif
   // Raw 6-bit channels; alpha (a + 1) * 8 so the blend's SRC_ALPHA is (a + 1) / 32, as the lean raster.
   uint ab = a == 0u ? 0u : min(255u, (a + 1u) * 8u);
   o_col = vec4(float(r), float(g), float(b), float(ab)) / 255.0;
@@ -235,7 +239,9 @@ GLuint tex2d(GLenum fmt, GLsizei w, GLsizei h) {
 
 struct GlHires::Impl {
   u32 S = 2;
-  GLuint raster = 0, comp = 0;
+  GLuint raster = 0, raster_early = 0, comp = 0;
+  GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1;
+  std::vector<std::pair<float, u32>> order;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
   size_t vbo_cap = 0;
@@ -259,6 +265,7 @@ struct GlHires::Impl {
     if (vao) glDeleteVertexArrays(1, &vao);
     if (vao_empty) glDeleteVertexArrays(1, &vao_empty);
     if (raster) glDeleteProgram(raster);
+    if (raster_early) glDeleteProgram(raster_early);
     if (comp) glDeleteProgram(comp);
   }
 };
@@ -271,7 +278,16 @@ bool GlHires::init(u32 scale, std::string* why) {
   Impl& d = *d_;
   d.S = scale_ = std::clamp(scale, 2u, 4u);
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
-  d.raster = program(kRasterVS, kRasterFS, why);
+  const std::string fs_late = std::string("#version 310 es\n") + kRasterFS;
+  const std::string fs_early = std::string("#version 310 es\n#define EARLY 1\nlayout(early_fragment_tests) in;\n") + kRasterFS;
+  d.raster = program(kRasterVS, fs_late.c_str(), why);
+  d.raster_early = program(kRasterVS, fs_early.c_str(), why);
+  if (!d.raster_early) return false;
+  d.e_dispcnt = glGetUniformLocation(d.raster_early, "u_dispcnt");
+  d.e_alpha_ref = glGetUniformLocation(d.raster_early, "u_alpha_ref");
+  d.e_toon = glGetUniformLocation(d.raster_early, "u_toon");
+  glUseProgram(d.raster_early);
+  glUniform1i(glGetUniformLocation(d.raster_early, "u_texels"), 0);
   d.comp = program(kFullVS, kCompositeFS, why);
   if (!d.raster || !d.comp) return false;
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
@@ -342,46 +358,66 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   }
 
   const auto T1 = clk::now();
-  // Fans, placed as lean.vert places them; the prefix first, then the tail in runs.
+  // Fans, placed as lean.vert places them. The opaque prefix is order-free
+  // (the depth test decides), so it is redrawn for the hardware: polygons
+  // that cannot fail the alpha test first, near to far, with the early-depth
+  // shader; then the cut-out ones; then the tail in list order, in runs.
   d.vb.clear();
   std::vector<std::pair<u32, u32>> runs;   // tail: [first vertex, key] where key = translucent | depth-write << 1
-  u32 opaque_end = 0;
-  for (u32 k = 0; k < dl.npoly; ++k) {
-    const GpuPoly& p = dl.polys[k];
-    if (k == f.first_ordered) opaque_end = static_cast<u32>(d.vb.size());
-    if (p.nverts < 3) continue;
-    if (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW)) continue;   // shadow volumes: not yet
-    if (k >= f.first_ordered) {
-      const u32 key = ((p.flags & DS_PF_TRANSLUCENT) ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u);
-      if (runs.empty() || runs.back().second != key) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
+  auto vert = [&](const GpuPoly& p, u32 vi) {
+    const GpuVert& vt = dl.verts[p.first_vert + vi];
+    const float w = std::max(static_cast<float>(vt.w), 1.f);
+    const float cx = 0.5f * static_cast<float>(p.xmin + p.xmax);
+    const float sxf = static_cast<float>(vt.sx), syf = static_cast<float>(vt.sy);
+    float ox = sxf > cx ? 1.f : 0.f, oy = 0.f;
+    if (ox > 0.f) {
+      const u32 n = p.nverts;
+      const float sxp = static_cast<float>(dl.verts[p.first_vert + (vi + n - 1) % n].sx), sxn = static_cast<float>(dl.verts[p.first_vert + (vi + 1) % n].sx);
+      if (sxp == sxf || sxn == sxf) ox = 0.f;
     }
-    auto vert = [&](u32 vi) {
-      const GpuVert& vt = dl.verts[p.first_vert + vi];
-      const float w = std::max(static_cast<float>(vt.w), 1.f);
-      const float cx = 0.5f * static_cast<float>(p.xmin + p.xmax);
-      const float sxf = static_cast<float>(vt.sx), syf = static_cast<float>(vt.sy);
-      float ox = sxf > cx ? 1.f : 0.f, oy = 0.f;
-      if (ox > 0.f) {
-        const u32 n = p.nverts;
-        const float sxp = static_cast<float>(dl.verts[p.first_vert + (vi + n - 1) % n].sx), sxn = static_cast<float>(dl.verts[p.first_vert + (vi + 1) % n].sx);
-        if (sxp == sxf || sxn == sxf) ox = 0.f;
-      }
-      if (p.xmax == p.xmin) ox = (vi == 1 || vi == 2) ? 1.f : 0.f;
-      if (p.ybot == p.ytop) oy = (vi == 1 || vi == 2) ? 1.f : 0.f;
-      const float x = (sxf + ox) / 256.f * 2.f - 1.f, y = (syf + oy) / 192.f * 2.f - 1.f;
-      float z = std::clamp(static_cast<float>(vt.z), 0.f, 16777215.f);
-      if (p.attr & 0x4000u) z = std::max(z - (wbuf ? 255.f : 512.f), 0.f);
-      const float zc = wbuf ? (1.f / std::max(z, 1.f)) : (z / 16777215.f);
-      Vtx o{};
-      o.pos[0] = x * w; o.pos[1] = y * w; o.pos[2] = (zc * 2.f - 1.f) * w; o.pos[3] = w;
-      o.rgb[0] = static_cast<float>(vt.r); o.rgb[1] = static_cast<float>(vt.g); o.rgb[2] = static_cast<float>(vt.b);
-      o.st[0] = static_cast<float>(vt.s); o.st[1] = static_cast<float>(vt.t);
-      o.attr = p.attr; o.texparam = p.texparam; o.tex_offset = p.tex_offset; o.tex_wh = p.tex_w | (p.tex_h << 16); o.flags = p.flags;
-      return o;
-    };
-    for (u32 t = 1; t + 1 < p.nverts; ++t) { d.vb.push_back(vert(0)); d.vb.push_back(vert(t)); d.vb.push_back(vert(t + 1)); }
+    if (p.xmax == p.xmin) ox = (vi == 1 || vi == 2) ? 1.f : 0.f;
+    if (p.ybot == p.ytop) oy = (vi == 1 || vi == 2) ? 1.f : 0.f;
+    const float x = (sxf + ox) / 256.f * 2.f - 1.f, y = (syf + oy) / 192.f * 2.f - 1.f;
+    float z = std::clamp(static_cast<float>(vt.z), 0.f, 16777215.f);
+    if (p.attr & 0x4000u) z = std::max(z - (wbuf ? 255.f : 512.f), 0.f);
+    const float zc = wbuf ? (1.f / std::max(z, 1.f)) : (z / 16777215.f);
+    Vtx o{};
+    o.pos[0] = x * w; o.pos[1] = y * w; o.pos[2] = (zc * 2.f - 1.f) * w; o.pos[3] = w;
+    o.rgb[0] = static_cast<float>(vt.r); o.rgb[1] = static_cast<float>(vt.g); o.rgb[2] = static_cast<float>(vt.b);
+    o.st[0] = static_cast<float>(vt.s); o.st[1] = static_cast<float>(vt.t);
+    o.attr = p.attr; o.texparam = p.texparam; o.tex_offset = p.tex_offset; o.tex_wh = p.tex_w | (p.tex_h << 16); o.flags = p.flags;
+    return o;
+  };
+  auto fan = [&](const GpuPoly& p) { for (u32 t = 1; t + 1 < p.nverts; ++t) { d.vb.push_back(vert(p, 0)); d.vb.push_back(vert(p, t)); d.vb.push_back(vert(p, t + 1)); } };
+  const u32 prefix = std::min(f.first_ordered, dl.npoly);
+  const bool none_fail = f.alpha_ref == 0;   // with alpha_ref 0 only a 0-alpha pixel fails: one that cannot have one never does
+  d.order.clear();
+  for (u32 k = 0; k < prefix; ++k) {
+    const GpuPoly& p = dl.polys[k];
+    if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
+    const bool early = !(p.flags & DS_PF_TEX_ALPHA) && (none_fail || ((p.attr >> 16) & 0x1F) > f.alpha_ref) && ((p.attr >> 16) & 0x1F) != 0;
+    if (!early) continue;
+    s32 zmin = 0x7FFFFFFF;
+    for (u32 v = 0; v < p.nverts; ++v) zmin = std::min(zmin, dl.verts[p.first_vert + v].z);
+    d.order.emplace_back(static_cast<float>(zmin), k);
   }
-  if (f.first_ordered >= dl.npoly) opaque_end = static_cast<u32>(d.vb.size());
+  std::sort(d.order.begin(), d.order.end());
+  for (const auto& e : d.order) fan(dl.polys[e.second]);
+  const u32 early_end = static_cast<u32>(d.vb.size());
+  for (u32 k = 0; k < prefix; ++k) {
+    const GpuPoly& p = dl.polys[k];
+    if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
+    const bool early = !(p.flags & DS_PF_TEX_ALPHA) && (none_fail || ((p.attr >> 16) & 0x1F) > f.alpha_ref) && ((p.attr >> 16) & 0x1F) != 0;
+    if (!early) fan(p);
+  }
+  const u32 opaque_end = static_cast<u32>(d.vb.size());
+  for (u32 k = prefix; k < dl.npoly; ++k) {
+    const GpuPoly& p = dl.polys[k];
+    if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;   // shadow volumes: not yet
+    const u32 key = ((p.flags & DS_PF_TRANSLUCENT) ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u);
+    if (runs.empty() || runs.back().second != key) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
+    fan(p);
+  }
   const u32 total = static_cast<u32>(d.vb.size());
 
   const auto T2 = clk::now();
@@ -402,15 +438,20 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glClearDepthf(wbuf ? 1.f / std::max(cz, 1.f) : std::min(1.f, cz / 16777215.f));
   glDepthMask(GL_TRUE); glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-  glUseProgram(d.raster);
-  glUniform1ui(d.u_dispcnt, f.dispcnt);
-  glUniform1ui(d.u_alpha_ref, f.alpha_ref);
-  glUniform1uiv(d.u_toon, 32, dl.post.toon);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.arena);
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(wbuf ? GL_GREATER : GL_LESS);
   glDisable(GL_BLEND);
-  if (opaque_end) glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(opaque_end));
+  if (early_end) {
+    glUseProgram(d.raster_early);
+    glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(early_end));
+  }
+  glUseProgram(d.raster);
+  glUniform1ui(d.u_dispcnt, f.dispcnt);
+  glUniform1ui(d.u_alpha_ref, f.alpha_ref);
+  glUniform1uiv(d.u_toon, 32, dl.post.toon);
+  if (opaque_end > early_end) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(early_end), static_cast<GLsizei>(opaque_end - early_end));
   for (size_t r = 0; r < runs.size(); ++r) {
     const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
     const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
