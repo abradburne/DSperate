@@ -51,9 +51,9 @@ out vec3 v_rgb;
 out vec2 v_st;
 flat out uvec4 v_poly;
 flat out uint v_flags;
-out float v_zp;                  // the DS depth, perspective-correct (W-buffer frames)
-noperspective out float v_zl;    // and linear across the screen (Z-buffer frames)
-void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; v_flags = a_flags; v_zp = a_dz; v_zl = a_dz; }
+out float v_zp;    // the DS depth, perspective-correct (W-buffer frames)
+out vec2 v_zw;     // (z w, w): their ratio is z linear across the screen (Z-buffer frames; GLES has no noperspective)
+void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; v_flags = a_flags; v_zp = a_dz; v_zw = vec2(a_dz * a_pos.w, a_pos.w); }
 )";
 
 // ds_shade.glsl's shade_pixel; the texel arena is a 4096-wide R32UI texture.
@@ -62,7 +62,7 @@ void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; 
 const char* kRasterFS = R"(
 precision highp float; precision highp int; precision highp usampler2D;
 in vec3 v_rgb; in vec2 v_st; flat in uvec4 v_poly; flat in uint v_flags;
-in float v_zp; noperspective in float v_zl;
+in float v_zp; in vec2 v_zw;
 uniform highp usampler2D u_texels;
 uniform uint u_dispcnt, u_alpha_ref;
 uniform uint u_toon[32];
@@ -118,7 +118,7 @@ void main() {
   // depth tie exactly, so LESS (the earlier polygon keeps the pixel) decides
   // as on the DS. (Through GL's -1..1 clip depth the W-buffer's 1/w lost all
   // its precision: neighbouring surfaces fought and parts vanished.)
-  float zds = u_wbuf != 0 ? v_zp : v_zl;
+  float zds = u_wbuf != 0 ? v_zp : v_zw.x / v_zw.y;
   gl_FragDepth = clamp(floor(zds + 0.5), 0.0, 16777215.0) / 16777216.0;
 }
 )";
