@@ -613,6 +613,7 @@ int main(int argc, char** argv) {
   FILE* rec3d_out = rec3d_path ? std::fopen(rec3d_path, "wb") : nullptr;
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
   if (gpu_dump_path && gpu_dump_frame >= 0) nds.gpu3d.renderer().set_gpu_dump(gpu_dump_path, static_cast<ds::u64>(gpu_dump_frame));
+  if (const char* gs = std::getenv("DS_GPU3D_SCALE")) nds.gpu3d.renderer().set_gpu_scale(static_cast<ds::u32>(std::clamp(std::atoi(gs), 1, 4)));
   if (gpu3d) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); }
   FILE* hash_out = hash_frames ? std::fopen(hash_frames, "w") : nullptr;
   if (hash_frames && !hash_out) { std::fprintf(stderr, "could not open %s\n", hash_frames); return 1; }
@@ -829,6 +830,22 @@ int main(int argc, char** argv) {
     if (rec3d_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
       const auto ref = nds.gpu3d.frame_ref(false);
       for (int y = 0; y < static_cast<int>(ds::SCREEN_H); ++y) std::fwrite(nds.gpu3d.line(ref, static_cast<ds::u32>(y)), 4, ds::SCREEN_W, rec3d_out);
+    }
+    // DS_HIRES_DUMP=<frame>:<prefix>: that frame's 3D layer as PPMs, at 1x and
+    // at the GPU raster's internal resolution (<prefix>-1x.ppm, <prefix>-hi.ppm).
+    if (static const char* hd = std::getenv("DS_HIRES_DUMP"); hd && std::strchr(hd, ':') && i == std::atoi(hd)) {
+      const auto ref = nds.gpu3d.frame_ref(false);
+      (void)nds.gpu3d.line(ref, 0);   // resolves a GPU frame's record
+      auto ppm = [](const std::string& path, const ds::u32* px, ds::u32 w, ds::u32 h) {
+        FILE* f = std::fopen(path.c_str(), "wb"); if (!f) return;
+        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+        for (ds::u32 k = 0; k < w * h; ++k) { const ds::u32 c = px[k]; const unsigned char rgb[3] = {static_cast<unsigned char>((c & 0x3F) * 255 / 63), static_cast<unsigned char>(((c >> 8) & 0x3F) * 255 / 63), static_cast<unsigned char>(((c >> 16) & 0x3F) * 255 / 63)}; std::fwrite(rgb, 1, 3, f); }
+        std::fclose(f);
+      };
+      const std::string pre = std::strchr(hd, ':') + 1;
+      ppm(pre + "-1x.ppm", ref.out ? ref.out : nds.gpu3d.line(ref, 0), 256, 192);
+      if (ref.hires) ppm(pre + "-hi.ppm", ref.hires, 256 * ref.hires_scale, 192 * ref.hires_scale);
+      std::fprintf(stderr, "hires dump: frame %d, scale %u%s\n", i, ref.hires_scale, ref.hires ? "" : " (no hi-res record)");
     }
     if (hash_out) {
       auto fnv = [](const ds::u32* p) { ds::u64 h = 1469598103934665603ull; for (ds::u32 k = 0; k < ds::SCREEN_W * ds::SCREEN_H; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };

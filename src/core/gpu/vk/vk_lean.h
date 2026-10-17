@@ -21,7 +21,10 @@ namespace ds::gpu::vk {
 class Lean {
 public:
   // `msaa`: 4x MSAA where the device has it (video.aa on the GPU raster); else 1 sample.
-  static std::unique_ptr<Lean> create(Device& dev, bool msaa, std::string* why = nullptr);
+  // `scale`: the internal resolution, 1-4 (256S x 192S). Above 1 the frame is
+  // drawn and resolved at that size; output() is then its 1x record, each
+  // pixel the centre sample of its SxS block, and hires() the whole record.
+  static std::unique_ptr<Lean> create(Device& dev, bool msaa, u32 scale = 1, std::string* why = nullptr);
   ~Lean();
   Lean(const Lean&) = delete;
   Lean& operator=(const Lean&) = delete;
@@ -52,6 +55,11 @@ public:
   // stall); else a wait on the newest. Null before the first frame.
   const u32* newest_ready(bool allow_lag);
   bool has_frame() const;
+  u32 scale() const;
+  // The frame newest_ready()/output() last returned, at the internal
+  // resolution: (256 * scale) x (192 * scale) words in output()'s layout.
+  // Null at scale 1 or before the first frame.
+  const u32* hires() const;
 
   // GPU time of the last waited frame in ns (DS_VK_TIMING=1 and timestamps), else 0.
   u64 gpu_ns() const;

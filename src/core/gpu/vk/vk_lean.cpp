@@ -8,7 +8,7 @@
 namespace ds::gpu::vk {
 struct Lean::Impl {};
 Lean::~Lean() = default;
-std::unique_ptr<Lean> Lean::create(Device&, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
+std::unique_ptr<Lean> Lean::create(Device&, bool, u32, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
 bool Lean::msaa() const { return false; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
@@ -20,6 +20,8 @@ void Lean::wait_all() {}
 const u32* Lean::output() { return nullptr; }
 const u32* Lean::newest_ready(bool) { return nullptr; }
 bool Lean::has_frame() const { return false; }
+u32 Lean::scale() const { return 1; }
+const u32* Lean::hires() const { return nullptr; }
 u64 Lean::gpu_ns() const { return 0; }
 u32 Lean::draws() const { return 0; }
 Lean::Stats Lean::stats(bool) { return {}; }
@@ -40,7 +42,7 @@ Lean::Stats Lean::stats(bool) { return {}; }
 namespace ds::gpu::vk {
 
 namespace {
-constexpr u32 W = 256, H = 192;
+constexpr u32 W1 = 256, H1 = 192;   // the DS frame; the attachments are W x H = (W1 x H1) * scale
 constexpr u32 kTexelWords = 2u << 20;   // 8 MB of decoded texels
 constexpr u32 kMaxDraws = 4096;
 // Stencil layout: bit 7 drawn, bit 6 shadow mask, bit 5 the last write was
@@ -60,6 +62,9 @@ struct Lean::Impl {
   const Api* api = nullptr;
   Device* dev = nullptr;
   bool msaa = false, timing = false;
+  u32 S = 1, W = W1, H = H1;   // internal resolution
+  std::vector<u32> out1[4];    // per slot at S > 1: the 1x record (centre samples of out[])
+  u32 last_slot = ~0u;         // the slot newest_ready() last returned
   double tick_ns = 0;
   VkFormat ds_format = VK_FORMAT_D24_UNORM_S8_UINT;
 
@@ -139,12 +144,14 @@ u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return static_c
 GpuPost* Lean::post_buffer() { return &d_->host_post; }
 const u32* Lean::output() { return newest_ready(false); }
 bool Lean::has_frame() const { return d_->gen != 0; }
+u32 Lean::scale() const { return d_->S; }
+const u32* Lean::hires() const { return d_->S > 1 && d_->last_slot < Impl::kSlots ? static_cast<const u32*>(d_->out[d_->last_slot].ptr) : nullptr; }
 u64 Lean::gpu_ns() const { return d_->last_gpu_ns; }
 u32 Lean::draws() const { return d_->last_draws; }
 Lean::Stats Lean::stats(bool reset) { std::lock_guard<std::mutex> lk(d_->m); Stats s = d_->st; if (reset) d_->st = Stats{}; return s; }
 static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
+std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, u32 scale, std::string* why) {
   auto fail_null = [&](const char* m) { if (why) *why = m; return nullptr; };
   const DeviceInternal* vk = dev.internal();
   if (!vk || !vk->api) return fail_null("no Vulkan context");
@@ -154,6 +161,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   self->d_ = std::make_unique<Impl>();
   Impl& d = *self->d_;
   d.vk = vk; d.api = &a; d.dev = &dev;
+  d.S = std::clamp(scale, 1u, 4u); d.W = W1 * d.S; d.H = H1 * d.S;
+  const u32 W = d.W, H = d.H;
   auto fail = [&](const char* m) { if (why) *why = m; return nullptr; };
   d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
@@ -168,6 +177,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     d.verts[i] = dev.alloc(sizeof(GpuVert) * DS_MAX_VERTS, Access::CpuWrite);
     d.post[i] = dev.alloc(sizeof(GpuPost), Access::CpuWrite);
     d.out[i] = dev.alloc(sizeof(u32) * W * H, Access::CpuRead);
+    if (d.S > 1) d.out1[i].resize(W1 * H1);
     if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i]) return fail("buffer allocation");
   }
   {
@@ -399,7 +409,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     }
   }
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil\n", d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
+  std::fprintf(stderr, "gpu lean: %ux (%ux%u)%s, %s depth/stencil\n", d.S, W, H, d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
   return self;
 }
 
@@ -407,6 +417,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   Impl& d = *d_;
   const Api& a = *d.api;
   const DeviceInternal* vk = d.vk;
+  const u32 W = d.W, H = d.H;
   if (npoly > DS_MAX_POLYS || nvert > DS_MAX_VERTS || ntexels > kTexelWords) return false;
   const u32 slot = static_cast<u32>(d.gen % Impl::kSlots);
   const double t_in = now_ms();
@@ -587,7 +598,13 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
 static void finish_slot(Lean::Impl& d, u32 slot) {
   const Api& a = *d.api;
   d.fence_live[slot] = false;
-  d.dev->invalidate(d.out[slot], 0, sizeof(u32) * W * H);
+  d.dev->invalidate(d.out[slot], 0, sizeof(u32) * d.W * d.H);
+  if (d.S > 1) {   // the 1x record: each DS pixel's centre sample
+    const u32* hi = static_cast<const u32*>(d.out[slot].ptr);
+    u32* lo = d.out1[slot].data();
+    const u32 S = d.S, c = S / 2, W = d.W;
+    for (u32 y = 0; y < H1; ++y) { const u32* row = hi + (y * S + c) * W + c; for (u32 x = 0; x < W1; ++x) lo[y * W1 + x] = row[x * S]; }
+  }
   d.valid[slot] = true;
   if (d.timing) {
     u64 t[2] = {0, 0};
@@ -622,15 +639,16 @@ const u32* Lean::newest_ready(bool allow_lag) {
   const u32 newest = static_cast<u32>((d.gen - 1) % Impl::kSlots);
   if (d.asked_gen != d.gen) { d.asked_gen = d.gen; d.st.gap_ms += now_ms() - d.submit_at[newest]; ++d.st.gap_n; }
   if (d.fence_live[newest] && a.vkGetFenceStatus(d.vk->dev, d.fence[newest]) == VK_SUCCESS) finish_slot(d, newest);
-  if (!d.fence_live[newest]) { ++d.st.newest; return static_cast<const u32*>(d.out[newest].ptr); }
+  auto rec = [&](u32 sl) -> const u32* { d.last_slot = sl; return d.S > 1 ? d.out1[sl].data() : static_cast<const u32*>(d.out[sl].ptr); };
+  if (!d.fence_live[newest]) { ++d.st.newest; return rec(newest); }
   if (allow_lag && d.gen >= 2) {
     const u32 prev = static_cast<u32>((d.gen - 2) % Impl::kSlots);
     if (d.fence_live[prev] && a.vkGetFenceStatus(d.vk->dev, d.fence[prev]) == VK_SUCCESS) finish_slot(d, prev);
-    if (!d.fence_live[prev] && d.valid[prev]) { ++d.st.lagged; return static_cast<const u32*>(d.out[prev].ptr); }
+    if (!d.fence_live[prev] && d.valid[prev]) { ++d.st.lagged; return rec(prev); }
   }
   if (allow_lag) ++d.st.stalled; else ++d.st.nolag;
   wait_locked(d);
-  return static_cast<const u32*>(d.out[newest].ptr);
+  return rec(newest);
 }
 
 } // namespace ds::gpu::vk

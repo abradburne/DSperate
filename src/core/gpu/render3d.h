@@ -78,6 +78,10 @@ public:
   // (texture arena full, list past the buffers) goes to the band workers.
   // May decline (no Vulkan); `why` takes the reason. Coordinator only.
   bool set_gpu(bool on, std::string* why = nullptr);
+  // The GPU raster's internal resolution (1-4), taken when it is next created
+  // (set before set_gpu; video.gpu3d_scale).
+  void set_gpu_scale(u32 s) { gpu_scale_ = s; }
+  u32 gpu_scale() const { return gpu_scale_; }
   bool gpu_active() const { return gpu_on_; }
 private:
   NDS& nds_;
@@ -370,6 +374,8 @@ public:
     // ref is taken at the start of the display frame: the GPU gets the lines
     // before the compositor's batch as well (see sync_line).
     mutable const u32* out = nullptr;
+    mutable const u32* hires = nullptr;   // a GPU frame above 1x: the same frame at hires_scale (256S x 192S words)
+    mutable u32 hires_scale = 1;
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
     u32 nbins = 0;
@@ -404,7 +410,8 @@ private:
   std::shared_ptr<vk::Device> vk_dev_;
   std::unique_ptr<vk::Lean> lean_;
   std::unique_ptr<vk::Lean> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
-  bool lean_aa_ = false;   // the AA setting lean_ was created for (msaa() is what the device granted)
+  bool lean_aa_ = false;
+  u32 gpu_scale_ = 1;   // the AA setting lean_ was created for (msaa() is what the device granted)
   void gpu_rebuild();
   // The GPU submit (command recording + queue call, ~0.9 ms) runs on its own
   // thread, off the emulation thread: gpu_submit() fills the staging buffers

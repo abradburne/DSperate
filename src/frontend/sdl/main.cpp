@@ -1528,6 +1528,8 @@ sdl_ready:
     const char* g = std::getenv("DS_GPU3D");
     const bool want = g ? std::atoi(g) != 0 : cfg.flag("video.gpu3d", false);
     nds.gpu3d.renderer().set_aa(aa_on(cfg.str("video.aa", "false")));   // before the raster starts: its MSAA is fixed at creation
+    // video.gpu3d_scale (DS_GPU3D_SCALE overrides): the GPU raster's internal resolution, 1-4.
+    { const char* gs = std::getenv("DS_GPU3D_SCALE"); nds.gpu3d.renderer().set_gpu_scale(static_cast<u32>(std::clamp(gs ? std::atoi(gs) : cfg.num("video.gpu3d_scale", 1), 1, 4))); }
     if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on\n"); }
   }
   // Let fullscreen windows take their final size before the ROM loads (see

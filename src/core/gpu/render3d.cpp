@@ -2972,7 +2972,7 @@ void Renderer3D::set_aa(bool on) {
 void Renderer3D::gpu_rebuild() {
   sync_all(); gpu_job_wait(); lean_->wait_all();
   std::string why;
-  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, &why);
+  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, gpu_scale_, &why);
   lean_retired_ = std::move(lean_);
   if (!fresh || !fresh->ready()) {
     std::fprintf(stderr, "gpu3d: rebuild for AA %s failed (%s), drawing on the CPU\n", aa_ ? "on" : "off", why.c_str());
@@ -2989,7 +2989,7 @@ bool Renderer3D::set_gpu(bool on, std::string* why) {
   std::string reason;
   if (!vk_dev_) vk_dev_ = vk::Device::shared(&reason);
   if (!vk_dev_) { if (why) *why = reason; return false; }
-  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, &reason); lean_aa_ = aa_; }
+  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, gpu_scale_, &reason); lean_aa_ = aa_; }
   if (!lean_ || !lean_->ready()) { lean_.reset(); if (why) *why = reason; return false; }
   lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0;
   gpu_job_start();
@@ -3113,6 +3113,7 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
       gpu_job_wait();
       f.out = lean_ ? lean_->newest_ready(f.allow_lag) : nullptr;
       if (!f.out) f.out = out_[display_].data();   // a Lean with no frame yet: a stale picture, not a null read
+      else if (const u32* h = lean_->hires()) { f.hires = h; f.hires_scale = lean_->scale(); }
       if (g_gpu_trace.on) { const double w = now_ms() - t0; g_gpu_trace.wait_ms += w; g_gpu_trace.wait_max = std::max(g_gpu_trace.wait_max, w); if (w > 0.2) ++g_gpu_trace.waited; }
     }
     return;
