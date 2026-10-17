@@ -19,6 +19,8 @@ void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace ds::sdl {
@@ -74,6 +76,8 @@ struct GlPresent::Impl {
   bool linear = false;
   GLuint p_fb = 0, p_tex = 0, vao = 0, fbtex[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
+  u32 frames = 0;           // DS_PRESENT_PPM
+  int index = 0;            // the window's order of opening
   int shown_screen = -1;
 };
 
@@ -92,6 +96,7 @@ bool GlPresent::open(SDL_Window* win, bool vsync, bool linear) {
   SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
   if (!d.ctx) { std::fprintf(stderr, "gl present: no GLES 3.1 context (%s)\n", SDL_GetError()); d_.reset(); return false; }
   if (!g_first) g_first = d.ctx;
+  d.index = g_contexts;
   ++g_contexts;
   SDL_GL_MakeCurrent(win, d.ctx);
   SDL_GL_SetSwapInterval(vsync ? 1 : 0);
@@ -168,6 +173,22 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
   }
   glBindVertexArray(0);
   hires_tex_ = 0;
+  // DS_PRESENT_PPM=<n>+<count>:<prefix>: what this window shows, frames n..n+count-1,
+  // as <prefix>.<window>.<frame>.ppm (debug; reads the back buffer before the swap).
+  if (static const char* dump = std::getenv("DS_PRESENT_PPM"); dump && std::strchr(dump, ':')) {
+    static const u32 n0 = static_cast<u32>(std::atoi(dump)), cnt = std::strchr(dump, '+') ? static_cast<u32>(std::atoi(std::strchr(dump, '+') + 1)) : 1;
+    ++d.frames;
+    if (d.frames >= n0 && d.frames < n0 + cnt) {
+      std::vector<unsigned char> px(static_cast<size_t>(ww) * wh * 4);
+      glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+      const std::string path = std::string(std::strchr(dump, ':') + 1) + "." + std::to_string(d.index) + "." + std::to_string(d.frames) + ".ppm";
+      if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
+        std::fprintf(o, "P6\n%d %d\n255\n", ww, wh);
+        for (int y = wh - 1; y >= 0; --y) for (int x = 0; x < ww; ++x) std::fwrite(&px[(static_cast<size_t>(y) * ww + x) * 4], 1, 3, o);
+        std::fclose(o);
+      }
+    }
+  }
   SDL_GL_SwapWindow(d.win);
 }
 
