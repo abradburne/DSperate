@@ -440,7 +440,13 @@ void NDS::setup_direct_boot() {
 bool NDS::load_gba(const std::string& path, const std::string& bios_path, std::string* err) {
   std::vector<u8> image = slurp(path);
   if (image.empty()) { if (err) *err = "cannot read " + path; return false; }
-  if (cart::is_zip(image.data(), image.size())) { if (err) *err = path + ": zipped GBA ROMs are not supported yet"; return false; }
+  rom_zip_entry.clear();
+  if (cart::is_zip(image.data(), image.size())) {
+    std::vector<u8> rom;
+    std::string why;
+    if (!cart::extract_gba_rom(image.data(), image.size(), rom, why, &rom_zip_entry)) { if (err) *err = path + ": " + why; return false; }
+    image = std::move(rom);
+  }
   auto g = std::make_unique<gba::Gba>();
   if (!g->load_bios(bios_path, err)) return false;
   if (!g->load_rom(std::move(image), err)) return false;

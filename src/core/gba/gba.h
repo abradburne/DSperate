@@ -68,7 +68,8 @@ struct Gba {
   // Plain SRAM (32 KB, mirrored to 64 KB). Flash/EEPROM are phase 3.
   std::vector<u8> save_data() const;
   bool load_save(const u8* data, size_t n);
-  bool save_dirty = false;         // SRAM written since the last save_data()
+  bool save_dirty = false;         // SRAM written since the frontend last wrote it out (it clears this)
+  u32 save_writes = 0;             // SRAM stores so far, for "has the game stopped saving"
 
   // Before reset(): start at the cartridge's entry with the registers the
   // BIOS leaves (the default), or run the BIOS's boot screen first.
@@ -90,6 +91,9 @@ struct Gba {
 
   TraceFn trace = nullptr;
   void* trace_user = nullptr;
+
+  // The CPU's prefetched instructions (gba_interp.cpp): addresses | Thumb bit.
+  struct Pipeline { u32 addr[2] = {}, val[2] = {}, n = 0; } pipe;
 
   // ---- bus (gba_cpu_mem.h's slow paths; DMA uses the *_raw forms) ----
   u8  read8(u32 addr);

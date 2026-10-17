@@ -11,6 +11,7 @@
 #include "frontend/sdl/present_thread.h"
 #include "core/cpu/timing_mode.h"
 #include "core/nds.h"
+#include "core/gba/gba.h"
 #include "core/cart/rom_source.h"
 #include "core/handoff_stats.h"
 #include "core/host_cores.h"
@@ -104,6 +105,7 @@ using namespace ds;
 
 const char* kUsage =
     "usage: dsperate [rom.nds|rom.zip] [--bios9 F --bios7 F --firmware F] [options]\n"
+    "       dsperate --gba rom.gba|rom.zip [--gba-bios F] [options]\n"
     "  With no ROM (or a file named BootMenu.nds) the console boots its own\n"
     "  firmware: the DS menu, with the clock set from this machine and PictoChat.\n"
     "  A file named BootMenuDSi.nds is --dsi-mode: the DSi Menu off the NAND.\n"
@@ -114,6 +116,10 @@ const char* kUsage =
     "                  option below has a key there; games/<rom name>.ini and games/<CODE>.ini\n"
     "                  override it per game, the filename one winning)\n"
     "  --version       print the release tag and the commit this was built from, and exit\n"
+    "  --gba           a Game Boy Advance cartridge (implied by .gba; a .zip that holds no DS ROM\n"
+    "                  is tried as one): the DS in GBA mode, the picture on the top screen at its own\n"
+    "                  size. Its BIOS is paths.gba_bios / --gba-bios F (a 16 KB dump), else the\n"
+    "                  built-in Cult-of-GBA BIOS. Battery saves are plain SRAM for now; no sound yet.\n"
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
     "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
     "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
@@ -303,6 +309,20 @@ bool peek_game_code(const std::string& rom, char out[4]) {
   return true;
 }
 
+// The four-letter code states, screenshots and cheats are keyed by: the DS
+// card's, the GBA cartridge's (GBA mode), or NONE (firmware boot).
+std::string game_code(const NDS& nds) {
+  if (nds.cart) return std::string(nds.cart->header().game_code, 4);
+  if (nds.gba) {
+    const u32 c = nds.gba->game_code();
+    std::string s(reinterpret_cast<const char*>(&c), 4);
+    for (char& ch : s) if (ch < 0x20 || ch >= 0x7f) ch = '_';
+    return s;
+  }
+  return "NONE";
+}
+bool has_game(const NDS& nds) { return nds.cart || nds.gba; }
+
 std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
 }
@@ -314,6 +334,15 @@ bool aa_on(const std::string& v) {
 void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
 
 void load_save(NDS& nds, const std::string& path) {
+  if (nds.gba) {   // GBA mode: plain SRAM (Flash and EEPROM are to come)
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return;
+    std::vector<u8> data(ds::gba::SRAM_SIZE);
+    const size_t got = std::fread(data.data(), 1, data.size(), f);
+    std::fclose(f);
+    if (got && nds.gba->load_save(data.data(), got)) VLOG("save: loaded %zu bytes from %s\n", got, path.c_str());
+    return;
+  }
   if (!nds.cart) return;
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) {
@@ -339,6 +368,17 @@ void load_save(NDS& nds, const std::string& path) {
 }
 
 void write_save(NDS& nds, const std::string& path) {
+  if (nds.gba) {
+    const std::vector<u8> data = nds.gba->save_data();
+    const std::string tmp = path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "save: cannot write %s\n", tmp.c_str()); return; }
+    const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    std::fclose(f);
+    if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "save: cannot write %s\n", path.c_str()); return; }
+    nds.gba->save_dirty = false;
+    return;
+  }
   if (!nds.cart || nds.cart->sram().empty()) return;
   // Write-then-rename: a power cut mid-write leaves the previous file.
   const std::string tmp = path + ".tmp";
@@ -407,20 +447,20 @@ void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
-  std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
+  const std::string code = game_code(nds);
   const std::string path = dir + "/" + code + "-" + stamp + ".png";
   if (write_png(nds, path, layout)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
 }
 
 std::string state_path(NDS& nds, const std::string& dir, int slot) {
-  const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
+  const std::string code = game_code(nds);
   return dir + "/" + code + "." + std::to_string(slot) + ".dss";
 }
 
 // ".auto" rather than a number so it can't collide with a player slot and
 // refresh_slots() (walks 0..9) leaves it off the menu; reached only via --load-state.
 std::string auto_state_path(NDS& nds, const std::string& dir) {
-  const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
+  const std::string code = game_code(nds);
   return dir + "/" + code + ".auto.dss";
 }
 
@@ -428,7 +468,7 @@ std::string auto_state_path(NDS& nds, const std::string& dir) {
 // Left in place: a SIGKILL can't overwrite it, a clean exit does anyway.
 std::string autoload_path(NDS& nds, const std::string& dir, bool enabled) {
   // Never for cart-less boot: auto_state_path() keys on "NONE".
-  if (!enabled || !nds.cart) return {};
+  if (!enabled || !has_game(nds)) return {};
   const std::string path = auto_state_path(nds, dir);
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) return {};
@@ -636,9 +676,9 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   shots_dir = cfg.str("paths.screenshots", states_dir);
   sav = save_arg ? std::string(save_arg) : save_path(rom_path, cfg.str("paths.saves"));
   game_ini.clear();
-  if (nds.cart) {
+  if (has_game(nds)) {
     game_ini = ds::sdl::Config::game_path_rom(rom_path);
-    if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
+    if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(game_code(nds).c_str());
   }
 
   // usrcheat.dat from paths.cheats, beside the ROM, or the config dir.
@@ -679,7 +719,7 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   }
   // Names, not indices: a database update renumbers; a stale name is dropped.
   if (!cheats.codes.empty())
-    cheats_on_path = states_dir + "/" + std::string(nds.cart ? nds.cart->header().game_code : "NONE", 4) + ".cheats";
+    cheats_on_path = states_dir + "/" + game_code(nds) + ".cheats";
 }
 
 void Session::load_enabled(NDS& nds) const {
@@ -1027,6 +1067,7 @@ static int run(int argc, char** argv) {
   const char* dns_arg = nullptr;      // --dns: host, wiimmfi, or an address
   long stats_from = 0;   // frames run but left out of timing statistics
   bool dsi_mode = false;
+  bool gba_flag = false;              // --gba: the ROM is a GBA cartridge
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_nand = nullptr;
   const char* dsi_title = nullptr; const char* dsi_tmd = nullptr; bool dsi_offline = false, dsi_hide_installed = false, dsi_menu = false;
   bool dsi_hle = false;          // --dsi-mode with title and no NAND: launcher hand-off, BIOS pair only
@@ -1057,6 +1098,8 @@ static int run(int argc, char** argv) {
     else if (arg("--bios7")) cli.set("paths.bios7", argv[++i]);
     else if (arg("--firmware")) cli.set("paths.firmware", argv[++i]);
     else if (flag("--dsi-mode")) dsi_mode = true;
+    else if (flag("--gba")) gba_flag = true;
+    else if (arg("--gba-bios")) cli.set("paths.gba_bios", argv[++i]);
     else if (arg("--bios9i")) bios9i = argv[++i];
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];
@@ -1195,6 +1238,7 @@ static int run(int argc, char** argv) {
   const bool boot_firmware = !rom || rom_stem(base_name(rom)) == "BootMenu";
   const std::string rom_path = rom ? std::string(rom) : ds::sdl::Config::dir() + "/BootMenu.nds";
   if (boot_firmware) VLOG("no game: booting the firmware\n");
+  const bool gba_game = !boot_firmware && (gba_flag || rom_ext(rom_path) == ".gba");
 
   // Per-game files on top of the global one, CLI on top of both: title ID
   // first, then filename-keyed, so the filename wins. Rerun after the cart
@@ -1739,7 +1783,19 @@ sdl_ready:
     std::vector<ds::u8> srl;
     std::string err;
     if (!ds::io::read_dsiware(rom_path, srl, &err) || !nds.load_rom_image(std::move(srl))) { std::fprintf(stderr, "dsi: %s: %s\n", rom_path.c_str(), err.c_str()); SDL_Quit(); return 1; }
-  } else if (!boot_firmware && !load_rom_notice(rom_path)) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1; }
+  } else if (gba_game || (!boot_firmware && !load_rom_notice(rom_path))) {
+    // GBA mode: asked for, a .gba, or a zip that held no DS ROM.
+    std::string err;
+    if ((!gba_game && rom_ext(rom_path) != ".zip") || !nds.load_gba(rom_path, cfg.str("paths.gba_bios"), &err)) {
+      if (!err.empty()) std::fprintf(stderr, "gba: %s\n", err.c_str());
+      std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1;
+    }
+    const u32 code = nds.gba->game_code();
+    std::fprintf(stderr, "gba: %s [%.4s], BIOS %s\n", nds.gba->title().c_str(), reinterpret_cast<const char*>(&code),
+                 nds.gba->bios_native ? cfg.str("paths.gba_bios").c_str() : "built in (Cult-of-GBA)");
+    if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
+    merge_game_config(game_code(nds).c_str());
+  }
   auto prepare_dsiware = [&]() -> bool {
     std::string err;
     std::vector<std::string> made;
@@ -1777,7 +1833,7 @@ sdl_ready:
 
   cfg.set("video.aa", aa_on(cfg.str("video.aa", "false")) ? "true" : "false");
   apply_aa(nds, aa_on(cfg.str("video.aa", "false")));
-  if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot
+  if (!nds.gba_mode() && (!boot_firmware || nds.dsi)) nds.setup_direct_boot();   // on a DSi this is the NAND boot
   if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
   // Off in the core by default for reproducibility. Not under --replay: a
   // game reading the date would replay differently each time.
@@ -2113,7 +2169,10 @@ sdl_ready:
     if (r.files || r.dirs || r.removed) VLOG("dsi sd: %d files written, %d folders made, %d removed in %s\n", r.files, r.dirs, r.removed, nds.dsi_sd.folder().c_str());
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
   };
-  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); flush_dsi(); flush_sd(); };
+  auto flush_save = [&] {
+    if (!save_readonly && ((nds.cart && nds.cart->sram_dirty()) || (nds.gba && nds.gba->save_dirty))) write_save(nds, session.sav);
+    flush_dsi(); flush_sd();
+  };
   // Whether fb_ holds the last run frame's picture (true after an unscaled
   // frame; false after a scanline-tier frame written straight to the panel).
   bool fb_current = false;
@@ -3266,7 +3325,7 @@ sdl_ready:
         if (jit) ds::jit::flush_all();
 #endif
         nds.reset();
-        if (!boot_firmware || nds.dsi) nds.setup_direct_boot();
+        if (!nds.gba_mode() && (!boot_firmware || nds.dsi)) nds.setup_direct_boot();
         if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
         mp_ever = false;
 #if DSPERATE_CHEEVOS
@@ -4089,6 +4148,10 @@ sdl_ready:
     if (static const char* la = std::getenv("DS_LAUNCH_AT"); la && std::strchr(la, ':') && frames == std::strtoull(la, nullptr, 10)) launch_game(std::strchr(la, ':') + 1);
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
+      else if (frames - sram_quiet_since >= 60) flush_save();
+    }
+    if (nds.gba && nds.gba->save_dirty) {   // the same quiet second before a GBA save goes to disk
+      if (nds.gba->save_writes != sram_writes_seen) { sram_writes_seen = nds.gba->save_writes; sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
     }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {

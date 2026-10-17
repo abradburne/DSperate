@@ -294,6 +294,8 @@ int main(int argc, char** argv) {
   struct Touch { int frame, x, y, n; };
   double mic_tone_hz = 0;
   std::vector<Touch> touches;          // --touch F:x,y[:N]: press (x,y) from frame F for N frames (default 10)
+  struct Press { int frame, n; ds::u16 keys; };
+  std::vector<Press> presses;          // --press F:BUTTONS[:N]: hold BUTTONS (a+b+select+start+right+left+up+down+r+l) from frame F for N frames (default 1)
   bool pace = false;                   // --pace: sleep to 60 frames a second
   bool gba_rom = false;                // --gba (or a .gba ROM): a Game Boy Advance cartridge
   const char* gba_bios = nullptr;      // --gba-bios FILE: a GBA BIOS dump instead of the built-in Cult-of-GBA BIOS
@@ -312,6 +314,14 @@ int main(int argc, char** argv) {
     else if (arg("--tap-after-sync")) { std::sscanf(argv[++i], "%d:%d,%d:%d:%d", &tas_after, &tas_x, &tas_y, &tas_n, &tas_rep); }
     else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
     else if (arg("--mic-tone")) { mic_tone_hz = std::atof(argv[++i]); }   // a sine at HZ (amplitude DS_MIC_TONE_AMP, default 8000) as the microphone input, every frame
+    else if (arg("--press")) {
+      char names[96] = ""; Press p{0, 1, 0};
+      std::sscanf(argv[++i], "%d:%95[^:]:%d", &p.frame, names, &p.n);
+      static const char* const kButtons[10] = {"a", "b", "select", "start", "right", "left", "up", "down", "r", "l"};
+      for (char* t = std::strtok(names, "+"); t; t = std::strtok(nullptr, "+"))
+        for (int k = 0; k < 10; ++k) if (!std::strcmp(t, kButtons[k])) p.keys |= static_cast<ds::u16>(1u << k);
+      presses.push_back(p);
+    }
     else if (arg("--touch")) { Touch t{0, 0, 0, 10}; std::sscanf(argv[++i], "%d:%d,%d:%d", &t.frame, &t.x, &t.y, &t.n); touches.push_back(t); }
     else if (flag("--pace")) pace = true;
     else if (arg("--bios9")) bios9 = argv[++i];
@@ -797,6 +807,11 @@ int main(int argc, char** argv) {
       const double step = 2 * 3.14159265358979 * mic_tone_hz / (tone.size() * 59.8261);
       for (ds::s16& v : tone) { v = static_cast<ds::s16>(amp * std::sin(phase)); phase += step; }
       nds.io.set_mic(tone.data(), tone.size());
+    }
+    if (!presses.empty()) {
+      ds::u16 held = 0;
+      for (const Press& p : presses) if (i >= p.frame && i < p.frame + p.n) held |= p.keys;
+      nds.io.keyinput = static_cast<ds::u16>((nds.io.keyinput & ~0x3FFu) | (~held & 0x3FFu));
     }
     if (!touches.empty()) {
       const Touch* on = nullptr;

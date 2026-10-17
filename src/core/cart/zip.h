@@ -63,6 +63,11 @@ u32 crc32_update(u32 crc, const u8* data, size_t n);
 bool extract_rom(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
                  std::string* chosen = nullptr, bool allow_cia = false, bool* was_cia = nullptr);
 
+// The GBA forms: the first .gba entry (GBA mode, core/gba). In memory: a GBA
+// cartridge is at most 32 MB.
+bool find_gba_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err);
+bool extract_gba_rom(const u8* zip, size_t size, std::vector<u8>& out, std::string& err, std::string* chosen = nullptr);
+
 std::string cia_refusal(const std::string& name);
 
 } // namespace ds::cart

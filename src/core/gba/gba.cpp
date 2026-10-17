@@ -155,15 +155,17 @@ u32 Gba::open_bus() {
 u32 Gba::fetch(u32 addr, u32 width) {
   if (addr < BIOS_SIZE) {
     const u32 v = width == 32 ? rd32(bios.get() + (addr & ~3u)) : rd16(bios.get() + (addr & ~1u));
-    const u32 ahead = (addr & ~3u) + (width == 32 ? 8 : 4);
-    if (ahead + 4 <= BIOS_SIZE) bios_latch_ = rd32(bios.get() + (ahead & ~3u));
+    // What the bus last carried from the BIOS: the CPU fetches two
+    // instructions ahead (gba_interp.cpp), so this is the prefetched opcode.
+    bios_latch_ = width == 32 ? v : (v | (v << 16));
     if (!bios_native) {
       // A game reading the BIOS sees what Nintendo's leaves on the bus, not
       // the built-in one's own opcodes: its SWI and IRQ returns (cultbios
-      // 0x170, 0x124) stand for Nintendo's at 0x188 and 0x13C. Its IRQ call
-      // (0x11C) already leaves the same opcode as Nintendo's 0x134.
-      if (addr == 0x170) bios_latch_ = 0xE3A02004;
-      else if (addr == 0x124) bios_latch_ = 0xE55EC002;
+      // 0x170, 0x124, prefetching 0x178 and 0x12C) stand for Nintendo's at
+      // 0x188 and 0x13C. Its IRQ call (0x11C) prefetches the same opcode as
+      // Nintendo's at 0x134.
+      if (addr == 0x178) bios_latch_ = 0xE3A02004;
+      else if (addr == 0x12C) bios_latch_ = 0xE55EC002;
     }
     return v;
   }
@@ -235,7 +237,7 @@ void Gba::write8(u32 addr, u8 v) {
     return;
   }
   case 0x07: return;                                                 // OAM ignores byte stores
-  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = v; save_dirty = true; return;
+  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = v; save_dirty = true; ++save_writes; return;
   default: return;
   }
 }
@@ -249,14 +251,14 @@ void Gba::write16(u32 addr, u16 v) {
   case 0x05: wr16(palette.get() + (addr & 0x3FF), v); wr16(palette.get() + 0x400 + (addr & 0x3FF), v); return;
   case 0x06: wr16(vram.get() + vram_off(addr), v); return;
   case 0x07: wr16(oam.get() + (addr & 0x3FF), v); wr16(oam.get() + 0x400 + (addr & 0x3FF), v); return;
-  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 1) * 8)); save_dirty = true; return;
+  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 1) * 8)); save_dirty = true; ++save_writes; return;
   default: return;   // ROM (GPIO and EEPROM are phase 3), unmapped
   }
 }
 
 void Gba::write32(u32 addr, u32 v) {
   addr &= ~3u;
-  if ((addr >> 24) == 0x0E || (addr >> 24) == 0x0F) { sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 3) * 8)); save_dirty = true; return; }
+  if ((addr >> 24) == 0x0E || (addr >> 24) == 0x0F) { sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 3) * 8)); save_dirty = true; ++save_writes; return; }
   write16(addr, static_cast<u16>(v));
   write16(addr + 2, static_cast<u16>(v >> 16));
 }
@@ -528,6 +530,7 @@ void Gba::reset() {
   keyinput_ = 0x3FF;
   dma_latch_ = 0;
   bios_latch_ = 0;
+  pipe = {};
   frame_count = 0;
   rebuild_timing();
   ppu.reset();
@@ -598,6 +601,7 @@ template void Gba::sync_state<state::Reader>(state::Reader&);
 
 void Gba::after_load() {
   cpu->host = this;
+  pipe = {};
   rebuild_timing();
   rescan();
   update_irq();
