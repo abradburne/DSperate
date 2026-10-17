@@ -67,6 +67,7 @@ uniform highp usampler2D u_texels;
 uniform uint u_dispcnt, u_alpha_ref;
 uniform uint u_toon[32];
 uniform int u_wbuf;
+uniform int u_split;   // a translucent polygon's pixels: 0 all, 1 the opaque ones (alpha 31), 2 the rest
 out vec4 o_col;
 layout(location = 1) out uint o_id;   // edge marking: the polygon id | 0x80 (an opaque polygon drew here)
 uint texel(uint i) { return texelFetch(u_texels, ivec2(int(i & 4095u), int(i >> 12)), 0).r; }
@@ -108,6 +109,7 @@ void main() {
   }
 #ifndef EARLY
   if (a <= u_alpha_ref) discard;
+  if (u_split != 0 && ((a == 31u) != (u_split == 1))) discard;
 #endif
   // Raw 6-bit channels; alpha (a + 1) * 8 so the blend's SRC_ALPHA is (a + 1) / 32, as the lean raster.
   uint ab = a == 0u ? 0u : min(255u, (a + 1u) * 8u);
@@ -322,7 +324,7 @@ struct GlHires::Impl {
   std::vector<u32> base, under;
   GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1, e_wbuf = -1, r_wbuf = -1;
   std::vector<std::pair<u32, bool>> prefix_runs;
-  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
+  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1, r_split = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
   size_t vbo_cap = 0;
   GLuint arena = 0;
@@ -401,6 +403,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   if (!d.raster || !d.comp) return false;
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
   d.r_wbuf = glGetUniformLocation(d.raster, "u_wbuf");
+  d.r_split = glGetUniformLocation(d.raster, "u_split");
   d.u_alpha_ref = glGetUniformLocation(d.raster, "u_alpha_ref");
   d.u_toon = glGetUniformLocation(d.raster, "u_toon");
   glUseProgram(d.raster);
@@ -541,7 +544,11 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     // Translucent runs also break on the polygon id: the stencil keeps the DS
     // rule that a translucent pixel does not blend over one of its own id.
     const bool tr = (p.flags & DS_PF_TRANSLUCENT) != 0;
-    const u32 key = (tr ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u) | (tr ? ((((p.attr >> 24) & 0x3Fu) + 1u) << 2) : 0u);
+    // A translucent polygon at alpha 31 (translucent for its texture's alpha)
+    // has opaque pixels too, which the DS draws as an opaque polygon's: they
+    // write the depth, so a farther polygon later in the list stays behind.
+    const bool opq = tr && ((p.attr >> 16) & 0x1Fu) == 31u;
+    const u32 key = (tr ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u) | (tr ? ((((p.attr >> 24) & 0x3Fu) + 1u) << 2) : 0u) | (opq ? 1u << 10 : 0u);
     if (runs.empty() || runs.back().second != key) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
     fan(p);
   }
@@ -600,7 +607,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glUseProgram(d.raster_early);
   glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon); glUniform1i(d.e_wbuf, wbuf ? 1 : 0);
   glUseProgram(d.raster);
-  glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon); glUniform1i(d.r_wbuf, wbuf ? 1 : 0);
+  glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon); glUniform1i(d.r_wbuf, wbuf ? 1 : 0); glUniform1i(d.r_split, 0);
   for (size_t r = 0; r < d.prefix_runs.size(); ++r) {
     const u32 v0 = d.prefix_runs[r].first, v1 = r + 1 < d.prefix_runs.size() ? d.prefix_runs[r + 1].first : opaque_end;
     glUseProgram(d.prefix_runs[r].second ? d.raster_early : d.raster);
@@ -610,8 +617,18 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   for (size_t r = 0; r < runs.size(); ++r) {
     const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
     const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
-    { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, trans ? static_cast<GLenum>(GL_NONE) : static_cast<GLenum>(GL_COLOR_ATTACHMENT1)}; glDrawBuffers(2, bufs); }   // translucent: the opaque id stays
-    const GLint sref = static_cast<GLint>(runs[r].second >> 2);
+    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, trans ? static_cast<GLenum>(GL_NONE) : static_cast<GLenum>(GL_COLOR_ATTACHMENT1)};   // translucent: the opaque id stays
+    glDrawBuffers(2, bufs);
+    const GLint sref = static_cast<GLint>((runs[r].second >> 2) & 0xFFu);
+    if (v1 <= v0) continue;
+    if (trans && (runs[r].second & (1u << 10))) {   // its opaque pixels first, as an opaque polygon's
+      const GLenum ob[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, ob);
+      glStencilFunc(GL_ALWAYS, 0, 0xFF); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
+      glUniform1i(d.r_split, 1);
+      glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
+      glUniform1i(d.r_split, 2);
+      glDrawBuffers(2, bufs);
+    }
     if (trans) glStencilFunc(GL_NOTEQUAL, sref, 0xFF);   // not over its own id's blend; writes its id where it draws
     else glStencilFunc(GL_ALWAYS, 0, 0xFF);              // an opaque pixel: any id may blend over it again
     if (trans) {
@@ -620,7 +637,8 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
       glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX);
       glDepthMask(dw ? GL_TRUE : GL_FALSE);
     } else { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
-    if (v1 > v0) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
+    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
+    glUniform1i(d.r_split, 0);
   }
   glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_STENCIL_TEST);
   // Edge marking, into its own texture, which the composite reads instead.
