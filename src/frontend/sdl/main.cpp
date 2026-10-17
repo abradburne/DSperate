@@ -1528,7 +1528,7 @@ sdl_ready:
   mark("displays open");
   // video.hires3d: the GLES present took the windows; the 3D is drawn again there at S x.
   std::unique_ptr<ds::sdl::GlHires> gl_hires;
-  if (vs.hires3d > 1) {
+  if (vs.hires3d > 1 && !std::getenv("DS_HIRES_PRESENT_ONLY")) {   // DS_HIRES_PRESENT_ONLY=1: the GLES present alone (debug)
     if (display.gl()) {
       gl_hires = std::make_unique<ds::sdl::GlHires>();
       std::string why;

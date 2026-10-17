@@ -441,14 +441,14 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   }
   std::sort(d.order.begin(), d.order.end());
   for (const auto& e : d.order) fan(dl.polys[e.second]);
-  const u32 early_end = static_cast<u32>(d.vb.size());
+  u32 early_end = static_cast<u32>(d.vb.size());
   for (u32 k = 0; k < prefix; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
     const bool early = !(p.flags & DS_PF_TEX_ALPHA) && (none_fail || ((p.attr >> 16) & 0x1F) > f.alpha_ref) && ((p.attr >> 16) & 0x1F) != 0;
     if (!early) fan(p);
   }
-  const u32 opaque_end = static_cast<u32>(d.vb.size());
+  u32 opaque_end = static_cast<u32>(d.vb.size());
   for (u32 k = prefix; k < dl.npoly; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;   // shadow volumes: not yet
@@ -480,6 +480,8 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(wbuf ? GL_GREATER : GL_LESS);
   glDisable(GL_BLEND);
+  static const bool no_raster = std::getenv("DS_HIRES_NORASTER") != nullptr;   // debug: the 3D layer left at its clear
+  if (no_raster) { early_end = 0; opaque_end = 0; runs.clear(); }
   if (early_end) {
     glUseProgram(d.raster_early);
     glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon);
