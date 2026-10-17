@@ -3885,6 +3885,11 @@ sdl_ready:
                     ds::gpu::kern::active::output_vram_line(v15, 0, &c.img[y * 256]);
                   }
                   gf.cap_serial = c.serial;
+                  if (static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr; tr) {
+                    u32 d0 = 0, d1 = 0;
+                    for (u32 k = 0; k < 256 * 192; ++k) { d0 += ((fb[0][k] ^ c.img[k]) & 0xF8F8F8u) != 0; d1 += ((fb[1][k] ^ c.img[k]) & 0xF8F8F8u) != 0; }
+                    std::fprintf(stderr, "hrtrace this capture differs from screen 0 in %u px, screen 1 in %u\n", d0, d1);
+                  }
                 }
                 if (ref.dlist && (gf.now || gf.cap_kind)) {
                   const auto& src = *ref.dlist;
