@@ -148,6 +148,9 @@ const char* kUsage =
     "                  picked from the loader's game list (marked [DSi]); the DSi BIOS pair can be set as\n"
     "                  paths.bios9i/paths.bios7i. When the title leaves (a soft reset), the session ends.\n"
     "  --scale N       window scale (default 2)\n"
+    "  --hires3d N     the 3D drawn at N times the DS's resolution, 1-4 (video.hires3d; 2 is 512x384,\n"
+    "                  4 the panels' 1024x768; needs video.sink = renderer and GLES). Wins over the\n"
+    "                  settings files and the menu's 3D RESOLUTION for this run\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
     "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
@@ -1112,6 +1115,7 @@ static int run(int argc, char** argv) {
     else if (arg("--config")) config_arg = argv[++i];
     else if (arg("--write-config")) { ds::sdl::Config::write_default(argv[++i], true); return 0; }
     else if (arg("--scale")) cli.set("video.scale", argv[++i]);
+    else if (arg("--hires3d")) cli.set("video.hires3d", argv[++i]);
     else if (flag("--dual-window")) cli.set("video.dual_window", "true");
     else if (arg("--pacing")) cli.set("emu.pacing", argv[++i]);
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
@@ -1215,7 +1219,7 @@ static int run(int argc, char** argv) {
     // Without a NAND the title goes in the slot (NDS::prepare_dsi_hle).
     if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
   }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.hires3d", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
