@@ -3883,6 +3883,9 @@ sdl_ready:
                   gf.lines = nds.gpu.hires_lines();
                 }
               }
+              if (static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr; tr)
+                std::fprintf(stderr, "hrtrace %u: scr %d mode %u bank %u now %d show_cap %d cap_kind %d alt %d cap_last %08x cap_prev %08x list %d\n", hr_n, scr, mode,
+                             nds.gpu.display_bank_a(), gf.now, gf.show_cap, gf.cap_kind, gf.alt, nds.gpu.captured_last(), nds.gpu.captured_prev(), ref.dlist ? 1 : 0);
               prev_scr_a = scr;
               static u32 hr_alt = 0; hr_alt += gf.alt;
               if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames with both screens in 3D\n", hr_alt);
