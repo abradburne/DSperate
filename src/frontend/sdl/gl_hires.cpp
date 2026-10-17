@@ -14,6 +14,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<
 #include <GLES3/gl31.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -306,6 +307,11 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
                          const gpu::Engine2D::HiresLine* lines, const u32* fb, int mode) {
   if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines || !fb) return 0;
   Impl& d = *d_;
+  using clk = std::chrono::steady_clock;
+  static const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
+  static double t_arena = 0, t_fans = 0, t_vbo = 0, t_raster = 0, t_planes = 0, t_comp = 0; static u32 tn = 0;
+  auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+  const auto T0 = clk::now();
   const u32 S = d.S;
   const GLsizei W = static_cast<GLsizei>(256 * S), H = static_cast<GLsizei>(192 * S);
   const gpu::vk::GpuFrame& f = dl.frame;
@@ -320,6 +326,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     d.arena_up = arena_top;
   }
 
+  const auto T1 = clk::now();
   // Fans, placed as lean.vert places them; the prefix first, then the tail in runs.
   d.vb.clear();
   std::vector<std::pair<u32, u32>> runs;   // tail: [first vertex, key] where key = translucent | depth-write << 1
@@ -362,12 +369,14 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   if (f.first_ordered >= dl.npoly) opaque_end = static_cast<u32>(d.vb.size());
   const u32 total = static_cast<u32>(d.vb.size());
 
+  const auto T2 = clk::now();
   glBindVertexArray(d.vao);
   glBindBuffer(GL_ARRAY_BUFFER, d.vbo);
   const size_t bytes = std::max<size_t>(d.vb.size(), 1) * sizeof(Vtx);
   if (bytes > d.vbo_cap) { d.vbo_cap = bytes * 2; glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(d.vbo_cap), nullptr, GL_STREAM_DRAW); }
   if (!d.vb.empty()) glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(d.vb.size() * sizeof(Vtx)), d.vb.data());
 
+  const auto T3 = clk::now();
   // The 3D layer at S x.
   glBindFramebuffer(GL_FRAMEBUFFER, d.fbo3d);
   glViewport(0, 0, W, H);
@@ -400,6 +409,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   }
   glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
 
+  const auto T4 = clk::now();
   // Engine A's planes for the composite.
   for (u32 y = 0; y < 192; ++y) {
     const gpu::Engine2D::HiresLine& h = lines[y];
@@ -420,6 +430,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   up(d.t_regs, 192, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, d.regs.data());
   up(d.t_fb, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, fb);
 
+  const auto T5 = clk::now();
   // The composite at S x.
   d.slot ^= 1;
   glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
@@ -432,6 +443,15 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glBindVertexArray(d.vao_empty);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   glBindVertexArray(0);
+  if (timing) {
+    const auto T6 = clk::now();
+    t_arena += ms(T0, T1); t_fans += ms(T1, T2); t_vbo += ms(T2, T3); t_raster += ms(T3, T4); t_planes += ms(T4, T5); t_comp += ms(T5, T6);
+    if (++tn == 120) {
+      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f (%zu verts)\n",
+                   t_arena / tn, t_fans / tn, t_vbo / tn, t_raster / tn, t_planes / tn, t_comp / tn, d.vb.size());
+      t_arena = t_fans = t_vbo = t_raster = t_planes = t_comp = 0; tn = 0;
+    }
+  }
   // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
   static u32 renders = 0;
   ++renders;
