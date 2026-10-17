@@ -339,7 +339,10 @@ bool GlHires::init(u32 scale, std::string* why) {
 
   d.arena = tex2d(GL_R32UI, kArenaW, static_cast<GLsizei>(kArenaH));
   d.col3d = tex2d(GL_RGBA8, W, H);
-  glGenRenderbuffers(1, &d.dep3d); glBindRenderbuffer(GL_RENDERBUFFER, d.dep3d); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, W, H);
+  // Float depth, as the lean raster's: W-buffer frames store 1/w, and at DS depths of tens of
+  // thousands neighbouring values are closer than a 24-bit fixed step, so a surface and its
+  // decals compared equal (NSMB's world map lost its paths).
+  glGenRenderbuffers(1, &d.dep3d); glBindRenderbuffer(GL_RENDERBUFFER, d.dep3d); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH32F_STENCIL8, W, H);
   glGenFramebuffers(1, &d.fbo3d); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo3d);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.col3d, 0);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, d.dep3d);
