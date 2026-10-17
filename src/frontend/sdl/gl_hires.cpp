@@ -591,7 +591,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   for (size_t r = 0; r < runs.size(); ++r) {
     const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
     const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
-    { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, trans ? GL_NONE : GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }   // translucent: the opaque id stays
+    { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, trans ? static_cast<GLenum>(GL_NONE) : static_cast<GLenum>(GL_COLOR_ATTACHMENT1)}; glDrawBuffers(2, bufs); }   // translucent: the opaque id stays
     const GLint sref = static_cast<GLint>(runs[r].second >> 2);
     if (trans) glStencilFunc(GL_NOTEQUAL, sref, 0xFF);   // not over its own id's blend; writes its id where it draws
     else glStencilFunc(GL_ALWAYS, 0, 0xFF);              // an opaque pixel: any id may blend over it again
