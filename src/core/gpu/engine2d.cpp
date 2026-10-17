@@ -199,16 +199,41 @@ void Engine2D::render_line(u32 line) {
     h.valid = !num_ && (cur_.dispcnt & 8) && bg_[0].any;
     const u16 mb0 = master_bright();
     const bool bright0 = ((mb0 >> 14) == 1 || (mb0 >> 14) == 2) && (mb0 & 0x1F);
+    // What the 3D layer covers, and where it would be on top if drawn there:
+    // the line selected without BG0, and BG0's priority against the winner
+    // (BG0 beats the other BGs at its priority, an OBJ beats BG0 at its own;
+    // the window must let BG0 through).
+    bool w3[256];
+    auto under_pass = [&] {
+      DS_PROF(SELECT);
+      const bool any0 = bg_[0].any;
+      bg_[0].any = false;
+      select_top_only();
+      kern::active::resolve16(top16_.data(), top_tid_.data(), tables_, h.under);
+      bg_[0].any = any0;
+      const u32 p0 = cur_.bgcnt[0] & 3;
+      for (u32 x = 0; x < 256; ++x) {
+        const u8 t = top_tid_[x];
+        bool wins;
+        if (!(win_[x] & 1)) wins = false;
+        else if (t == T_BACKDROP || t == T_NONE) wins = true;
+        else if (t <= T_BG3) wins = p0 <= (cur_.bgcnt[t] & 3u);   // t >= 1 here: BG0 wins the tie
+        else wins = p0 < (obj_attr_[x] & OA_PRIO);
+        w3[x] = wins;
+      }
+    };
     if (h.valid && !bright0 && !effect_possible()) {
-      // No colour effect on the line: the cheap select, as at 1x; every 3D
-      // pixel on top is the hi-res sample as it is, nothing else involves it.
+      // No colour effect on the line: the cheap select, as at 1x; wherever
+      // the 3D would be on top, a hi-res sample is the pixel as it is.
+      under_pass();
+      for (u32 x = 0; x < 256; ++x) h.cls[x] = w3[x] ? 1 : 0;
       { DS_PROF(SELECT); select_layers_flat(); }
-      for (u32 x = 0; x < 256; ++x) h.cls[x] = top_tid_[x] == T_BG0 ? 1 : 0;
       h.full = false;
       h.bldcnt = cur_.bldcnt; h.eva = cur_.eva; h.evb = cur_.evb; h.evy = cur_.evy; h.mbright = mb0;
       return;
     }
     if (h.valid) {
+      under_pass();
       { DS_PROF(SELECT); select_layers(); }
       // A pixel the 3D layer is neither the top nor the second target of is
       // exact at 1x; one it is the top of, with no effect that could reach it,
@@ -221,6 +246,7 @@ void Engine2D::render_line(u32 line) {
         u8 c = 0;
         if (t3) c = ((cur_.bldcnt & (static_cast<u32>(second_id_[x]) << 8)) || ((cur_.bldcnt & L_BG0) && (win_[x] & 0x20) && effect)) ? 2 : 1;
         else if (second_id_[x] == L_BG0) c = 2;
+        else if (w3[x]) c = 1;   // not covered at 1x, but would be on top where the hi-res raster covers it
         h.cls[x] = c;
         full |= c == 2;
       }

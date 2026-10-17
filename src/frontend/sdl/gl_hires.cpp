@@ -163,16 +163,18 @@ void main() {
 // whole composite, left (discarded) for pass 2.
 const char* kFastFS = R"(#version 310 es
 precision highp float; precision highp sampler2D;
-uniform highp sampler2D u_base, u_3d;
+uniform highp sampler2D u_base, u_3d, u_under;
 uniform int u_scale;
 out vec4 o_col;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   vec4 b = texelFetch(u_base, p / u_scale, 0);
   if (b.a > 0.75) discard;               // class 2
-  if (b.a > 0.25) {                       // class 1
+  if (b.a > 0.25) {                       // class 1: the 3D where it covers, else what it covers
     vec4 h = texelFetch(u_3d, p, 0);
     if (h.a > 0.0) { vec3 c6 = round(h.rgb * 255.0); o_col = vec4((c6 * 4.0 + floor(c6 / 16.0)) / 255.0, 1.0); return; }
+    o_col = vec4(texelFetch(u_under, p / u_scale, 0).rgb, 1.0);
+    return;
   }
   o_col = vec4(b.rgb, 1.0);
 }
@@ -303,8 +305,8 @@ struct GlHires::Impl {
   u32 S = 2;
   GLuint raster = 0, raster_early = 0, comp = 0, fast = 0;
   GLint f_scale = -1;
-  GLuint t_base = 0, dep_out = 0;
-  std::vector<u32> base;
+  GLuint t_base = 0, t_under = 0, dep_out = 0;
+  std::vector<u32> base, under;
   GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1;
   std::vector<std::pair<u32, bool>> prefix_runs;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
@@ -340,6 +342,7 @@ struct GlHires::Impl {
     if (comp) glDeleteProgram(comp);
     if (fast) glDeleteProgram(fast);
     if (t_base) glDeleteTextures(1, &t_base);
+    if (t_under) glDeleteTextures(1, &t_under);
     if (dep_out) glDeleteRenderbuffers(1, &dep_out);
   }
 };
@@ -376,6 +379,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   glUseProgram(d.fast);
   glUniform1i(glGetUniformLocation(d.fast, "u_base"), 0);
   glUniform1i(glGetUniformLocation(d.fast, "u_3d"), 1);
+  glUniform1i(glGetUniformLocation(d.fast, "u_under"), 2);
   glUniform1i(glGetUniformLocation(d.fast, "u_scale"), static_cast<GLint>(d.S));
   if (!d.raster || !d.comp) return false;
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
@@ -418,8 +422,8 @@ bool GlHires::init(u32 scale, std::string* why) {
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   d.t_top = tex2d(GL_R32UI, 256, 192); d.t_second = tex2d(GL_R32UI, 256, 192); d.t_meta = tex2d(GL_R32UI, 256, 192);
-  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192); d.t_class = tex2d(GL_R8UI, 256, 192); d.t_base = tex2d(GL_RGBA8, 256, 192);
-  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.base.resize(256 * 192); d.regs.resize(192 * 2);
+  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192); d.t_class = tex2d(GL_R8UI, 256, 192); d.t_base = tex2d(GL_RGBA8, 256, 192); d.t_under = tex2d(GL_RGBA8, 256, 192);
+  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.base.resize(256 * 192); d.under.resize(256 * 192); d.regs.resize(192 * 2);
 
   glGenVertexArrays(1, &d.vao_empty);
   glGenVertexArrays(1, &d.vao); glBindVertexArray(d.vao);
@@ -664,6 +668,14 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     }
   }
   up(d.t_base, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, d.base.data());
+  // Class 1's other answer: what the 3D covers, finished the same way.
+  for (u32 y = 0; y < 192; ++y) {
+    u32* row = &d.under[y * 256];
+    if (!lines[y].valid) continue;
+    gpu::kern::active::output_line(lines[y].under, mode == 1 ? 0 : lines[y].mbright, row);
+    for (u32 x = 0; x < 256; ++x) { const u32 c = row[x]; row[x] = ((c >> 16) & 0xFF) | (c & 0xFF00) | ((c & 0xFF) << 16) | 0xFF000000u; }
+  }
+  up(d.t_under, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, d.under.data());
 
   const auto T5 = clk::now();
   // The composite at S x.
@@ -678,6 +690,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glUseProgram(d.fast);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.t_base);
   glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, layer3d);
+  glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, d.t_under);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   // Pass 2: the full composite, only where depth is still 1 (LESS against 0.5 fails elsewhere: early-Z skips them).
   if (n_full) {

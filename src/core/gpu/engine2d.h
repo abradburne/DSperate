@@ -85,11 +85,15 @@ public:
   // composite still runs: output(), capture and the 1x picture are as before.
   struct HiresLine {
     alignas(16) Pixel out[256];   // engine A's composited line, before master brightness (every line; Gpu fills it)
+    alignas(16) Pixel under[256]; // what the 3D layer covers: the line selected without it (where cls is 1)
     alignas(16) Pixel top[256], second[256];
     alignas(16) u8 top_id[256], top_kind[256], top_alpha[256], second_id[256], win[256];
-    // Per pixel: 0 = the 3D layer plays no part (the 1x pixel is exact), 1 = the
-    // 3D layer on top with no effect after it (the hi-res sample is the pixel),
-    // 2 = the full composite. The planes above are kept only when `full`.
+    // Per pixel: 0 = the 3D layer cannot be on top here (the 1x pixel is
+    // exact); 1 = it would be on top wherever it is drawn, with no effect
+    // after it (a hi-res sample it covers is the pixel, one it does not is
+    // `under`) -- decided from priorities, not from the 1x coverage, so the
+    // 3D's edges are the hi-res ones; 2 = the full composite. The planes
+    // above are kept only when `full`.
     alignas(16) u8 cls[256];
     u16 bldcnt = 0, mbright = 0; u8 eva = 0, evb = 0, evy = 0;
     bool valid = false, full = false;
