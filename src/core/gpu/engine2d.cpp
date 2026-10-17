@@ -229,7 +229,16 @@ void Engine2D::render_line(u32 line) {
       // the 3D would be on top, a hi-res sample is the pixel as it is.
       under_pass();
       for (u32 x = 0; x < 256; ++x) h.cls[x] = w3[x] ? 1 : 0;
-      { DS_PROF(SELECT); select_layers_flat(); }
+      {
+        // The line is the under pass's with BG0 laid over where it wins (w3
+        // holds the select's own window and priority rules): no second select.
+        DS_PROF(SELECT);
+        if (bg_[0].any) {
+          const u16* v0 = bg_[0].v();
+          for (u32 x = 0; x < 256; ++x) if (w3[x] && (v0[x] & LV_OPAQUE)) { top16_[x] = v0[x]; top_tid_[x] = 0; }
+        }
+        kern::active::resolve16(top16_.data(), top_tid_.data(), tables_, out_.data());
+      }
       h.full = false;
       h.bldcnt = cur_.bldcnt; h.eva = cur_.eva; h.evb = cur_.evb; h.evy = cur_.evy; h.mbright = mb0;
       return;
