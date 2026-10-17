@@ -330,7 +330,7 @@ struct GlHires::Impl {
   GLuint fbo3d = 0, col3d = 0, dep3d = 0, id3d = 0;
   GLuint edge = 0, fbo_edge = 0, col_edge = 0;   // edge marking's output
   GLint g_scale = -1, g_wbuf = -1, g_edge = -1;
-  static constexpr int kOut = 4;   // a ring: the last two frames' results (shown and captured) stay valid
+  static constexpr int kOut = 6;   // a ring: the last frames' results (shown, and captures shown a frame or two later) stay valid
   GLuint fbo_out[kOut] = {}, out[kOut] = {};
   int slot = 0;
   GLuint t_top = 0, t_second = 0, t_meta = 0, t_win = 0, t_regs = 0, t_fb = 0, t_class = 0;
