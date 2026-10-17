@@ -95,6 +95,11 @@ public:
   void set_hires(bool on);
   bool hires_on() const { return !hires_lines_.empty(); }
   bool compose_hires(std::vector<u32>& out, u32* scale, int* screen) const;
+  // For a GPU composite of the same: engine A's screen when this frame has
+  // hi-res 3D to show (else -1), its kept lines, and its 3D frame.
+  int hires_screen() const { return !hires_lines_.empty() && screens_on_ && ((engine[0].dispcnt() >> 16) & 3) == 1 ? engine[0].screen() : -1; }
+  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data(); }
+  const Renderer3D::FrameRef& frame_3d() const { return ref3d_; }
 
   // A screen the frontend does not show. Its driving engine skips drawing but
   // keeps journal/latches/windows/lazy-2D bookkeeping running so it's exact

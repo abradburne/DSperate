@@ -11,6 +11,7 @@
 #include "display_drm.h"  // complete types for the unique_ptr
 #include "display_fbdev.h"
 #include "display_wl.h"
+#include "gl_present.h"
 
 #include <SDL2/SDL.h>
 
@@ -52,6 +53,11 @@ public:
   // image instead of its 1x framebuffer. The renderer tier only (hires_capable).
   void set_hires(int screen, const u32* px, u32 w, u32 h) { hires_px_ = px; hires_screen_ = screen; hires_w_ = w; hires_h_ = h; }
   bool hires_capable() const { return ren_ != nullptr; }
+  // video.hires3d: the renderer tier opens its own GLES context (GlPresent)
+  // instead of an SDL_Renderer. Set before open().
+  void set_gl(bool on) { gl_wanted_ = on; }
+  GlPresent* gl() { return glp_.get(); }
+  bool shows(int screen) const { for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) return true; return false; }
   // The frame loop's present: each GPU-presenting window of `ds` takes the
   // frame on the present thread (present_thread.h) and this returns once the
   // frame is copied out, so `fb` may change straight after. The others draw
@@ -226,6 +232,8 @@ private:
   SDL_Window*   win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
   SDL_Texture*  tex_[SCREENS] = {nullptr, nullptr};
+  bool gl_wanted_ = false;
+  std::unique_ptr<GlPresent> glp_;
   SDL_Texture*  hires_tex_ = nullptr;   // set_hires(): sized to the last hi-res image
   u32 hires_tw_ = 0, hires_th_ = 0, hires_w_ = 0, hires_h_ = 0;
   const u32* hires_px_ = nullptr;

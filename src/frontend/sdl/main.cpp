@@ -6,6 +6,7 @@
 // file (config.h) with the command line on top; hotkeys cover what a
 // handheld needs (volume, layout, screenshots, save states), and the pause
 // key opens a blitted menu over the held frame (menu.h).
+#include "frontend/sdl/gl_hires.h"
 #include "core/cpu/timing_mode.h"
 #include "core/nds.h"
 #include "core/cart/rom_source.h"
@@ -814,6 +815,7 @@ struct VideoSetup {
   ds::frontend::Sink panel_sink = ds::frontend::Sink::Count;   // Disp/Fbdev when one owns the panel (frontend/video/select.h)
   ds::frontend::Sink want_sink = ds::frontend::Sink::Count;    // explicit video.sink among the window sinks
   bool   gpu_present = false;
+  u32    hires3d = 1;   // video.hires3d (DS_HIRES3D): the 3D at this resolution on the display, 1-4 (GLES, renderer sink)
   ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: RGA, else Vulkan) | rga | vulkan
   int    upper_display = 0, lower_display = 1;   // dual-window: SDL display per physical panel
 };
@@ -916,6 +918,7 @@ bool sync_dual_modes(ds::sdl::Display& a, ds::sdl::Display& b) {
 // come back through here with new values.
 bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Display& display2) {
   display.set_gpu_present(vs.gpu_present, vs.gpu_mode); display2.set_gpu_present(vs.gpu_present, vs.gpu_mode);
+  display.set_gl(vs.hires3d > 1); display2.set_gl(vs.hires3d > 1);
   if (vs.dual_window) {
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
@@ -1458,6 +1461,7 @@ static int run(int argc, char** argv) {
     for (const std::string& n : plan.notes) std::fprintf(stderr, "%s\n", n.c_str());
     vs.panel_sink = plan.panel;
     vs.want_sink = plan.want;
+    { const char* h = std::getenv("DS_HIRES3D"); vs.hires3d = static_cast<u32>(std::clamp(h ? std::atoi(h) : cfg.num("video.hires3d", 1), 1, 4)); }
     if (plan.unset_videodriver) unsetenv("SDL_VIDEODRIVER");
     if (plan.headless_driver) go_headless(plan.panel == ds::frontend::Sink::Disp ? "video.sink disp" : "video.sink fbdev");
   }
@@ -1521,6 +1525,20 @@ sdl_ready:
   }
   if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }
   mark("displays open");
+  // video.hires3d: the GLES present took the windows; the 3D is drawn again there at S x.
+  std::unique_ptr<ds::sdl::GlHires> gl_hires;
+  if (vs.hires3d > 1) {
+    if (display.gl()) {
+      display.gl()->make_current();
+      gl_hires = std::make_unique<ds::sdl::GlHires>();
+      std::string why;
+      if (gl_hires->init(vs.hires3d, &why)) {
+        nds.gpu3d.renderer().set_display_list(true);
+        nds.gpu.set_hires(true);
+        std::fprintf(stderr, "hires3d: %ux on the GPU (%dx%d)\n", vs.hires3d, 256 * vs.hires3d, 192 * vs.hires3d);
+      } else { std::fprintf(stderr, "hires3d: unavailable (%s)\n", why.c_str()); gl_hires.reset(); }
+    } else std::fprintf(stderr, "hires3d: needs video.sink = renderer and GLES; showing 1x\n");
+  }
   // video.gpu3d (DS_GPU3D=1 overrides): the 3D layer on the GPU (Renderer3D::set_gpu).
   // After the displays: the Vulkan device opens the DRM node, and under direct
   // KMS the display must take master first.
@@ -3815,7 +3833,21 @@ sdl_ready:
           if (drop_rt) { sched_param z{}; sched_setscheduler(0, SCHED_OTHER, &z); }
           // Hi-res 3D (video.gpu3d_scale > 1): engine A's screen composited again
           // with the GPU raster's hi-res frame, shown instead of its 1x picture.
-          if (nds.gpu.hires_on()) {
+          if (gl_hires) {
+            // video.hires3d: the CPU-drawn frame's polygon list drawn again at S x
+            // and composited on the GPU, in the context of the window showing it.
+            const int scr = nds.gpu.hires_screen();
+            const auto& ref = nds.gpu.frame_3d();
+            if (scr >= 0 && ref.dlist) {
+              ds::sdl::Display& dd = (dual_window && !display.shows(scr)) ? display2 : display;
+              if (dd.gl()) {
+                dd.gl()->make_current();
+                u32 atop = 0; u64 aep = 0;
+                const auto& arena = nds.gpu3d.renderer().display_arena(&atop, &aep);
+                if (const unsigned tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr))) dd.gl()->set_hires(scr, tex);
+              }
+            }
+          } else if (nds.gpu.hires_on()) {
             static std::vector<u32> hires_buf;
             u32 hs = 0; int hscr = -1;
             if (nds.gpu.compose_hires(hires_buf, &hs, &hscr)) {

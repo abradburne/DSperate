@@ -5,6 +5,18 @@ add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp pad_
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 target_link_libraries(dsperate PRIVATE dsperate_core dsperate_frontend_video ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
+# video.hires3d: the GLES present and the hi-res 3D (gl_present.cpp, gl_hires.cpp).
+# Without GLES headers they compile as stubs that decline.
+find_path(DSPERATE_GLES_INCLUDE GLES3/gl31.h)
+find_library(DSPERATE_GLES_LIB GLESv2)
+target_sources(dsperate PRIVATE gl_present.cpp gl_hires.cpp)
+if(DSPERATE_GLES_INCLUDE AND DSPERATE_GLES_LIB)
+  target_compile_definitions(dsperate PRIVATE DSPERATE_GLES=1)
+  target_include_directories(dsperate PRIVATE ${DSPERATE_GLES_INCLUDE})
+  target_link_libraries(dsperate PRIVATE ${DSPERATE_GLES_LIB})
+else()
+  target_compile_definitions(dsperate PRIVATE DSPERATE_GLES=0)
+endif()
 # GCC < 9 requires a separate library for C++17 std::filesystem.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
    CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)

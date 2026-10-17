@@ -145,7 +145,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   rot = ((rot % 360) + 360) % 360;
   if (rot != 0 && rot != 90 && rot != 180 && rot != 270) { std::fprintf(stderr, "video: rotation %d not supported; 0\n", rot); rot = 0; }
   if ((rot == 90 || rot == 270) && !panel) std::swap(w, h);
-  const u32 flags = static_cast<u32>(SDL_WINDOW_RESIZABLE) | (fullscreen ? static_cast<u32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u);
+  const u32 flags = static_cast<u32>(SDL_WINDOW_RESIZABLE) | (fullscreen ? static_cast<u32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u) | (gl_wanted_ ? static_cast<u32>(SDL_WINDOW_OPENGL) : 0u);
   win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), w, h, flags);
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
@@ -278,6 +278,16 @@ bool Display::open_surface_scaling(int rot) {
 bool Display::open_renderer(bool linear, bool vsync, int rot) {
   scaled_ = false;
   rot_ = 0;
+  if (gl_wanted_) {
+    auto g = std::make_unique<GlPresent>();
+    if (g->open(win_, vsync, linear)) {
+      glp_ = std::move(g);
+      if (rot) std::fprintf(stderr, "video: rotation %d is not applied on the GLES path\n", rot);
+      layout();
+      return true;
+    }
+    std::fprintf(stderr, "video: no GLES context; SDL_Renderer instead (no hi-res 3D)\n");
+  }
   if (rot) std::fprintf(stderr, "video: rotation %d is not applied on the renderer path\n", rot);
   const u32 vflag = vsync ? static_cast<u32>(SDL_RENDERER_PRESENTVSYNC) : 0u;
   ren_ = SDL_CreateRenderer(win_, -1, static_cast<u32>(SDL_RENDERER_ACCELERATED) | vflag);
@@ -316,6 +326,7 @@ void Display::close() {
   if (out_) { out_->close(); out_.reset(); }
   frame_px_ = nullptr;
   surf_ = nullptr;   // owned by SDL, freed with the window
+  if (glp_) { glp_->close(); glp_.reset(); }
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
   if (hires_tex_) { SDL_DestroyTexture(hires_tex_); hires_tex_ = nullptr; hires_tw_ = hires_th_ = 0; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
@@ -473,6 +484,7 @@ void Display::draw(const u32* const fb[SCREENS]) {
     disp_->present(slots);
     return;
   }
+  if (glp_) { glp_->draw(views_, nviews_, fb); return; }
   if (!ren_) return;   // renderer tier only; scanline tiers use begin_frame/end_frame
   SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
   SDL_RenderClear(ren_);
@@ -565,6 +577,7 @@ bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
 bool Display::out_size(int& w, int& h) const {
   if (disp_) { w = disp_->logical_w(); h = disp_->logical_h(); return true; }
   if (ren_) return SDL_GetRendererOutputSize(ren_, &w, &h) == 0;
+  if (glp_ && win_) { SDL_GL_GetDrawableSize(win_, &w, &h); return w > 0 && h > 0; }
   if (!win_) return false;
   // Window size is the truth on a scanout tier: the shm surface can lag a
   // configure by a frame, and KMSDRM has no window surface to ask at all.
