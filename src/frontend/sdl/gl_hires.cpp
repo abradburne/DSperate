@@ -594,14 +594,18 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
   static u32 renders = 0;
   ++renders;
-  if (static const char* dump = std::getenv("DS_HIRES_PPM"); dump && std::strchr(dump, ':') && renders == static_cast<u32>(std::atoi(dump))) {
+  // DS_HIRES_PPM=<n>[+<count>]:<path>: frames n..n+count-1, the path suffixed .<frame> after the first.
+  static const char* dump = std::getenv("DS_HIRES_PPM");
+  static const u32 dump_n = dump ? static_cast<u32>(std::atoi(dump)) : 0, dump_k = dump && std::strchr(dump, '+') && std::strchr(dump, '+') < std::strchr(dump, ':') ? static_cast<u32>(std::atoi(std::strchr(dump, '+') + 1)) : 1;
+  if (dump && std::strchr(dump, ':') && renders >= dump_n && renders < dump_n + dump_k) {
     std::vector<u8> px(static_cast<size_t>(W) * H * 4);
     glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    if (std::FILE* o = std::fopen(std::strchr(dump, ':') + 1, "wb")) {
+    const std::string path = std::string(std::strchr(dump, ':') + 1) + (renders == dump_n ? "" : "." + std::to_string(renders));
+    if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
       std::fprintf(o, "P6\n%d %d\n255\n", W, H);
       for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
       std::fclose(o);
-      std::fprintf(stderr, "hires3d: frame %u written to %s\n", renders, std::strchr(dump, ':') + 1);
+      std::fprintf(stderr, "hires3d: frame %u written to %s\n", renders, path.c_str());
     }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
