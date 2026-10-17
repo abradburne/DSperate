@@ -3860,6 +3860,7 @@ sdl_ready:
             static u32 hr_n = 0, hr_now = 0, hr_cap = 0, hr_fromcap = 0;
             ds::sdl::PresentThread& pt = ds::sdl::PresentThread::get();
             pt.wait(gl_job);
+            const auto snap0 = std::chrono::steady_clock::now();
             for (int sc = 0; sc < 2; ++sc) gf.fb[sc].assign(fb[sc], fb[sc] + 256 * 192);
             gf.scr = -1; gf.now = gf.show_cap = false; gf.cap_kind = 0;
             if (gl_hires) {
@@ -3887,7 +3888,9 @@ sdl_ready:
                 }
               }
               hr_now += gf.now; hr_fromcap += gf.show_cap; hr_cap += gf.cap_kind != 0;
-              if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u shown from a capture\n", hr_n, hr_now, hr_cap, hr_fromcap);
+              static double snap_ms = 0;
+              snap_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snap0).count();
+              if (hr_dbg && hr_n % 300 == 0) { std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u shown from a capture; snapshot %.2f ms/frame\n", hr_n, hr_now, hr_cap, hr_fromcap, snap_ms / 300); snap_ms = 0; }
             }
             ds::sdl::Display* const wins[2] = {&display, dual_window ? &display2 : nullptr};
             ds::sdl::GlHires* const gh = gl_hires.get();

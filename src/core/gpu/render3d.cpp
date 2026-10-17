@@ -2777,7 +2777,16 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (gpu_on_ && lean_ && lean_aa_ != aa_) gpu_rebuild();
   if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; pending_bands_ = 0; return; }
   gpu_frame_ = false;
-  if (dl_on_) build_display_list(gx, polys, npoly, display_ ^ 1);
+  if (dl_on_) {
+    static const bool dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
+    const auto t0 = std::chrono::steady_clock::now();
+    build_display_list(gx, polys, npoly, display_ ^ 1);
+    if (dbg) {
+      static double acc = 0; static u32 n = 0;
+      acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      if (++n == 300) { std::fprintf(stderr, "hires3d: display list %.2f ms/frame (%u polys)\n", acc / n, dl_[display_ ^ 1].npoly); acc = 0; n = 0; }
+    }
+  }
   if (prof::enabled && !prep_done) { prof::add_timed(prof::R3D_PREP, prof::now_ns() - t_prep0); prep_done = true; }
 
   u32 nb = band_count(live);
