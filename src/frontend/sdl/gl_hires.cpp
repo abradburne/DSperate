@@ -267,7 +267,7 @@ struct GlHires::Impl {
   GLuint t_base = 0, dep_out = 0;
   std::vector<u32> base;
   GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1;
-  std::vector<std::pair<float, u32>> order;
+  std::vector<std::pair<u32, bool>> prefix_runs;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
   size_t vbo_cap = 0;
@@ -431,24 +431,18 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   auto fan = [&](const GpuPoly& p) { for (u32 t = 1; t + 1 < p.nverts; ++t) { d.vb.push_back(vert(p, 0)); d.vb.push_back(vert(p, t)); d.vb.push_back(vert(p, t + 1)); } };
   const u32 prefix = std::min(f.first_ordered, dl.npoly);
   const bool none_fail = f.alpha_ref == 0;   // with alpha_ref 0 only a 0-alpha pixel fails: one that cannot have one never does
-  d.order.clear();
+  // The prefix in list order: on a depth tie the DS keeps the earlier
+  // polygon, so a reorder (near to far) flickered where polygons meet at
+  // equal depth (NSMB's map). Runs that cannot fail the alpha test take the
+  // early-depth shader; Mali's forward pixel kill still drops hidden work.
+  std::vector<std::pair<u32, bool>>& pruns = d.prefix_runs;   // [first vertex, early]
+  pruns.clear();
   for (u32 k = 0; k < prefix; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
     const bool early = !(p.flags & DS_PF_TEX_ALPHA) && (none_fail || ((p.attr >> 16) & 0x1F) > f.alpha_ref) && ((p.attr >> 16) & 0x1F) != 0;
-    if (!early) continue;
-    s32 zmin = 0x7FFFFFFF;
-    for (u32 v = 0; v < p.nverts; ++v) zmin = std::min(zmin, dl.verts[p.first_vert + v].z);
-    d.order.emplace_back(static_cast<float>(zmin), k);
-  }
-  std::sort(d.order.begin(), d.order.end());
-  for (const auto& e : d.order) fan(dl.polys[e.second]);
-  const u32 early_end = static_cast<u32>(d.vb.size());
-  for (u32 k = 0; k < prefix; ++k) {
-    const GpuPoly& p = dl.polys[k];
-    if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
-    const bool early = !(p.flags & DS_PF_TEX_ALPHA) && (none_fail || ((p.attr >> 16) & 0x1F) > f.alpha_ref) && ((p.attr >> 16) & 0x1F) != 0;
-    if (!early) fan(p);
+    if (pruns.empty() || pruns.back().second != early) pruns.emplace_back(static_cast<u32>(d.vb.size()), early);
+    fan(p);
   }
   const u32 opaque_end = static_cast<u32>(d.vb.size());
   for (u32 k = prefix; k < dl.npoly; ++k) {
@@ -482,16 +476,16 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(wbuf ? GL_GREATER : GL_LESS);
   glDisable(GL_BLEND);
-  if (early_end) {
-    glUseProgram(d.raster_early);
-    glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(early_end));
-  }
+  glUseProgram(d.raster_early);
+  glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon);
   glUseProgram(d.raster);
-  glUniform1ui(d.u_dispcnt, f.dispcnt);
-  glUniform1ui(d.u_alpha_ref, f.alpha_ref);
-  glUniform1uiv(d.u_toon, 32, dl.post.toon);
-  if (opaque_end > early_end) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(early_end), static_cast<GLsizei>(opaque_end - early_end));
+  glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon);
+  for (size_t r = 0; r < d.prefix_runs.size(); ++r) {
+    const u32 v0 = d.prefix_runs[r].first, v1 = r + 1 < d.prefix_runs.size() ? d.prefix_runs[r + 1].first : opaque_end;
+    glUseProgram(d.prefix_runs[r].second ? d.raster_early : d.raster);
+    if (v1 > v0) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
+  }
+  glUseProgram(d.raster);   // the tail: the alpha test may discard
   for (size_t r = 0; r < runs.size(); ++r) {
     const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
     const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
