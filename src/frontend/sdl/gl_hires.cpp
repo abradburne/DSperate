@@ -35,6 +35,7 @@ struct Vtx {
   float rgb[3];
   float st[2];
   u32 attr, texparam, tex_offset, tex_wh, flags;
+  float dz;                     // DS depth (z, or the W-buffer's normalised w), the depth-equal offset applied
 };
 
 constexpr u32 kArenaW = 4096, kArenaH = (2u << 20) / kArenaW;   // Renderer3D's display arena, 8 MB
@@ -45,11 +46,14 @@ layout(location = 1) in vec3 a_rgb;
 layout(location = 2) in vec2 a_st;
 layout(location = 3) in uvec4 a_poly;   // attr, texparam, tex_offset, tex_w | tex_h << 16
 layout(location = 4) in uint a_flags;
+layout(location = 5) in float a_dz;
 out vec3 v_rgb;
 out vec2 v_st;
 flat out uvec4 v_poly;
 flat out uint v_flags;
-void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; v_flags = a_flags; }
+out float v_zp;                  // the DS depth, perspective-correct (W-buffer frames)
+noperspective out float v_zl;    // and linear across the screen (Z-buffer frames)
+void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; v_flags = a_flags; v_zp = a_dz; v_zl = a_dz; }
 )";
 
 // ds_shade.glsl's shade_pixel; the texel arena is a 4096-wide R32UI texture.
@@ -58,6 +62,7 @@ void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; 
 const char* kRasterFS = R"(
 precision highp float; precision highp int; precision highp usampler2D;
 in vec3 v_rgb; in vec2 v_st; flat in uvec4 v_poly; flat in uint v_flags;
+in float v_zp; noperspective in float v_zl;
 uniform highp usampler2D u_texels;
 uniform uint u_dispcnt, u_alpha_ref;
 uniform uint u_toon[32];
@@ -108,12 +113,13 @@ void main() {
   uint ab = a == 0u ? 0u : min(255u, (a + 1u) * 8u);
   o_col = vec4(float(r), float(g), float(b), float(ab)) / 255.0;
   o_id = ((attr >> 24) & 0x3Fu) | 0x80u;
-  // The DS compares integer depths: rounded to them, surfaces at the same
-  // depth tie exactly and the test (LESS: the earlier polygon keeps the
-  // pixel) decides as the DS does, instead of float noise that flickered
-  // as models moved.
-  if (u_wbuf != 0) gl_FragDepth = 1.0 / max(floor(1.0 / gl_FragCoord.z + 0.5), 1.0);
-  else gl_FragDepth = floor(gl_FragCoord.z * 16777215.0 + 0.5) / 16777215.0;
+  // The DS's own depth, rounded to its integer, over 2^24: exact in a float
+  // depth buffer, nearer is smaller in both modes, and surfaces at the same
+  // depth tie exactly, so LESS (the earlier polygon keeps the pixel) decides
+  // as on the DS. (Through GL's -1..1 clip depth the W-buffer's 1/w lost all
+  // its precision: neighbouring surfaces fought and parts vanished.)
+  float zds = u_wbuf != 0 ? v_zp : v_zl;
+  gl_FragDepth = clamp(floor(zds + 0.5), 0.0, 16777215.0) / 16777216.0;
 }
 )";
 
@@ -151,7 +157,7 @@ void main() {
       ivec2 q = clamp(p + o[i], ivec2(0), hi);
       uint nid = texelFetch(u_id, q, 0).r;
       float nz = texelFetch(u_depth, q, 0).r;
-      bool further = u_wbuf != 0 ? nz < z : nz > z;
+      bool further = nz > z;   // the DS's depth in both modes: larger is further
       if ((nid & 0x3Fu) != (id & 0x3Fu) && further) { edge = true; break; }
     }
   }
@@ -445,6 +451,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, st)));
   glEnableVertexAttribArray(3); glVertexAttribIPointer(3, 4, GL_UNSIGNED_INT, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, attr)));
   glEnableVertexAttribArray(4); glVertexAttribIPointer(4, 1, GL_UNSIGNED_INT, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, flags)));
+  glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, dz)));
   glBindVertexArray(0);
   if (glGetError() != GL_NO_ERROR) { if (why) *why = "GL error during setup"; return false; }
   return true;
@@ -502,9 +509,10 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const float x = (sxf + ox) / 256.f * 2.f - 1.f, y = (syf + oy) / 192.f * 2.f - 1.f;
     float z = std::clamp(static_cast<float>(vt.z), 0.f, 16777215.f);
     if (p.attr & 0x4000u) z = std::max(z - (wbuf ? 255.f : 512.f), 0.f);
-    const float zc = wbuf ? (1.f / std::max(z, 1.f)) : (z / 16777215.f);
+    (void)wbuf;
     Vtx o{};
-    o.pos[0] = x * w; o.pos[1] = y * w; o.pos[2] = (zc * 2.f - 1.f) * w; o.pos[3] = w;
+    o.pos[0] = x * w; o.pos[1] = y * w; o.pos[2] = 0.f; o.pos[3] = w;   // depth comes from the fragment shader
+    o.dz = z;
     o.rgb[0] = static_cast<float>(vt.r); o.rgb[1] = static_cast<float>(vt.g); o.rgb[2] = static_cast<float>(vt.b);
     o.st[0] = static_cast<float>(vt.s); o.st[1] = static_cast<float>(vt.t);
     o.attr = p.attr; o.texparam = p.texparam; o.tex_offset = p.tex_offset; o.tex_wh = p.tex_w | (p.tex_h << 16); o.flags = p.flags;
@@ -570,7 +578,6 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   const u32 cc = f.clear_color, ca = (cc >> 24) & 0x1F;
   glClearColor(static_cast<float>(cc & 0x3F) / 255.f, static_cast<float>((cc >> 8) & 0x3F) / 255.f, static_cast<float>((cc >> 16) & 0x3F) / 255.f, ca ? static_cast<float>(std::min(255u, (ca + 1) * 8)) / 255.f : 0.f);
   const float cz = static_cast<float>(f.clear_depth & 0xFFFFFF);
-  glClearDepthf(wbuf ? 1.f / std::max(cz, 1.f) : std::min(1.f, cz / 16777215.f));
   glDepthMask(GL_TRUE); glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
   {   // each attachment its own clear: the id plane is an integer one
@@ -578,11 +585,11 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const GLuint rear_id[4] = {(f.clear_attr >> 24) & 0x3Fu, 0, 0, 0};   // the rear plane: its id, no polygon drew
     glClearBufferfv(GL_COLOR, 0, col);
     glClearBufferuiv(GL_COLOR, 1, rear_id);
-    glClearBufferfi(GL_DEPTH_STENCIL, 0, wbuf ? 1.f / std::max(cz, 1.f) : std::min(1.f, cz / 16777215.f), 0);
+    glClearBufferfi(GL_DEPTH_STENCIL, 0, std::min(cz, 16777215.f) / 16777216.f, 0);
   }
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.arena);
   glEnable(GL_DEPTH_TEST);
-  glDepthFunc(wbuf ? GL_GREATER : GL_LESS);
+  glDepthFunc(GL_LESS);
   glDisable(GL_BLEND);
   // Stencil: the id + 1 of the translucent polygon that last blended a pixel,
   // 0 where an opaque one drew last.
