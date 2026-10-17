@@ -379,10 +379,6 @@ GlHires::~GlHires() = default;
 bool GlHires::init(u32 scale, std::string* why) {
   d_ = std::make_unique<Impl>();
   Impl& d = *d_;
-  d.set_k = (d.set_k + 1) % Impl::kSets;
-  { const Impl::Set& st = d.sets[d.set_k];
-    d.t_top = st.top; d.t_second = st.second; d.t_meta = st.meta; d.t_win = st.win; d.t_regs = st.regs; d.t_fb = st.fb; d.t_class = st.cls; d.t_base = st.base; d.t_under = st.under;
-    d.vao = st.vao; d.vbo = st.vbo; }
   d.S = scale_ = std::clamp(scale, 2u, 4u);
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
   const std::string fs_late = std::string("#version 310 es\n") + kRasterFS;
@@ -487,6 +483,10 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     return 0;
   }
   Impl& d = *d_;
+  d.set_k = (d.set_k + 1) % Impl::kSets;
+  { const Impl::Set& st = d.sets[d.set_k];
+    d.t_top = st.top; d.t_second = st.second; d.t_meta = st.meta; d.t_win = st.win; d.t_regs = st.regs; d.t_fb = st.fb; d.t_class = st.cls; d.t_base = st.base; d.t_under = st.under;
+    d.vao = st.vao; d.vbo = st.vbo; }
   using clk = std::chrono::steady_clock;
   static const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
   static double t_arena = 0, t_fans = 0, t_vbo = 0, t_raster = 0, t_planes = 0, t_comp = 0; static u32 tn = 0;
