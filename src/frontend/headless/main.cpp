@@ -4,6 +4,7 @@
 // Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N
 // frames, optionally tracing instructions or dumping frames/audio.
 #include "core/nds.h"
+#include "core/gba/gba.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
 #include "core/mem/fastmem_census.h"
@@ -31,6 +32,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -174,6 +176,18 @@ void swi_log_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   }
 }
 
+// --gba-trace FILE: every GBA instruction, pc / opcode / cpsr / r0-r3, r12.
+void gba_trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
+  const bool thumb = cpu.thumb();
+  std::fprintf(static_cast<FILE*>(user), "%08x %0*x %08x %08x %08x %08x %08x %08x\n", cpu.hot.regs[15] - (thumb ? 4 : 8), thumb ? 4 : 8, instr,
+               cpu.hot.cpsr, cpu.hot.regs[0], cpu.hot.regs[1], cpu.hot.regs[2], cpu.hot.regs[3], cpu.hot.regs[12]);
+}
+
+bool has_suffix(const char* s, const char* suf) {
+  const size_t n = std::strlen(s), m = std::strlen(suf);
+  return n >= m && !strcasecmp(s + n - m, suf);
+}
+
 void write_blob(const std::string& path, const ds::u8* p, size_t n) {
   if (FILE* f = std::fopen(path.c_str(), "wb")) { std::fwrite(p, 1, n, f); std::fclose(f); }
 }
@@ -281,6 +295,10 @@ int main(int argc, char** argv) {
   double mic_tone_hz = 0;
   std::vector<Touch> touches;          // --touch F:x,y[:N]: press (x,y) from frame F for N frames (default 10)
   bool pace = false;                   // --pace: sleep to 60 frames a second
+  bool gba_rom = false;                // --gba (or a .gba ROM): a Game Boy Advance cartridge
+  const char* gba_bios = nullptr;      // --gba-bios FILE: a GBA BIOS dump instead of the built-in Cult-of-GBA BIOS
+  bool gba_boot_bios = false;          // --gba-boot-bios: run the BIOS's boot screen instead of starting at the cartridge
+  const char* gba_trace = nullptr;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
@@ -354,6 +372,10 @@ int main(int argc, char** argv) {
     else if (arg("--stats-from")) stats_from = std::atoi(argv[++i]);
     else if (arg("--pc-profile")) pc_profile = argv[++i];                   // a sampling profile of every thread from --stats-from on
     else if (arg("--save-state-at")) { save_state_at = std::atoi(argv[++i]); save_state_path = std::strchr(argv[i], ':'); if (save_state_path) ++save_state_path; }   // N:path -- write after N frames (0 = at once)
+    else if (flag("--gba")) gba_rom = true;
+    else if (arg("--gba-bios")) gba_bios = argv[++i];
+    else if (flag("--gba-boot-bios")) gba_boot_bios = true;
+    else if (arg("--gba-trace")) gba_trace = argv[++i];
     else rom = argv[i];
   }
   // Without --direct, replay inputs land in the firmware setup wizard instead.
@@ -452,7 +474,8 @@ int main(int argc, char** argv) {
     }
   }
   if (nds.firmware_synthetic) std::fprintf(stderr, "note: --firmware %s; using a generated firmware\n", fw ? "not found" : "not given");
-  if (!direct && !nds.can_boot_firmware()) {
+  if (rom && has_suffix(rom, ".gba")) gba_rom = true;
+  if (!gba_rom && !direct && !nds.can_boot_firmware()) {
     // FreeBIOS's reset vector is an idle loop, so a firmware boot draws nothing.
     if (rom) { std::fprintf(stderr, "booting the firmware needs real BIOS and firmware dumps; pass --direct to run the ROM\n"); return 1; }
     std::fprintf(stderr, "warning: no ROM and no real dumps: nothing boots (FreeBIOS has no boot code)\n");
@@ -471,7 +494,21 @@ int main(int argc, char** argv) {
     if (pct / 10 != last / 10 || done == total) { std::fprintf(stderr, "\rzip: extracting %llu%%", static_cast<unsigned long long>(pct)); last = pct; }
     if (done == total) std::fputc('\n', stderr);
   };
-  if (rom && ds::io::is_shortcut_name(rom)) {
+  if (gba_rom) {
+    std::string err;
+    if (!rom) { std::fprintf(stderr, "--gba needs a ROM\n"); return 1; }
+    if (!nds.load_gba(rom, gba_bios ? gba_bios : "", &err)) { std::fprintf(stderr, "gba: %s\n", err.c_str()); return 1; }
+    nds.gba->skip_bios = !gba_boot_bios;
+    nds.gba->reset();
+    const ds::u32 code = nds.gba->game_code();
+    std::fprintf(stderr, "gba: \"%s\" %.4s, %u KB, BIOS %s\n", nds.gba->title().c_str(), reinterpret_cast<const char*>(&code),
+                 nds.gba->rom_size >> 10, nds.gba->bios_native ? "dump" : "Cult-of-GBA (built in)");
+    if (gba_trace) {
+      FILE* f = std::fopen(gba_trace, "w");
+      if (!f) { std::fprintf(stderr, "could not open %s\n", gba_trace); return 1; }
+      nds.gba->trace = gba_trace_cb; nds.gba->trace_user = f;
+    }
+  } else if (rom && ds::io::is_shortcut_name(rom)) {
     // NAND title shortcut: title comes from --dsi-nand, handed over as --dsi-hle-launch does for a ROM file.
     ds::io::NandShortcut sc;
     std::string err;
@@ -573,7 +610,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "dsi: %08x is not installed on the NAND; its image path names content 00000000\n", lo);
     std::fprintf(stderr, "dsi: launcher hand-off for %08x, content %08x\n", lo, nds.dsi_hle_content_id);
   }
-  if ((rom && direct) || (nds.dsi && nds.dsi_nand_boot)) nds.setup_direct_boot();
+  if (!nds.gba_mode() && ((rom && direct) || (nds.dsi && nds.dsi_nand_boot))) nds.setup_direct_boot();
   if (dsi_autoload) {
     const ds::u32 lo = dsi_autoload_id ? static_cast<ds::u32>(dsi_autoload_id) : dsi_title_lo;
     const ds::u32 hi = dsi_autoload_id ? static_cast<ds::u32>(dsi_autoload_id >> 32) : 0x00030004;
@@ -869,6 +906,16 @@ int main(int argc, char** argv) {
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
   wd_stop.store(true); if (wd.joinable()) wd.join();
+  if (nds.gba) {
+    const ds::CpuContext& c = *nds.gba->cpu;
+    std::fprintf(stderr, "gba: end pc %08x cpsr %08x r0 %08x r12 %08x\n", c.hot.regs[15] - (c.thumb() ? 4 : 8), c.hot.cpsr, c.hot.regs[0], c.hot.regs[12]);
+    if (std::getenv("DS_GBA_DEBUG")) {
+      int nz = 0; for (ds::u32 k = 0; k < ds::gba::VRAM_SIZE; ++k) nz += nds.gba->vram[k] != 0;
+      std::fprintf(stderr, "gba: dispcnt %04x vram nonzero %d pal0 %04x pal1 %04x bg2pa %04x\n", nds.gba->io_read16(0), nz,
+                   nds.gba->palette[0] | (nds.gba->palette[1] << 8), nds.gba->palette[2] | (nds.gba->palette[3] << 8), nds.gba->io[0x20] | (nds.gba->io[0x21] << 8));
+    }
+    if (gba_trace) std::fclose(static_cast<FILE*>(nds.gba->trace_user));
+  }
   if (pc_profile && !ds::pcsample::write(pc_profile)) std::fprintf(stderr, "--pc-profile: cannot write %s\n", pc_profile);
   if (fw_override && nds.firmware_override_dirty()) {
     std::string err;

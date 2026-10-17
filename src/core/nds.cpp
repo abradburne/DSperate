@@ -11,6 +11,7 @@
 #include "core/cart/zip.h"
 #include "core/bios/freebios.h"
 #include "core/cart/zip_cache.h"
+#include "core/gba/gba.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -71,6 +72,7 @@ void NDS::reset() {
   exit_requested = false;
   dsi_dsp_started = false;
   dsi_loader_launched = false;
+  if (gba) gba->reset();
 }
 
 // Normalises the touchscreen calibration in both user-settings blocks so an
@@ -435,7 +437,34 @@ void NDS::setup_direct_boot() {
   io.arm7_bios_prot = 0x1204;
 }
 
+bool NDS::load_gba(const std::string& path, const std::string& bios_path, std::string* err) {
+  std::vector<u8> image = slurp(path);
+  if (image.empty()) { if (err) *err = "cannot read " + path; return false; }
+  if (cart::is_zip(image.data(), image.size())) { if (err) *err = path + ": zipped GBA ROMs are not supported yet"; return false; }
+  auto g = std::make_unique<gba::Gba>();
+  if (!g->load_bios(bios_path, err)) return false;
+  if (!g->load_rom(std::move(image), err)) return false;
+  g->reset();
+  cart.reset();
+  rom_id = g->rom_id;
+  bios_id = g->bios_id;
+  gba = std::move(g);
+  frame_count = 0;
+  frame_ready = false;
+  return true;
+}
+
+// One GBA frame (to its VBlank), shown through the DS's output stage.
+static void run_gba_frame(NDS& nds) {
+  nds.gba->set_keys(nds.io.keyinput & 0x3FF);
+  nds.gba->run_frame();
+  nds.gpu.show_gba(nds.gba->framebuffer());
+  nds.frame_ready = true;
+  ++nds.frame_count;
+}
+
 void NDS::run_frame() {
+  if (gba) { run_gba_frame(*this); return; }
   if (frame_in_slices) { sched.run_until_frame(); frame_in_slices = false; ++frame_count; return; }   // finish a sliced frame
   if (!gpu.frame_begun()) gpu.begin_frame();   // first frame after reset/direct boot starts at line 0 without a line-0 event
   frame_ready = false;
@@ -445,6 +474,7 @@ void NDS::run_frame() {
 }
 
 bool NDS::run_frame_slice(u64 cycles) {
+  if (gba) { run_gba_frame(*this); return true; }
   if (!frame_in_slices) {
     if (!gpu.frame_begun()) gpu.begin_frame();
     frame_ready = false;
@@ -504,7 +534,33 @@ template <class S> void sync_sd(S& s, io::SdCard::StateSnapshot& c) {
 }
 } // namespace
 
+namespace {
+// The HEAD chunk's thumbnail: the top screen, RGB565, every other pixel.
+void put_thumbnail(state::Writer& w, const u32* fb) {
+  w.put(THUMB_W); w.put(THUMB_H);
+  for (u32 y = 0; y < THUMB_H; ++y)
+    for (u32 x = 0; x < THUMB_W; ++x) {
+      const u32 p = fb[(y * 2) * SCREEN_W + x * 2];
+      w.put(static_cast<u16>(((p >> 8) & 0xF800) | ((p >> 5) & 0x07E0) | ((p >> 3) & 0x001F)));
+    }
+}
+} // namespace
+
 bool NDS::save_state(state::Writer& w, std::string& err) {
+  if (gba) {
+    // The same file and HEAD as a DS state (frontends read the thumbnail
+    // from it), machine 1 appended, then the GBA machine.
+    w.blob("DSST", 4);
+    w.put(state::FORMAT_VERSION);
+    w.begin("HEAD");
+    w.put(gba->game_code()); w.put(rom_id); w.put(bios_id); w.put(u64{0}); w.put(frame_count); w.put(u32{0});
+    put_thumbnail(w, gpu.framebuffer(0));
+    w.put(u32{0});   // not a DSi
+    w.put(u32{1});   // machine: GBA
+    w.end();
+    gba->sync_state(w);
+    return true;
+  }
   if (!cart && !dsi) { err = "no cartridge"; return false; }
   if (dsi && dsi_nand.write_through()) { err = "the NAND is written through to its file, which a state cannot carry"; return false; }
   if (!sched.at_slice_boundary() || gpu.line() != 0 || !gpu.at_line_start()) { err = "not at a frame boundary"; return false; }
@@ -527,14 +583,7 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
 #else
   w.put(u32{0});
 #endif
-  // A thumbnail of the top screen, RGB565.
-  w.put(THUMB_W); w.put(THUMB_H);
-  const u32* fb = gpu.framebuffer(0);
-  for (u32 y = 0; y < THUMB_H; ++y)
-    for (u32 x = 0; x < THUMB_W; ++x) {
-      const u32 p = fb[(y * 2) * SCREEN_W + x * 2];
-      w.put(static_cast<u16>(((p >> 8) & 0xF800) | ((p >> 5) & 0x07E0) | ((p >> 3) & 0x001F)));
-    }
+  put_thumbnail(w, gpu.framebuffer(0));   // a thumbnail of the top screen
   w.put(u32{dsi ? 1u : 0u});   // appended (FORMAT_VERSION 3); a version-2 state reads 0, a DS
   w.end();
   if (dsi) {
@@ -574,7 +623,20 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   u32 thumb_w = 0, thumb_h = 0; r.fields(thumb_w, thumb_h);
   for (u32 i = 0; i < thumb_w * thumb_h && r.more(); ++i) { u16 px; r.put(px); }
   u32 state_dsi = 0; r.put(state_dsi);
+  u32 machine = 0; r.put(machine);   // 1: GBA (absent before GBA mode: a DS)
   r.end();
+  if ((machine == 1) != gba_mode()) { err = gba ? "save state is for a DS game, and this is a GBA one" : "save state is for a GBA game, and this is a DS one"; return false; }
+  if (gba) {
+    if (code != gba->game_code()) { err = "save state is for another game"; return false; }
+    if (ident != rom_id) { err = "save state is for another ROM image"; return false; }
+    if (bios != bios_id) { err = "save state was made with a different GBA BIOS"; return false; }
+    gba->sync_state(r);
+    if (!r.ok()) { err = r.error(); return false; }
+    gba->after_load();
+    frame_count = frames;
+    frame_ready = false;
+    return true;
+  }
   if ((state_dsi != 0) != dsi) { err = dsi ? "save state is for a DS, and this is a DSi" : "save state is for a DSi, and this is a DS"; return false; }
   // A firmware-boot state records a zero game code/identity, and only loads back into another firmware boot.
   const u32 want_code = cart ? cart->header().game_code_u32() : 0u;

@@ -6,7 +6,7 @@
 #include "core/cpu/interp/interp_internal.h"
 #include "core/cpu/cp15.h"
 
-namespace ds::interp {
+namespace ds::DS_INTERP_NS {
 
 using arm::AOp;
 
@@ -64,6 +64,10 @@ void data_processing(CpuContext& cpu, u32 instr, u32 op2, bool sc, u32 rn_val, u
   }
 
   if (internal) charge_CI(cpu, internal); else charge_C(cpu);
+#if DS_INTERP_GBA
+  // ARMv3's TSTP/TEQP/CMPP/CMNP: a test with Rd = 15 copies SPSR to CPSR, no branch (jsmolka arm 234/235).
+  if (!write && rd == 15 && s) { cpu.restore_cpsr(); return; }
+#endif
   if (!write) return;
   if (rd == 15) {
     if (s) cpu.restore_cpsr();            // e.g. MOVS pc, lr / SUBS pc, lr, #4
@@ -408,7 +412,9 @@ void exec_arm(CpuContext& cpu, u32 instr) {
   case AOp::Stm: ldm_stm(cpu, instr, false); return;
 
   case AOp::Swi:
+#if !DS_INTERP_GBA
     if ((cpu.nds->dsi_font_hle || cpu.nds->dsi_loader_watch) && cpu.nds->dsi_hle_swi(cpu, (instr >> 16) & 0xFF)) return;
+#endif
     cpu.raise_exception(CpuContext::Exception::Swi); return;
   case AOp::Bkpt: cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;
 
@@ -435,4 +441,4 @@ void exec_arm(CpuContext& cpu, u32 instr) {
   undefined(cpu);
 }
 
-} // namespace ds::interp
+} // namespace ds::DS_INTERP_NS

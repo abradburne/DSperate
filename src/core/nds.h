@@ -24,6 +24,7 @@
 
 namespace ds {
 namespace state { class Writer; class Reader; }
+namespace gba { struct Gba; }
 
 // Per-instruction trace callback: called with r15 already pipeline-adjusted
 // (instruction address + 8 / + 4) before the instruction executes.
@@ -157,6 +158,14 @@ struct NDS {
   bool save_firmware_override(const std::string& path, std::string& err);
   bool firmware_override_dirty() const { return fw_dirty_pages > 0; }
   void firmware_written(u32 offset);   // called from the SPI page-write path
+  // GBA mode: a Game Boy Advance cartridge instead of a DS one (core/gba,
+  // the DS's ARM7 in its GBA role). Once loaded, run_frame(), the
+  // framebuffers (Gpu::show_gba), save states and reset() run the GBA
+  // machine; KEYINPUT (io.keyinput) is its keypad. `bios` empty or missing
+  // takes the built-in Cult-of-GBA BIOS.
+  bool load_gba(const std::string& rom, const std::string& bios, std::string* err = nullptr);
+  std::unique_ptr<gba::Gba> gba;
+  bool gba_mode() const { return gba != nullptr; }
   void run_frame();
   // run_frame() in pieces: runs up to `cycles` of the current frame, true
   // when it completed. Lets local wireless answer a peer's CMD within a

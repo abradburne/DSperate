@@ -59,6 +59,12 @@ add_library(dsperate_core STATIC
   io/dsi_sd_card.cpp
   io/dsi_font.cpp
   io/dsi_nwifi.cpp
+  gba/gba.cpp
+  gba/gba_ppu.cpp
+  gba/gba_interp.cpp
+  gba/gba_interp_arm.cpp
+  gba/gba_interp_thumb.cpp
+  gba/bios/cultbios_data.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

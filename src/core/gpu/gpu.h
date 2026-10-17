@@ -86,6 +86,10 @@ public:
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
+  // GBA mode (NDS::gba): the GBA's 240x160 picture centred on the top screen
+  // (an 8/16 px black border: 4x is exactly 960x640 inside the 1024x768
+  // panel), the bottom screen black; through the scaler when it is on.
+  void show_gba(const u32* px240x160);
   // Hi-res 3D (video.hires3d): engine A's lines are kept (Engine2D::HiresLine)
   // for the frontend to composite again with the 3D layer drawn at a higher
   // resolution from the frame's polygon list (Renderer3D::set_display_list).

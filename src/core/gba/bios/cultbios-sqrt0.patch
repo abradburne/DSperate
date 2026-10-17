@@ -1,0 +1,13 @@
+--- a/bios_calls/math/sqrt.s	2026-10-17 14:16:52
++++ b/bios_calls/math/sqrt.s	2026-10-17 14:36:24
+@@ -1,6 +1,10 @@
+ swi_Sqrt:
+     @ idea: binary search with a power of 2 as initial guess
+     
++    @ DSperate: Sqrt(0) is 0 (the search below starts at 1)
++    cmp r0, #0
++    bxeq lr
++    
+     stmfd sp!, { r1, r2, r3, r4 }
+     
+     @ find power of 2 as initial guess

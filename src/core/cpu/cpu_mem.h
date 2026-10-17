@@ -15,6 +15,10 @@ namespace ds {
 
 inline u32 rotr32(u32 v, u32 n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
 
+// The GBA build of the interpreter brings its own accessors under these
+// names (core/gba/gba_cpu_mem.h); argument-dependent lookup would find
+// these too, so they stay out of its translation units.
+#if !defined(DS_INTERP_GBA) || !DS_INTERP_GBA
 // DS_CENSUS=1 (census builds): every executed data access, for sizing the
 // JIT's per-access cost accounting. Null unless the census is on.
 extern void (*g_census_access)(bool a9, u32 addr, bool seq);
@@ -90,5 +94,7 @@ inline u16 fetch16(CpuContext& cpu, u32 addr) {
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
   return static_cast<u16>(cpu.nds->bus.fetch(cpu.which, addr, 16));
 }
+
+#endif // !DS_INTERP_GBA
 
 } // namespace ds
