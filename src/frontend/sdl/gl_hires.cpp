@@ -13,6 +13,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<
 } // namespace ds::sdl
 #else
 #include <GLES3/gl31.h>
+#include <SDL2/SDL.h>
 
 #include <algorithm>
 #include <chrono>
@@ -56,41 +57,66 @@ out vec2 v_zw;     // (z w, w): their ratio is z linear across the screen (Z-buf
 void main() { gl_Position = a_pos; v_rgb = a_rgb; v_st = a_st; v_poly = a_poly; v_flags = a_flags; v_zp = a_dz; v_zw = vec2(a_dz * a_pos.w, a_pos.w); }
 )";
 
-// ds_shade.glsl's shade_pixel; the texel arena is a 4096-wide R32UI texture.
-// EARLY: for polygons whose alpha cannot fail the test -- no discard, so the
-// depth test (and Mali's forward pixel kill) runs before shading.
+// ds_shade.glsl's shade_pixel, the texel arena a storage buffer. Variants:
+// (none) a polygon drawn as is (the translucent tail); PREPASS the opaque
+// prefix's depth test and visibility record; RESOLVE that record shaded, once
+// a pixel, full screen. Measured on Golden Sun's title at 2x (DS_HIRES_BENCH):
+// shading every overlapping fragment of the prefix (~4x the screen) was the
+// bulk of the 3D's GPU time on the one-core G52.
 const char* kRasterFS = R"(
 precision highp float; precision highp int; precision highp usampler2D;
-in vec3 v_rgb; in vec2 v_st; flat in uvec4 v_poly; flat in uint v_flags;
-in float v_zp; in vec2 v_zw;
-uniform highp usampler2D u_texels;
+layout(std430, binding = 0) readonly buffer Texels { uint texels[]; };   // the arena, linear
 uniform uint u_dispcnt, u_alpha_ref;
 uniform uint u_toon[32];
 uniform int u_wbuf;
 uniform int u_split;   // a translucent polygon's pixels: 0 all, 1 the opaque ones (alpha 31), 2 the rest
+#ifdef RESOLVE
+layout(std430, binding = 1) readonly buffer Polys { uvec4 polys[]; };   // two a polygon: attr, texparam, tex_offset, w | h << 16; flags
+uniform highp usampler2D u_g0, u_g1;   // the pre-pass's: winner id << 18 | vertex colour; texel s, t
+#else
+in vec3 v_rgb; in vec2 v_st; flat in uvec4 v_poly; flat in uint v_flags;
+in float v_zp; in vec2 v_zw;
+#endif
+#ifdef PREPASS
+layout(location = 0) out uint o_g0;
+layout(location = 1) out uint o_g1;
+#else
 out vec4 o_col;
 layout(location = 1) out uint o_id;   // edge marking: the polygon id | 0x80 (an opaque polygon drew here)
-uint texel(uint i) { return texelFetch(u_texels, ivec2(int(i & 4095u), int(i >> 12)), 0).r; }
+#endif
+uint texel(uint i) { return texels[i]; }
 uint c15_to_18(uint c, uint shift) { uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu); return v != 0u ? v + 1u : v; }
-void main() {
-  uint attr = v_poly.x, texparam = v_poly.y, tex_offset = v_poly.z;
-  int w = int(v_poly.w & 0xFFFFu), h = int(v_poly.w >> 16);
+#ifndef RESOLVE
+float ds_depth() {
+  // The DS's own depth, rounded to its integer, over 2^24: exact in a float
+  // depth buffer, nearer is smaller in both modes, and surfaces at the same
+  // depth tie exactly, so LESS (the earlier polygon keeps the pixel) decides
+  // as on the DS. (Through GL's -1..1 clip depth the W-buffer's 1/w lost all
+  // its precision: neighbouring surfaces fought and parts vanished.)
+  float zds = u_wbuf != 0 ? v_zp : v_zw.x / v_zw.y;
+  return clamp(floor(zds + 0.5), 0.0, 16777215.0) / 16777216.0;
+}
+#endif
+// The texel at the DS texel coordinate (s, t), wrapped, flipped or clamped.
+uint fetch(uint texparam, uint tex_offset, uint wh, int s, int t) {
+  int w = int(wh & 0xFFFFu), h = int(wh >> 16);
+  bool rep_s = (texparam & 0x10000u) != 0u, rep_t = (texparam & 0x20000u) != 0u;
+  bool flp_s = (texparam & 0x40000u) != 0u, flp_t = (texparam & 0x80000u) != 0u;
+  if (rep_s) { if (flp_s && (s & w) != 0) s = (w - 1) - (s & (w - 1)); else s &= w - 1; } else s = clamp(s, 0, w - 1);
+  if (rep_t) { if (flp_t && (t & h) != 0) t = (h - 1) - (t & (h - 1)); else t &= h - 1; } else t = clamp(t, 0, h - 1);
+  return texel(tex_offset + uint(t * w + s));
+}
+// ds_shade.glsl's shade_pixel: 6-bit r, g, b and 5-bit alpha.
+uvec4 shade(uint attr, uint texparam, uint tex_offset, uint wh, uint flags, uint vr, uint vg, uint vb, int s, int t) {
   uint blendmode = (attr >> 4) & 3u, polyalpha = (attr >> 16) & 0x1Fu;
-  vec3 rgb = clamp(v_rgb, vec3(0.0), vec3(511.0));
-  uint vr = uint(int(round(rgb.r)) >> 3) & 0x3Fu, vg = uint(int(round(rgb.g)) >> 3) & 0x3Fu, vb = uint(int(round(rgb.b)) >> 3) & 0x3Fu;
   uint r, g, b, a;
   bool highlight = (u_dispcnt & 2u) != 0u;
   if (blendmode == 2u) {
     if (highlight) { vg = vr; vb = vr; }
     else { uint tc = u_toon[vr >> 1]; vr = c15_to_18(tc, 0u); vg = c15_to_18(tc, 4u); vb = c15_to_18(tc, 9u); }
   }
-  if ((v_flags & 8u) != 0u) {
-    int s = int(floor(v_st.x + 0.01)) >> 4, t = int(floor(v_st.y + 0.01)) >> 4;
-    bool rep_s = (texparam & 0x10000u) != 0u, rep_t = (texparam & 0x20000u) != 0u;
-    bool flp_s = (texparam & 0x40000u) != 0u, flp_t = (texparam & 0x80000u) != 0u;
-    if (rep_s) { if (flp_s && (s & w) != 0) s = (w - 1) - (s & (w - 1)); else s &= w - 1; } else s = clamp(s, 0, w - 1);
-    if (rep_t) { if (flp_t && (t & h) != 0) t = (h - 1) - (t & (h - 1)); else t &= h - 1; } else t = clamp(t, 0, h - 1);
-    uint tpk = texel(tex_offset + uint(t * w + s));
+  if ((flags & 8u) != 0u) {
+    uint tpk = fetch(texparam, tex_offset, wh, s, t);
     uint tcol = tpk & 0xFFFFu, ta = (tpk >> 16) & 0x1Fu;
     uint tr = c15_to_18(tcol, 0u), tg = c15_to_18(tcol, 4u), tb = c15_to_18(tcol, 9u);
     if ((blendmode & 1u) != 0u) {
@@ -107,21 +133,57 @@ void main() {
     uint tc = u_toon[vr >> 1];
     r = min(r + c15_to_18(tc, 0u), 63u); g = min(g + c15_to_18(tc, 4u), 63u); b = min(b + c15_to_18(tc, 9u), 63u);
   }
-#ifndef EARLY
+  return uvec4(r, g, b, a);
+}
+void main() {
+#ifdef RESOLVE
+  // Each pixel the pre-pass's winner covers, shaded once from what it kept.
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  uint g0 = texelFetch(u_g0, px, 0).r;
+  uint id = g0 >> 18;
+  if (id == 0u) discard;   // no opaque polygon: the clear stays
+  uint g1 = texelFetch(u_g1, px, 0).r;
+  uvec4 p = polys[2u * (id - 1u)], q = polys[2u * (id - 1u) + 1u];
+  uint attr = p.x;
+  uvec4 c = shade(attr, p.y, p.z, p.w, q.x, (g0 >> 12) & 0x3Fu, (g0 >> 6) & 0x3Fu, g0 & 0x3Fu, int(g1 << 16) >> 16, int(g1) >> 16);
+  uint r = c.x, g = c.y, b = c.z, a = c.w;
+#else
+  uint attr = v_poly.x;
+  int s = int(floor(v_st.x + 0.01)) >> 4, t = int(floor(v_st.y + 0.01)) >> 4;
+#ifdef PREPASS
+  // Only what the alpha test and the depth need: a texture's alpha only
+  // where the texture has one (else the alpha is the polygon's). The
+  // winner's id, vertex colour and texel coordinate are kept for the resolve.
+  uint polyalpha = (attr >> 16) & 0x1Fu, a = polyalpha;
+  if ((v_flags & 0x48u) == 0x48u && ((attr >> 4) & 1u) == 0u) {
+    uint ta = (fetch(v_poly.y, v_poly.z, v_poly.w, s, t) >> 16) & 0x1Fu;
+    a = ((ta + 1u) * (polyalpha + 1u) - 1u) >> 5;
+  }
+  if (a <= u_alpha_ref) discard;
+  vec3 rgb = clamp(v_rgb, vec3(0.0), vec3(511.0));
+  uint vr = uint(int(round(rgb.r)) >> 3) & 0x3Fu, vg = uint(int(round(rgb.g)) >> 3) & 0x3Fu, vb = uint(int(round(rgb.b)) >> 3) & 0x3Fu;
+  o_g0 = ((v_flags >> 12) << 18) | (vr << 12) | (vg << 6) | vb;
+  o_g1 = (uint(s) & 0xFFFFu) | (uint(t) << 16);
+  gl_FragDepth = ds_depth();
+  return;
+#else
+  vec3 rgb = clamp(v_rgb, vec3(0.0), vec3(511.0));
+  uint vr = uint(int(round(rgb.r)) >> 3) & 0x3Fu, vg = uint(int(round(rgb.g)) >> 3) & 0x3Fu, vb = uint(int(round(rgb.b)) >> 3) & 0x3Fu;
+  uvec4 c = shade(attr, v_poly.y, v_poly.z, v_poly.w, v_flags, vr, vg, vb, s, t);
+  uint r = c.x, g = c.y, b = c.z, a = c.w;
   if (a <= u_alpha_ref) discard;
   if (u_split != 0 && ((a == 31u) != (u_split == 1))) discard;
 #endif
+#endif
+#ifndef PREPASS
   // Raw 6-bit channels; alpha (a + 1) * 8 so the blend's SRC_ALPHA is (a + 1) / 32, as the lean raster.
   uint ab = a == 0u ? 0u : min(255u, (a + 1u) * 8u);
   o_col = vec4(float(r), float(g), float(b), float(ab)) / 255.0;
   o_id = ((attr >> 24) & 0x3Fu) | 0x80u;
-  // The DS's own depth, rounded to its integer, over 2^24: exact in a float
-  // depth buffer, nearer is smaller in both modes, and surfaces at the same
-  // depth tie exactly, so LESS (the earlier polygon keeps the pixel) decides
-  // as on the DS. (Through GL's -1..1 clip depth the W-buffer's 1/w lost all
-  // its precision: neighbouring surfaces fought and parts vanished.)
-  float zds = u_wbuf != 0 ? v_zp : v_zw.x / v_zw.y;
-  gl_FragDepth = clamp(floor(zds + 0.5), 0.0, 16777215.0) / 16777216.0;
+#if !defined(RESOLVE)
+  gl_FragDepth = ds_depth();
+#endif
+#endif
 }
 )";
 
@@ -318,12 +380,19 @@ GLuint tex2d(GLenum fmt, GLsizei w, GLsizei h) {
 
 struct GlHires::Impl {
   u32 S = 2;
-  GLuint raster = 0, raster_early = 0, comp = 0, fast = 0;
+  GLuint raster = 0, comp = 0, fast = 0;
+  // The opaque prefix as a visibility buffer: `pre` runs the DS depth test
+  // (the depth from the shader, so nothing is rejected early) with a cheap
+  // shader and keeps each pixel's winner, vertex colour and texel coordinate
+  // (g0, g1); `resolve` then shades each pixel once, full screen.
+  GLuint pre = 0, resolve = 0, g0 = 0, g1 = 0, fbo_pre = 0;
+  GLint p_alpha_ref = -1, p_wbuf = -1, w_dispcnt = -1, w_toon = -1;
+  GLuint polys[3] = {}; int polys_k = 0;   // the polygons' records for the resolve, a ring
+  std::vector<u32> precs;
   GLint f_scale = -1;
   GLuint t_base = 0, t_under = 0, dep_out = 0;
   std::vector<u32> base, under;
-  GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1, e_wbuf = -1, r_wbuf = -1;
-  std::vector<std::pair<u32, bool>> prefix_runs;
+  GLint r_wbuf = -1;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1, r_split = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
   GLuint arena = 0;
@@ -355,8 +424,15 @@ struct GlHires::Impl {
       if (st.vao) glDeleteVertexArrays(1, &st.vao);
     }
     glDeleteTextures(kOut, out);
-    GLuint texs[] = {arena, col3d};
+    GLuint texs[] = {col3d};
+    if (arena) glDeleteBuffers(1, &arena);
     for (GLuint t : texs) if (t) glDeleteTextures(1, &t);
+    if (pre) glDeleteProgram(pre);
+    if (resolve) glDeleteProgram(resolve);
+    if (g0) glDeleteTextures(1, &g0);
+    if (g1) glDeleteTextures(1, &g1);
+    glDeleteBuffers(3, polys);
+    if (fbo_pre) glDeleteFramebuffers(1, &fbo_pre);
     if (dep3d) glDeleteTextures(1, &dep3d);
     if (id3d) glDeleteTextures(1, &id3d);
     if (col_edge) glDeleteTextures(1, &col_edge);
@@ -366,7 +442,6 @@ struct GlHires::Impl {
     glDeleteFramebuffers(kOut, fbo_out);
     if (vao_empty) glDeleteVertexArrays(1, &vao_empty);
     if (raster) glDeleteProgram(raster);
-    if (raster_early) glDeleteProgram(raster_early);
     if (comp) glDeleteProgram(comp);
     if (fast) glDeleteProgram(fast);
     if (dep_out) glDeleteRenderbuffers(1, &dep_out);
@@ -382,17 +457,19 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.S = scale_ = std::clamp(scale, 2u, 4u);
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
   const std::string fs_late = std::string("#version 310 es\n") + kRasterFS;
-  // EARLY: no discard. (No early_fragment_tests: the shader writes the depth.)
-  const std::string fs_early = std::string("#version 310 es\n#define EARLY 1\n") + kRasterFS;
   d.raster = program(kRasterVS, fs_late.c_str(), why);
-  d.raster_early = program(kRasterVS, fs_early.c_str(), why);
-  if (!d.raster_early) return false;
-  d.e_dispcnt = glGetUniformLocation(d.raster_early, "u_dispcnt");
-  d.e_wbuf = glGetUniformLocation(d.raster_early, "u_wbuf");
-  d.e_alpha_ref = glGetUniformLocation(d.raster_early, "u_alpha_ref");
-  d.e_toon = glGetUniformLocation(d.raster_early, "u_toon");
-  glUseProgram(d.raster_early);
-  glUniform1i(glGetUniformLocation(d.raster_early, "u_texels"), 0);
+  const std::string fs_pre = std::string("#version 310 es\n#define PREPASS 1\n") + kRasterFS;
+  const std::string fs_res = std::string("#version 310 es\n#define RESOLVE 1\n") + kRasterFS;
+  d.pre = program(kRasterVS, fs_pre.c_str(), why);
+  d.resolve = program(kFullVS, fs_res.c_str(), why);
+  if (!d.pre || !d.resolve) return false;
+  d.p_alpha_ref = glGetUniformLocation(d.pre, "u_alpha_ref"); d.p_wbuf = glGetUniformLocation(d.pre, "u_wbuf");
+  glUseProgram(d.resolve);
+  glUniform1i(glGetUniformLocation(d.resolve, "u_g0"), 1);
+  glUniform1i(glGetUniformLocation(d.resolve, "u_g1"), 2);
+  d.w_dispcnt = glGetUniformLocation(d.resolve, "u_dispcnt"); d.w_toon = glGetUniformLocation(d.resolve, "u_toon");
+  glGenBuffers(3, d.polys);
+  for (GLuint b : d.polys) { glBindBuffer(GL_SHADER_STORAGE_BUFFER, b); glBufferData(GL_SHADER_STORAGE_BUFFER, DS_MAX_POLYS * 32, nullptr, GL_STREAM_DRAW); }
   d.comp = program(kFullVS, kCompositeFS, why);
   d.fast = program(kFullVS, kFastFS, why);
   if (!d.fast) return false;
@@ -416,7 +493,6 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.u_alpha_ref = glGetUniformLocation(d.raster, "u_alpha_ref");
   d.u_toon = glGetUniformLocation(d.raster, "u_toon");
   glUseProgram(d.raster);
-  glUniform1i(glGetUniformLocation(d.raster, "u_texels"), 0);
   glUseProgram(d.comp);
   const char* names[] = {"u_top", "u_second", "u_meta", "u_win", "u_regs", "u_fb", "u_3d", "u_class"};
   for (int i = 0; i < 8; ++i) glUniform1i(glGetUniformLocation(d.comp, names[i]), i);
@@ -424,7 +500,8 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.u_mode = glGetUniformLocation(d.comp, "u_mode");
   glUniform1i(d.u_scale, static_cast<GLint>(d.S));
 
-  d.arena = tex2d(GL_R32UI, kArenaW, static_cast<GLsizei>(kArenaH));
+  glGenBuffers(1, &d.arena); glBindBuffer(GL_SHADER_STORAGE_BUFFER, d.arena);
+  glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(kArenaW) * kArenaH * 4, nullptr, GL_STATIC_DRAW);
   d.col3d = tex2d(GL_RGBA8, W, H);
   // Float depth, as the lean raster's: W-buffer frames store 1/w, and at DS depths of tens of
   // thousands neighbouring values are closer than a 24-bit fixed step, so a surface and its
@@ -437,6 +514,13 @@ bool GlHires::init(u32 scale, std::string* why) {
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d.dep3d, 0);
   { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "3D framebuffer incomplete"; return false; }
+  d.g0 = tex2d(GL_R32UI, W, H); d.g1 = tex2d(GL_R32UI, W, H);
+  glGenFramebuffers(1, &d.fbo_pre); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_pre);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.g0, 0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, d.g1, 0);
+  { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d.dep3d, 0);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "pre-pass framebuffer incomplete"; return false; }
   d.col_edge = tex2d(GL_RGBA8, W, H);
   glGenFramebuffers(1, &d.fbo_edge); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.col_edge, 0);
@@ -475,6 +559,26 @@ bool GlHires::init(u32 scale, std::string* why) {
 
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                          const gpu::Engine2D::HiresLine* lines, int mode) {
+  // DS_HIRES_BENCH=N[:skip,skip,...]: at render N, draw that frame again 60 times
+  // for each skip mask (DS_HIRES_SKIP bits), glFinish'd, and print the cost (debug).
+  if (static const char* b = std::getenv("DS_HIRES_BENCH"); b && d_) {
+    static u32 n = 0; static bool in = false;
+    if (!in && ++n == static_cast<u32>(std::atoi(b))) {
+      in = true;
+      const char* l = std::strchr(b, ':');
+      std::vector<int> masks{0};
+      if (l) { masks.clear(); for (const char* q = l + 1; *q; ) { masks.push_back(std::atoi(q)); while (*q && *q != ',') ++q; if (*q) ++q; } }
+      for (int m : masks) {
+        bench_skip_ = m;
+        render(dl, arena, arena_top, arena_epoch, lines, mode); glFinish();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int k = 0; k < 60; ++k) render(dl, arena, arena_top, arena_epoch, lines, mode);
+        glFinish();
+        std::fprintf(stderr, "bench skip %d: %.2f ms a render\n", m, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 60);
+      }
+      bench_skip_ = 0; in = false;
+    }
+  }
   if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines) {
     if (std::getenv("DS_HIRES_DEBUG")) {
       static u32 nv = 0, ne = 0; nv += !dl.valid; ne += dl.valid && dl.epoch != arena_epoch;
@@ -501,8 +605,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   if (d.arena_epoch != arena_epoch) { d.arena_epoch = arena_epoch; d.arena_up = 0; }
   if (arena_top > d.arena_up) {
     const u32 r0 = d.arena_up / kArenaW, r1 = (arena_top + kArenaW - 1) / kArenaW;
-    glBindTexture(GL_TEXTURE_2D, d.arena);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, static_cast<GLint>(r0), kArenaW, static_cast<GLsizei>(r1 - r0), GL_RED_INTEGER, GL_UNSIGNED_INT, arena.data() + static_cast<size_t>(r0) * kArenaW);
+    (void)r0; (void)r1;
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, d.arena);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, static_cast<GLintptr>(d.arena_up) * 4, static_cast<GLsizeiptr>(arena_top - d.arena_up) * 4, arena.data() + d.arena_up);
     d.arena_up = arena_top;
   }
 
@@ -535,23 +640,18 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     o.dz = z;
     o.rgb[0] = static_cast<float>(vt.r); o.rgb[1] = static_cast<float>(vt.g); o.rgb[2] = static_cast<float>(vt.b);
     o.st[0] = static_cast<float>(vt.s); o.st[1] = static_cast<float>(vt.t);
-    o.attr = p.attr; o.texparam = p.texparam; o.tex_offset = p.tex_offset; o.tex_wh = p.tex_w | (p.tex_h << 16); o.flags = p.flags;
+    o.attr = p.attr; o.texparam = p.texparam; o.tex_offset = p.tex_offset; o.tex_wh = p.tex_w | (p.tex_h << 16);
+    o.flags = p.flags | ((static_cast<u32>(&p - dl.polys.data()) + 1u) << 12);   // the pre-pass's winner id
     return o;
   };
   auto fan = [&](const GpuPoly& p) { for (u32 t = 1; t + 1 < p.nverts; ++t) { d.vb.push_back(vert(p, 0)); d.vb.push_back(vert(p, t)); d.vb.push_back(vert(p, t + 1)); } };
   const u32 prefix = std::min(f.first_ordered, dl.npoly);
-  const bool none_fail = f.alpha_ref == 0;   // with alpha_ref 0 only a 0-alpha pixel fails: one that cannot have one never does
   // The prefix in list order: on a depth tie the DS keeps the earlier
   // polygon, so a reorder (near to far) flickered where polygons meet at
-  // equal depth (NSMB's map). Runs that cannot fail the alpha test take the
-  // early-depth shader; Mali's forward pixel kill still drops hidden work.
-  std::vector<std::pair<u32, bool>>& pruns = d.prefix_runs;   // [first vertex, early]
-  pruns.clear();
+  // equal depth (NSMB's map).
   for (u32 k = 0; k < prefix; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
-    const bool early = !(p.flags & DS_PF_TEX_ALPHA) && (none_fail || ((p.attr >> 16) & 0x1F) > f.alpha_ref) && ((p.attr >> 16) & 0x1F) != 0;
-    if (pruns.empty() || pruns.back().second != early) pruns.emplace_back(static_cast<u32>(d.vb.size()), early);
     fan(p);
   }
   const u32 opaque_end = static_cast<u32>(d.vb.size());
@@ -573,7 +673,8 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   // DS_HIRES_POLYS=x0,y0,x1,y1 (DS pixels): the polygons over that box, once, at render 60 (debug).
   if (static const char* pd = std::getenv("DS_HIRES_POLYS"); pd) {
     static u32 n = 0;
-    if (++n == 60) {
+    static const u32 at = std::getenv("DS_HIRES_POLYS_AT") ? static_cast<u32>(std::atoi(std::getenv("DS_HIRES_POLYS_AT"))) : 60;
+    if (++n == at) {
       int x0 = 0, y0 = 0, x1 = 0, y1 = 0; std::sscanf(pd, "%d,%d,%d,%d", &x0, &y0, &x1, &y1);
       std::fprintf(stderr, "polys over %d,%d-%d,%d (first_ordered %u, %s):\n", x0, y0, x1, y1, f.first_ordered, wbuf ? "W" : "Z");
       for (u32 k = 0; k < dl.npoly; ++k) {
@@ -595,56 +696,111 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   if (!d.vb.empty()) glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(d.vb.size() * sizeof(Vtx)), d.vb.data());
 
   const auto T3 = clk::now();
+  static const bool stg = std::getenv("DS_HIRES_STAGES") != nullptr;
+  const int skip = bench_skip_;
+  // DS_HIRES_STAGES: GPU time of each section (EXT_disjoint_timer_query), read 3 renders late.
+  static GLuint tq[4][6] = {}; static u32 tq_n = 0; static double sg[6] = {}; static u32 sgn = 0;
+  using GetQ = void (*)(GLuint, GLenum, GLuint64*);
+  static GetQ getq = stg ? reinterpret_cast<GetQ>(SDL_GL_GetProcAddress("glGetQueryObjectui64vEXT")) : nullptr;
+  const int tqs = static_cast<int>(tq_n % 4);
+  if (stg && !tq[0][0]) for (auto& r : tq) glGenQueries(6, r);
+  if (stg && tq_n >= 3 && getq) {
+    const int old = static_cast<int>((tq_n - 3) % 4);
+    for (int k = 0; k < 6; ++k) { GLuint64 ns = 0; getq(tq[old][k], 0x8866 /* GL_QUERY_RESULT */, &ns); sg[k] += ns / 1e6; }
+    if (++sgn == 120) { std::fprintf(stderr, "gpu ms: pre %.2f, winners %.2f, tail %.2f, edge %.2f, composite %.2f, planes upload %.2f\n", sg[0] / sgn, sg[1] / sgn, sg[2] / sgn, sg[3] / sgn, sg[4] / sgn, sg[5] / sgn); for (double& x : sg) x = 0; sgn = 0; }
+  }
+  int cur_q = -1;
+  auto stage = [&](int k) {   // ends the running section, starts section k (-1: none)
+    if (!stg) return;
+    if (cur_q >= 0) glEndQuery(0x88BF /* GL_TIME_ELAPSED_EXT */);
+    cur_q = k;
+    if (k >= 0) glBeginQuery(0x88BF, tq[tqs][k]);
+  };
+  stage(0);
   // The 3D layer at S x.
-  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo3d);
   glViewport(0, 0, W, H);
   glDisable(GL_SCISSOR_TEST);
   const u32 cc = f.clear_color, ca = (cc >> 24) & 0x1F;
-  glClearColor(static_cast<float>(cc & 0x3F) / 255.f, static_cast<float>((cc >> 8) & 0x3F) / 255.f, static_cast<float>((cc >> 16) & 0x3F) / 255.f, ca ? static_cast<float>(std::min(255u, (ca + 1) * 8)) / 255.f : 0.f);
   const float cz = static_cast<float>(f.clear_depth & 0xFFFFFF);
   glDepthMask(GL_TRUE); glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-  { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
+  glDisable(GL_BLEND); glDisable(GL_STENCIL_TEST);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, d.arena);
+  // The opaque prefix, pass 1: the depth test, in list order (on a tie the
+  // earlier polygon keeps the pixel, as on the DS), and the winners.
+  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_pre);
+  {
+    const GLuint none[4] = {0, 0, 0, 0};
+    glClearBufferuiv(GL_COLOR, 0, none);
+    glClearBufferuiv(GL_COLOR, 1, none);
+    glClearBufferfi(GL_DEPTH_STENCIL, 0, std::min(cz, 16777215.f) / 16777216.f, 0);
+  }
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+  if (opaque_end && !(skip & 1)) {
+    glUseProgram(d.pre);
+    glUniform1ui(d.p_alpha_ref, f.alpha_ref); glUniform1i(d.p_wbuf, wbuf ? 1 : 0);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(opaque_end));
+  }
+  stage(1);
+  // Pass 2, the resolve: the full shading, once a pixel -- each winner's.
+  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo3d);
+  // The id plane is for edge marking alone: without it, one set of draw
+  // buffers for the whole pass (changing them ends the GPU's batch: a store
+  // and a reload of every attachment, per translucent run).
+  const bool want_id = (f.dispcnt & 0x20u) != 0;
+  { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, want_id ? static_cast<GLenum>(GL_COLOR_ATTACHMENT1) : static_cast<GLenum>(GL_NONE)}; glDrawBuffers(2, bufs); }
   {   // each attachment its own clear: the id plane is an integer one
     const GLfloat col[4] = {static_cast<float>(cc & 0x3F) / 255.f, static_cast<float>((cc >> 8) & 0x3F) / 255.f, static_cast<float>((cc >> 16) & 0x3F) / 255.f, ca ? static_cast<float>(std::min(255u, (ca + 1) * 8)) / 255.f : 0.f};
     const GLuint rear_id[4] = {(f.clear_attr >> 24) & 0x3Fu, 0, 0, 0};   // the rear plane: its id, no polygon drew
     glClearBufferfv(GL_COLOR, 0, col);
     glClearBufferuiv(GL_COLOR, 1, rear_id);
-    glClearBufferfi(GL_DEPTH_STENCIL, 0, std::min(cz, 16777215.f) / 16777216.f, 0);
   }
-  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.arena);
-  glEnable(GL_DEPTH_TEST);
-  glDepthFunc(GL_LESS);
-  glDisable(GL_BLEND);
+  if (opaque_end && !(skip & 2)) {
+    // The polygons' records, into the ring's next buffer.
+    d.polys_k = (d.polys_k + 1) % 3;
+    d.precs.resize(static_cast<size_t>(dl.npoly) * 8);
+    for (u32 k = 0; k < dl.npoly; ++k) {
+      const GpuPoly& p = dl.polys[k]; u32* r = &d.precs[k * 8];
+      r[0] = p.attr; r[1] = p.texparam; r[2] = p.tex_offset; r[3] = p.tex_w | (p.tex_h << 16); r[4] = p.flags; r[5] = r[6] = r[7] = 0;
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, d.polys[d.polys_k]);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(d.precs.size() * 4), d.precs.data());
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, d.polys[d.polys_k]);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(d.resolve);
+    glUniform1ui(d.w_dispcnt, f.dispcnt); glUniform1uiv(d.w_toon, 32, dl.post.toon);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d.g0);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, d.g1);
+    glActiveTexture(GL_TEXTURE0);
+    glBindVertexArray(d.vao_empty);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(d.vao);
+    glEnable(GL_DEPTH_TEST);
+  }
+  stage(2);
   // Stencil: the id + 1 of the translucent polygon that last blended a pixel,
   // 0 where an opaque one drew last.
   glEnable(GL_STENCIL_TEST);
   glStencilMask(0xFF);
   glStencilFunc(GL_ALWAYS, 0, 0xFF);
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-  glUseProgram(d.raster_early);
-  glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon); glUniform1i(d.e_wbuf, wbuf ? 1 : 0);
   glUseProgram(d.raster);
   glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon); glUniform1i(d.r_wbuf, wbuf ? 1 : 0); glUniform1i(d.r_split, 0);
-  for (size_t r = 0; r < d.prefix_runs.size(); ++r) {
-    const u32 v0 = d.prefix_runs[r].first, v1 = r + 1 < d.prefix_runs.size() ? d.prefix_runs[r + 1].first : opaque_end;
-    glUseProgram(d.prefix_runs[r].second ? d.raster_early : d.raster);
-    if (v1 > v0) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
-  }
   glUseProgram(d.raster);   // the tail: the alpha test may discard
-  for (size_t r = 0; r < runs.size(); ++r) {
+  for (size_t r = 0; r < runs.size() && !(skip & 4); ++r) {
     const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
     const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
     const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, trans ? static_cast<GLenum>(GL_NONE) : static_cast<GLenum>(GL_COLOR_ATTACHMENT1)};   // translucent: the opaque id stays
-    glDrawBuffers(2, bufs);
+    if (want_id) glDrawBuffers(2, bufs);
     const GLint sref = static_cast<GLint>((runs[r].second >> 2) & 0xFFu);
     if (v1 <= v0) continue;
     if (trans && (runs[r].second & (1u << 10))) {   // its opaque pixels first, as an opaque polygon's
-      const GLenum ob[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, ob);
+      if (want_id) { const GLenum ob[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, ob); }
       glStencilFunc(GL_ALWAYS, 0, 0xFF); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
       glUniform1i(d.r_split, 1);
       glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
       glUniform1i(d.r_split, 2);
-      glDrawBuffers(2, bufs);
+      if (want_id) glDrawBuffers(2, bufs);
     }
     if (trans) glStencilFunc(GL_NOTEQUAL, sref, 0xFF);   // not over its own id's blend; writes its id where it draws
     else glStencilFunc(GL_ALWAYS, 0, 0xFF);              // an opaque pixel: any id may blend over it again
@@ -657,10 +813,15 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
     glUniform1i(d.r_split, 0);
   }
+  stage(3);
   glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_STENCIL_TEST);
+  if (!(f.dispcnt & 0x20u)) {   // no edge marking: depth, stencil and ids die with the pass (a tiler need not write them out)
+    const GLenum dead[2] = {GL_DEPTH_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1};
+    glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, dead);
+  }
   // Edge marking, into its own texture, which the composite reads instead.
   GLuint layer3d = d.col3d;
-  if (f.dispcnt & 0x20u) {
+  if ((f.dispcnt & 0x20u) && !(skip & 8)) {
     glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
     glViewport(0, 0, W, H);
     glUseProgram(d.edge);
@@ -675,6 +836,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     layer3d = d.col_edge;
   }
 
+  stage(5);
   static const bool finish_each = std::getenv("DS_HIRES_FINISH") && std::atoi(std::getenv("DS_HIRES_FINISH")) == 2;
   static double t_gpu_raster = 0;
   if (finish_each) { const auto F0 = clk::now(); glFinish(); t_gpu_raster += ms(F0, clk::now()); }
@@ -731,7 +893,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   }
   up(d.t_under, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, d.under.data());
 
+  stage(-1);
   const auto T5 = clk::now();
+  stage(4);
   // The composite at S x.
   d.slot = (d.slot + 1) % Impl::kOut;
   glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
@@ -741,11 +905,13 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   // is 0.5; ALWAYS writes it), cleared 1 where it discarded.
   glClearDepthf(1.f); glClear(GL_DEPTH_BUFFER_BIT);
   glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
+  const int skip2 = bench_skip_;
+  if (skip2 & 16) n_full = 0;
   glUseProgram(d.fast);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.t_base);
   glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, layer3d);
   glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, d.t_under);
-  glDrawArrays(GL_TRIANGLES, 0, 3);
+  if (!(skip2 & 16)) glDrawArrays(GL_TRIANGLES, 0, 3);
   // Pass 2: the full composite, only where depth is still 1 (LESS against 0.5 fails elsewhere: early-Z skips them).
   if (n_full) {
     glDepthFunc(GL_LESS); glDepthMask(GL_FALSE);
@@ -756,8 +922,11 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     glActiveTexture(GL_TEXTURE0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
   }
+  { const GLenum dead = GL_DEPTH_ATTACHMENT; glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &dead); }   // the composite's depth: only within it
   glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
   glBindVertexArray(0);
+  stage(-1);
+  if (stg) ++tq_n;
   static const bool finish = std::getenv("DS_HIRES_FINISH") != nullptr;
   static double t_gpu = 0;
   if (finish) { const auto F0 = clk::now(); glFinish(); t_gpu += ms(F0, clk::now()); }

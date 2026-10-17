@@ -206,6 +206,21 @@ void Engine2D::render_line(u32 line) {
     // (BG0 beats the other BGs at its priority, an OBJ beats BG0 at its own;
     // the window must let BG0 through).
     bool w3[256];
+    // Whether BG0 would be on top over each kind of winner: a table by the
+    // winner's layer (BG0's priority against it; BG0 wins a BG tie, an OBJ
+    // wins its own), the window letting BG0 through. Branch-free per pixel.
+    auto bg0_wins = [&] {
+      const u32 p0 = cur_.bgcnt[0] & 3;
+      u8 tbl[T_COUNT], objt[4];
+      for (u32 t = 0; t < T_COUNT; ++t) tbl[t] = 1;
+      for (u32 t = T_BG1; t <= T_BG3; ++t) tbl[t] = p0 <= (cur_.bgcnt[t] & 3u);
+      for (u32 q = 0; q < 4; ++q) objt[q] = p0 < q;
+      for (u32 x = 0; x < 256; ++x) {
+        const u8 t = top_tid_[x];
+        const bool obj = static_cast<u8>(t - T_OBJ_STD) <= T_OBJ_DIRECT - T_OBJ_STD;
+        w3[x] = (win_[x] & 1) & (obj ? objt[obj_attr_[x] & OA_PRIO] : tbl[t]);
+      }
+    };
     auto under_pass = [&] {
       DS_PROF(SELECT);
       const bool any0 = bg_[0].any;
@@ -213,16 +228,7 @@ void Engine2D::render_line(u32 line) {
       select_top_only();
       kern::active::resolve16(top16_.data(), top_tid_.data(), tables_, h.under);
       bg_[0].any = any0;
-      const u32 p0 = cur_.bgcnt[0] & 3;
-      for (u32 x = 0; x < 256; ++x) {
-        const u8 t = top_tid_[x];
-        bool wins;
-        if (!(win_[x] & 1)) wins = false;
-        else if (t == T_BACKDROP || t == T_NONE) wins = true;
-        else if (t <= T_BG3) wins = p0 <= (cur_.bgcnt[t] & 3u);   // t >= 1 here: BG0 wins the tie
-        else wins = p0 < (obj_attr_[x] & OA_PRIO);
-        w3[x] = wins;
-      }
+      bg0_wins();
     };
     if (h.valid && !bright0 && !effect_possible()) {
       // No colour effect on the line: the cheap select, as at 1x; wherever
@@ -251,18 +257,8 @@ void Engine2D::render_line(u32 line) {
         // backdrop at worst); elsewhere the top, and whether BG0 would win
         // there is the priority rule against it.
         DS_PROF(SELECT);
-        const u32 p0 = cur_.bgcnt[0] & 3;
-        for (u32 x = 0; x < 256; ++x) {
-          const u8 t = top_tid_[x];
-          if (t == 0) { h.under[x] = second_[x]; w3[x] = true; continue; }
-          h.under[x] = top_[x];
-          bool wins;
-          if (!(win_[x] & 1)) wins = false;
-          else if (t == T_BACKDROP || t == T_NONE) wins = true;
-          else if (t <= T_BG3) wins = p0 <= (cur_.bgcnt[t] & 3u);
-          else wins = p0 < (obj_attr_[x] & OA_PRIO);
-          w3[x] = wins;
-        }
+        bg0_wins();   // where BG0 is the top, its window let it through: w3 holds
+        for (u32 x = 0; x < 256; ++x) h.under[x] = top_tid_[x] == T_BG0 ? second_[x] : top_[x];
       }
       // A pixel the 3D layer is neither the top nor the second target of is
       // exact at 1x; one it is the top of, with no effect that could reach it,

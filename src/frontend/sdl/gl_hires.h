@@ -40,6 +40,7 @@ public:
 private:
   std::unique_ptr<Impl> d_;
   u32 scale_ = 1;
+  int bench_skip_ = 0;   // DS_HIRES_BENCH
 };
 
 } // namespace ds::sdl
