@@ -324,7 +324,8 @@ struct GlHires::Impl {
   GLuint fbo3d = 0, col3d = 0, dep3d = 0, id3d = 0;
   GLuint edge = 0, fbo_edge = 0, col_edge = 0;   // edge marking's output
   GLint g_scale = -1, g_wbuf = -1, g_edge = -1;
-  GLuint fbo_out[2] = {0, 0}, out[2] = {0, 0};
+  static constexpr int kOut = 4;   // a ring: the last two frames' results (shown and captured) stay valid
+  GLuint fbo_out[kOut] = {}, out[kOut] = {};
   int slot = 0;
   GLuint t_top = 0, t_second = 0, t_meta = 0, t_win = 0, t_regs = 0, t_fb = 0, t_class = 0;
   std::vector<Vtx> vb;
@@ -332,7 +333,8 @@ struct GlHires::Impl {
   std::vector<u8> win, cls;
 
   ~Impl() {
-    GLuint texs[] = {arena, col3d, out[0], out[1], t_top, t_second, t_meta, t_win, t_regs, t_fb, t_class};
+    glDeleteTextures(kOut, out);
+    GLuint texs[] = {arena, col3d, t_top, t_second, t_meta, t_win, t_regs, t_fb, t_class};
     for (GLuint t : texs) if (t) glDeleteTextures(1, &t);
     if (dep3d) glDeleteTextures(1, &dep3d);
     if (id3d) glDeleteTextures(1, &id3d);
@@ -340,7 +342,7 @@ struct GlHires::Impl {
     if (fbo_edge) glDeleteFramebuffers(1, &fbo_edge);
     if (edge) glDeleteProgram(edge);
     if (fbo3d) glDeleteFramebuffers(1, &fbo3d);
-    glDeleteFramebuffers(2, fbo_out);
+    glDeleteFramebuffers(kOut, fbo_out);
     if (vbo) glDeleteBuffers(1, &vbo);
     if (vao) glDeleteVertexArrays(1, &vao);
     if (vao_empty) glDeleteVertexArrays(1, &vao_empty);
@@ -423,7 +425,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "edge framebuffer incomplete"; return false; }
   // The composite's depth: pass 1 marks what it drew, so pass 2 shades only the rest.
   glGenRenderbuffers(1, &d.dep_out); glBindRenderbuffer(GL_RENDERBUFFER, d.dep_out); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, W, H);
-  for (int i = 0; i < 2; ++i) {
+  for (int i = 0; i < Impl::kOut; ++i) {
     d.out[i] = tex2d(GL_RGBA8, W, H);
     glGenFramebuffers(1, &d.fbo_out[i]); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[i]);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.out[i], 0);
@@ -689,7 +691,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
 
   const auto T5 = clk::now();
   // The composite at S x.
-  d.slot ^= 1;
+  d.slot = (d.slot + 1) % Impl::kOut;
   glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
   glViewport(0, 0, W, H);
   glBindVertexArray(d.vao_empty);

@@ -30,9 +30,9 @@ public:
   // at hi-res (show the 1x picture).
   // `mode`: 0 = the screen as shown (master brightness applied), 1 = as a
   // display capture takes it (engine A's graphics, before master brightness),
-  // 2 = the 3D layer alone (a capture of 3D). Each call draws into the
-  // other of two textures, so the previous result stays valid (a capture is
-  // shown the frame after it was taken).
+  // 2 = the 3D layer alone (a capture of 3D). Calls draw into a ring of four
+  // textures, so the last frame's results stay valid through this one's (a
+  // capture is shown the frame after it was taken).
   unsigned render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                   const gpu::Engine2D::HiresLine* lines, int mode = 0);
 

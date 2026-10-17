@@ -3839,7 +3839,9 @@ sdl_ready:
               std::vector<u32> arena; u32 arena_top = 0; u64 arena_epoch = ~0ull;
               const ds::gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for that frame (two alternate)
               int scr = -1; bool now = false, show_cap = false; int cap_kind = 0;
+              bool alt = false;       // engine A changed screens and the frame before captured it: the other screen shows that capture
               unsigned cap_tex = 0;   // present thread: the last capture's texture
+              unsigned last_tex = 0; int last_scr = -1;   // present thread: the hi-res picture shown last frame, and on which screen
             };
             static GlFrame gf;
             static u64 gl_job = 0;
@@ -3849,7 +3851,8 @@ sdl_ready:
             pt.wait(gl_job);
             const auto snap0 = std::chrono::steady_clock::now();
             for (int sc = 0; sc < 2; ++sc) gf.fb[sc].assign(fb[sc], fb[sc] + 256 * 192);
-            gf.scr = -1; gf.now = gf.show_cap = false; gf.cap_kind = 0;
+            static int prev_scr_a = -1;
+            gf.scr = -1; gf.now = gf.show_cap = gf.alt = false; gf.cap_kind = 0;
             if (gl_hires) {
               const int scr = nds.gpu.screen_a();
               const auto& ref = nds.gpu.frame_3d();
@@ -3860,6 +3863,9 @@ sdl_ready:
                 gf.now = mode == 1 && ref.dlist;
                 gf.show_cap = mode == 2 && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) && nds.gpu.display_bank_a() == ((nds.gpu.captured_prev() >> 16) & 3);
                 gf.cap_kind = ref.dlist ? ds::gpu::Gpu::hires_capture(nds.gpu.captured_last()) : 0;
+                // 3D on both screens, the DS way: engine A draws one screen per frame and
+                // captures it, and the other screen shows that capture the frame after.
+                gf.alt = prev_scr_a >= 0 && prev_scr_a != scr && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) != 0;
                 if (ref.dlist && (gf.now || gf.cap_kind)) {
                   const auto& src = *ref.dlist;
                   gf.dl.polys.assign(src.polys.begin(), src.polys.begin() + src.npoly);
@@ -3874,6 +3880,7 @@ sdl_ready:
                   gf.lines = nds.gpu.hires_lines();
                 }
               }
+              prev_scr_a = scr;
               hr_now += gf.now; hr_fromcap += gf.show_cap; hr_cap += gf.cap_kind != 0;
               static double snap_ms = 0;
               snap_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snap0).count();
@@ -3890,8 +3897,15 @@ sdl_ready:
                 dd->gl()->make_current();
                 const unsigned prev_cap = g.cap_tex;
                 g.cap_tex = 0;
-                if (g.now) { if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines)) dd->gl()->set_hires(g.scr, tex); }
-                else if (g.show_cap && prev_cap) dd->gl()->set_hires(g.scr, prev_cap);
+                unsigned shown = 0;
+                if (g.now) { if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines)) { dd->gl()->set_hires(g.scr, tex); shown = tex; } }
+                else if (g.show_cap && prev_cap) { dd->gl()->set_hires(g.scr, prev_cap); shown = prev_cap; }
+                // The other screen, showing last frame's capture of engine A: last frame's hi-res picture.
+                if (g.alt && g.last_tex && g.last_scr >= 0 && g.last_scr != g.scr) {
+                  ds::sdl::Display* od = (wins[1] && wins[1]->shows(g.last_scr)) ? wins[1] : wins[0];
+                  if (od->gl() && od->shows(g.last_scr)) od->gl()->set_hires(g.last_scr, g.last_tex);
+                }
+                g.last_tex = shown; g.last_scr = shown ? g.scr : -1;
                 if (g.cap_kind) g.cap_tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, g.cap_kind == 2 ? 2 : 1);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
