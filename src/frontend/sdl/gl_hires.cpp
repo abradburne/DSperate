@@ -479,12 +479,12 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const float w = std::max(static_cast<float>(vt.w), 1.f);
     const float cx = 0.5f * static_cast<float>(p.xmin + p.xmax);
     const float sxf = static_cast<float>(vt.sx), syf = static_cast<float>(vt.sy);
-    float ox = sxf > cx ? 1.f : 0.f, oy = 0.f;
-    if (ox > 0.f) {
-      const u32 n = p.nverts;
-      const float sxp = static_cast<float>(dl.verts[p.first_vert + (vi + n - 1) % n].sx), sxn = static_cast<float>(dl.verts[p.first_vert + (vi + 1) % n].sx);
-      if (sxp == sxf || sxn == sxf) ox = 0.f;
-    }
+    // Vertices where the DS put them: the lean raster's right-edge push (its
+    // 1x span rule under MSAA) differs between polygons sharing an edge, and
+    // at hi-res that opened cracks inside models. A zero-width or -height
+    // polygon (a line to the DS) still gets one pixel.
+    (void)cx;
+    float ox = 0.f, oy = 0.f;
     if (p.xmax == p.xmin) ox = (vi == 1 || vi == 2) ? 1.f : 0.f;
     if (p.ybot == p.ytop) oy = (vi == 1 || vi == 2) ? 1.f : 0.f;
     const float x = (sxf + ox) / 256.f * 2.f - 1.f, y = (syf + oy) / 192.f * 2.f - 1.f;
