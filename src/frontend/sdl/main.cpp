@@ -3850,7 +3850,7 @@ sdl_ready:
               std::vector<u32> fb[2];
               ds::gpu::Renderer3D::DisplayList dl;
               std::vector<u32> arena; u32 arena_top = 0; u64 arena_epoch = ~0ull;
-              std::vector<ds::gpu::Engine2D::HiresLine> lines;
+              const ds::gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for that frame (two alternate)
               int scr = -1; bool now = false, show_cap = false; int cap_kind = 0;
               unsigned cap_tex = 0;   // present thread: the last capture's texture
             };
@@ -3884,7 +3884,7 @@ sdl_ready:
                   if (gf.arena.size() < arena.size()) gf.arena.resize(arena.size());
                   if (atop > gf.arena_top) std::memcpy(gf.arena.data() + gf.arena_top, arena.data() + gf.arena_top, (atop - gf.arena_top) * sizeof(u32));
                   gf.arena_top = atop;
-                  gf.lines.assign(nds.gpu.hires_lines(), nds.gpu.hires_lines() + 192);
+                  gf.lines = nds.gpu.hires_lines();
                 }
               }
               hr_now += gf.now; hr_fromcap += gf.show_cap; hr_cap += gf.cap_kind != 0;
@@ -3903,9 +3903,9 @@ sdl_ready:
                 dd->gl()->make_current();
                 const unsigned prev_cap = g.cap_tex;
                 g.cap_tex = 0;
-                if (g.now) { if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines.data(), sfb[g.scr])) dd->gl()->set_hires(g.scr, tex); }
+                if (g.now) { if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, sfb[g.scr])) dd->gl()->set_hires(g.scr, tex); }
                 else if (g.show_cap && prev_cap) dd->gl()->set_hires(g.scr, prev_cap);
-                if (g.cap_kind) g.cap_tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines.data(), sfb[g.scr], g.cap_kind == 2 ? 2 : 1);
+                if (g.cap_kind) g.cap_tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, sfb[g.scr], g.cap_kind == 2 ? 2 : 1);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
             });

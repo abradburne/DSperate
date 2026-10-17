@@ -544,6 +544,7 @@ void Gpu::begin_frame() {
   screens_on_ = nds_.io.powcnt1 & 1;
   // FIFO only needs clocking when something displays/captures from it, or a DMA channel awaits it.
   run_fifo_ = uses_fifo() || nds_.dma.in_mode(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
+  if (!hires_lines_.empty()) { hl_cur_ ^= SCREEN_H; engine[0].set_hires_export(hires_lines_.data() + hl_cur_); }
   if (capcnt_ & (1u << 31)) capture_on_ = true;
   if (capture_on_) capture_recent_ = CAPTURE_STICKY; else if (capture_recent_) --capture_recent_;
   // 3D frame this display frame reads, latched here since the raster moves on
@@ -794,7 +795,7 @@ void Gpu::step_engine(int e, u32 line) {
   if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
   if (draw) { en.render_line(line); output_engine(e, line); }
   if (e == 0 && draw && !hires_lines_.empty() && line < SCREEN_H) {   // hi-res 3D: the line as engine A composited it, before master brightness
-    Engine2D::HiresLine& h = hires_lines_[line];
+    Engine2D::HiresLine& h = hires_lines_[hl_cur_ + line];
     std::memcpy(h.out, en.output(), sizeof h.out);
     h.mbright = en.master_bright();
   }
@@ -812,8 +813,9 @@ void Gpu::step_engine(int e, u32 line) {
 // straight into the frontend's buffer).
 void Gpu::set_hires(bool on) {
   if (on == hires_on()) return;
-  if (on) hires_lines_.assign(SCREEN_H, Engine2D::HiresLine{});
+  if (on) hires_lines_.assign(2 * SCREEN_H, Engine2D::HiresLine{});
   else hires_lines_.clear();
+  hl_cur_ = 0;
   engine[0].set_hires_export(on ? hires_lines_.data() : nullptr);
 }
 
@@ -830,7 +832,7 @@ bool Gpu::compose_hires(std::vector<u32>& out, u32* scale, int* screen) const {
   alignas(16) u32 rgb[256];
   u16 on_top[256], on_second[256];
   for (u32 y = 0; y < SCREEN_H; ++y) {
-    const Engine2D::HiresLine& h = hires_lines_[y];
+    const Engine2D::HiresLine& h = hires_lines_[hl_cur_ + y];
     u32* row0 = out.data() + static_cast<size_t>(y) * S * W;
     if (!h.valid) {   // no 3D on the line: the finished 1x pixels, each SxS
       for (u32 x = 0; x < SCREEN_W; ++x) for (u32 k = 0; k < S; ++k) row0[x * S + k] = fb[y * SCREEN_W + x];

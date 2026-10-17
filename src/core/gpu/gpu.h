@@ -98,7 +98,9 @@ public:
   // For a GPU composite of the same: engine A's screen when this frame has
   // hi-res 3D to show (else -1), its kept lines, and its 3D frame.
   int hires_screen() const { return !hires_lines_.empty() && screens_on_ && ((engine[0].dispcnt() >> 16) & 3) == 1 ? engine[0].screen() : -1; }
-  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data(); }
+  // The frame just run's lines. Two sets, alternating per frame: a reader of
+  // this frame's (the present thread) is not overwritten until the frame after next.
+  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data() + hl_cur_; }
   const Renderer3D::FrameRef& frame_3d() const { return ref3d_; }
   // Display capture, for hi-res 3D shown through VRAM (display mode 2): the
   // DISPCAPCNT of the frame just run and of the one before (bit 31 set when
@@ -379,7 +381,8 @@ private:
   bool bscale_defer_ = false;           // output_engine stashes engine B's line instead of scaling it
   bool scale_inflight_ = false;         // the worker holds a stash to scale
   Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
-  std::vector<Engine2D::HiresLine> hires_lines_;   // set_hires(): one per display line
+  std::vector<Engine2D::HiresLine> hires_lines_;   // set_hires(): two sets of one per display line
+  u32 hl_cur_ = 0;                                 // the set this frame writes (0 or SCREEN_H)
   // Lag mode: per-line frames hand BOTH engines' line to the
   // worker at its HBlank without waiting, joining at that line's HBlank or
   // earlier if observed. The last display line always joins. Past
