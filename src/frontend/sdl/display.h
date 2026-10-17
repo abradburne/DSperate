@@ -57,6 +57,7 @@ public:
   // instead of an SDL_Renderer. Set before open().
   void set_gl(bool on) { gl_wanted_ = on; }
   GlPresent* gl() { return glp_.get(); }
+  void draw_gl_now(const u32* const fb[SCREENS]) { if (glp_) glp_->draw_now(views_, nviews_, fb); }   // on the present thread
   bool shows(int screen) const { for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) return true; return false; }
   // The frame loop's present: each GPU-presenting window of `ds` takes the
   // frame on the present thread (present_thread.h) and this returns once the

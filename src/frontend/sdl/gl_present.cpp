@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/gl_present.h"
+#include "frontend/sdl/present_thread.h"
 
 #if !DSPERATE_GLES
 namespace ds::sdl {
@@ -11,6 +12,7 @@ bool GlPresent::open(SDL_Window*, bool, bool) { return false; }
 void GlPresent::close() {}
 void GlPresent::make_current() {}
 void GlPresent::draw(const frontend::View*, int, const u32* const[2]) {}
+void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
 } // namespace ds::sdl
 #else
 #include <GLES3/gl31.h>
@@ -99,12 +101,16 @@ bool GlPresent::open(SDL_Window* win, bool vsync, bool linear) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   }
   std::fprintf(stderr, "video: GLES present, %s | %s, vsync %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION), vsync ? "on" : "off");
-  return glGetError() == GL_NO_ERROR;
+  const bool ok = glGetError() == GL_NO_ERROR;
+  SDL_GL_MakeCurrent(win, nullptr);   // from here on the present thread's
+  return ok;
 }
 
 void GlPresent::close() {
   if (!d_) return;
   Impl& d = *d_;
+  PresentThread& pt = PresentThread::get();
+  pt.wait(pt.post([&] { if (d.ctx) SDL_GL_MakeCurrent(d.win, nullptr); }));   // released there, taken here to tear down
   if (d.ctx) {
     SDL_GL_MakeCurrent(d.win, d.ctx);
     glDeleteTextures(2, d.fbtex); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
@@ -117,6 +123,12 @@ void GlPresent::close() {
 void GlPresent::make_current() { if (d_ && d_->ctx) SDL_GL_MakeCurrent(d_->win, d_->ctx); }
 
 void GlPresent::draw(const frontend::View* views, int nviews, const u32* const fb[2]) {
+  if (!d_) return;
+  PresentThread& pt = PresentThread::get();
+  pt.wait(pt.post([&] { draw_now(views, nviews, fb); }));
+}
+
+void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* const fb[2]) {
   if (!d_) return;
   Impl& d = *d_;
   SDL_GL_MakeCurrent(d.win, d.ctx);

@@ -7,6 +7,7 @@
 // handheld needs (volume, layout, screenshots, save states), and the pause
 // key opens a blitted menu over the held frame (menu.h).
 #include "frontend/sdl/gl_hires.h"
+#include "frontend/sdl/present_thread.h"
 #include "core/cpu/timing_mode.h"
 #include "core/nds.h"
 #include "core/cart/rom_source.h"
@@ -1529,10 +1530,12 @@ sdl_ready:
   std::unique_ptr<ds::sdl::GlHires> gl_hires;
   if (vs.hires3d > 1) {
     if (display.gl()) {
-      display.gl()->make_current();
       gl_hires = std::make_unique<ds::sdl::GlHires>();
       std::string why;
-      if (gl_hires->init(vs.hires3d, &why)) {
+      bool ok = false;
+      ds::sdl::PresentThread& pt = ds::sdl::PresentThread::get();
+      pt.wait(pt.post([&] { display.gl()->make_current(); ok = gl_hires->init(vs.hires3d, &why); }));
+      if (ok) {
         nds.gpu3d.renderer().set_display_list(true);
         nds.gpu.set_hires(true);
         std::fprintf(stderr, "hires3d: %ux on the GPU (%dx%d)\n", vs.hires3d, 256 * vs.hires3d, 192 * vs.hires3d);
@@ -3833,51 +3836,88 @@ sdl_ready:
           if (drop_rt) { sched_param z{}; sched_setscheduler(0, SCHED_OTHER, &z); }
           // Hi-res 3D (video.gpu3d_scale > 1): engine A's screen composited again
           // with the GPU raster's hi-res frame, shown instead of its 1x picture.
-          if (gl_hires) {
-            // video.hires3d: the CPU-drawn frame's polygon list drawn again at S x
-            // and composited on the GPU, in the context of the window showing
-            // engine A. Shown at once in display mode 1; a display capture of
-            // engine A is drawn too and shown the frame after, when display
-            // mode 2 reads the bank it went to (the DS's own one-frame delay).
+          if (display.gl()) {
+            // The GLES path (video.hires3d): every GL call runs on the present
+            // thread, so this frame's GPU work overlaps the next frame's
+            // emulation. Here: wait for the frame before (one in flight, so
+            // vsync still paces the loop), snapshot what the GPU side reads,
+            // post the job. With hi-res 3D the CPU-drawn frame's polygon list
+            // is drawn again at S x and composited, in the context of the
+            // window showing engine A: shown at once in display mode 1; a
+            // display capture of engine A is drawn too and shown the frame
+            // after, when mode 2 reads the bank it went to (the DS's delay).
+            struct GlFrame {
+              std::vector<u32> fb[2];
+              ds::gpu::Renderer3D::DisplayList dl;
+              std::vector<u32> arena; u32 arena_top = 0; u64 arena_epoch = ~0ull;
+              std::vector<ds::gpu::Engine2D::HiresLine> lines;
+              int scr = -1; bool now = false, show_cap = false; int cap_kind = 0;
+              unsigned cap_tex = 0;   // present thread: the last capture's texture
+            };
+            static GlFrame gf;
+            static u64 gl_job = 0;
             static const bool hr_dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
             static u32 hr_n = 0, hr_now = 0, hr_cap = 0, hr_fromcap = 0;
-            static unsigned cap_tex = 0;
-            const int scr = nds.gpu.screen_a();
-            const auto& ref = nds.gpu.frame_3d();
-            const u32 mode = nds.gpu.display_mode_a();
-            const int cap_kind = ds::gpu::Gpu::hires_capture(nds.gpu.captured_last());
-            ++hr_n;
-            if (scr >= 0) {
-              ds::sdl::Display& dd = (dual_window && !display.shows(scr)) ? display2 : display;
-              if (dd.gl()) {
-                dd.gl()->make_current();
-                u32 atop = 0; u64 aep = 0;
-                const auto& arena = nds.gpu3d.renderer().display_arena(&atop, &aep);
-                const unsigned prev_cap = cap_tex;
-                cap_tex = 0;
-                if (mode == 1 && ref.dlist) {
-                  if (const unsigned tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr))) { dd.gl()->set_hires(scr, tex); ++hr_now; }
-                } else if (mode == 2 && prev_cap && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) && nds.gpu.display_bank_a() == ((nds.gpu.captured_prev() >> 16) & 3)) {
-                  dd.gl()->set_hires(scr, prev_cap); ++hr_fromcap;
-                }
-                if (cap_kind && ref.dlist) {   // after the show: its texture is the one render() leaves alone
-                  cap_tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr), cap_kind == 2 ? 2 : 1);
-                  if (cap_tex) ++hr_cap;
+            ds::sdl::PresentThread& pt = ds::sdl::PresentThread::get();
+            pt.wait(gl_job);
+            for (int sc = 0; sc < 2; ++sc) gf.fb[sc].assign(fb[sc], fb[sc] + 256 * 192);
+            gf.scr = -1; gf.now = gf.show_cap = false; gf.cap_kind = 0;
+            if (gl_hires) {
+              const int scr = nds.gpu.screen_a();
+              const auto& ref = nds.gpu.frame_3d();
+              const u32 mode = nds.gpu.display_mode_a();
+              ++hr_n;
+              if (scr >= 0) {
+                gf.scr = scr;
+                gf.now = mode == 1 && ref.dlist;
+                gf.show_cap = mode == 2 && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) && nds.gpu.display_bank_a() == ((nds.gpu.captured_prev() >> 16) & 3);
+                gf.cap_kind = ref.dlist ? ds::gpu::Gpu::hires_capture(nds.gpu.captured_last()) : 0;
+                if (ref.dlist && (gf.now || gf.cap_kind)) {
+                  const auto& src = *ref.dlist;
+                  gf.dl.polys.assign(src.polys.begin(), src.polys.begin() + src.npoly);
+                  gf.dl.verts.assign(src.verts.begin(), src.verts.begin() + src.nvert);
+                  gf.dl.post = src.post; gf.dl.frame = src.frame; gf.dl.npoly = src.npoly; gf.dl.nvert = src.nvert; gf.dl.epoch = src.epoch; gf.dl.valid = src.valid;
+                  u32 atop = 0; u64 aep = 0;
+                  const auto& arena = nds.gpu3d.renderer().display_arena(&atop, &aep);
+                  if (aep != gf.arena_epoch) { gf.arena_epoch = aep; gf.arena_top = 0; }
+                  if (gf.arena.size() < arena.size()) gf.arena.resize(arena.size());
+                  if (atop > gf.arena_top) std::memcpy(gf.arena.data() + gf.arena_top, arena.data() + gf.arena_top, (atop - gf.arena_top) * sizeof(u32));
+                  gf.arena_top = atop;
+                  gf.lines.assign(nds.gpu.hires_lines(), nds.gpu.hires_lines() + 192);
                 }
               }
+              hr_now += gf.now; hr_fromcap += gf.show_cap; hr_cap += gf.cap_kind != 0;
+              if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u shown from a capture\n", hr_n, hr_now, hr_cap, hr_fromcap);
             }
-            if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u shown from a capture (mode %u, cap %08x/%08x, bank %u)\n",
-                                                      hr_n, hr_now, hr_cap, hr_fromcap, mode, nds.gpu.captured_last(), nds.gpu.captured_prev(), nds.gpu.display_bank_a());
-          } else if (nds.gpu.hires_on()) {
-            static std::vector<u32> hires_buf;
-            u32 hs = 0; int hscr = -1;
-            if (nds.gpu.compose_hires(hires_buf, &hs, &hscr)) {
-              display.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
-              if (dual_window) display2.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
+            ds::sdl::Display* const wins[2] = {&display, dual_window ? &display2 : nullptr};
+            ds::sdl::GlHires* const gh = gl_hires.get();
+            gl_job = pt.post([wins, gh] {
+              GlFrame& g = gf;
+              const u32* const sfb[2] = {g.fb[0].data(), g.fb[1].data()};
+              ds::sdl::Display* dd = nullptr;
+              if (gh && g.scr >= 0) dd = (wins[1] && !wins[0]->shows(g.scr)) ? wins[1] : wins[0];
+              if (dd && dd->gl()) {
+                dd->gl()->make_current();
+                const unsigned prev_cap = g.cap_tex;
+                g.cap_tex = 0;
+                if (g.now) { if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines.data(), sfb[g.scr])) dd->gl()->set_hires(g.scr, tex); }
+                else if (g.show_cap && prev_cap) dd->gl()->set_hires(g.scr, prev_cap);
+                if (g.cap_kind) g.cap_tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines.data(), sfb[g.scr], g.cap_kind == 2 ? 2 : 1);
+              }
+              for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
+            });
+          } else {
+            if (nds.gpu.hires_on()) {
+              static std::vector<u32> hires_buf;
+              u32 hs = 0; int hscr = -1;
+              if (nds.gpu.compose_hires(hires_buf, &hs, &hscr)) {
+                display.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
+                if (dual_window) display2.set_hires(hscr, hires_buf.data(), 256 * hs, 192 * hs);
+              }
             }
+  display.draw(fb);
+            if (dual_window) display2.draw(fb);
           }
-          display.draw(fb);
-          if (dual_window) display2.draw(fb);
           if (drop_rt) sched_setscheduler(0, rt_pol, &rt_sp);
         }
       }

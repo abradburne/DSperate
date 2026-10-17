@@ -24,7 +24,11 @@ public:
   void make_current();
   // Shows `screen` from this texture (S x, row 0 = the DS's top line) at the next draw.
   void set_hires(int screen, unsigned tex) { hires_screen_ = screen; hires_tex_ = tex; }
+  // The GL work runs on the present thread (present_thread.h) only, so a
+  // context is never current on two threads: draw() posts it there and waits;
+  // draw_now() is the work itself, for a job already on that thread.
   void draw(const frontend::View* views, int nviews, const u32* const fb[2]);
+  void draw_now(const frontend::View* views, int nviews, const u32* const fb[2]);
 
   struct Impl;
 private:
