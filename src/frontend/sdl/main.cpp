@@ -3839,60 +3839,23 @@ sdl_ready:
               ds::gpu::Renderer3D::DisplayList dl;
               std::vector<u32> arena; u32 arena_top = 0; u64 arena_epoch = ~0ull;
               const ds::gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for that frame (two alternate)
-              int scr = -1; bool now = false; int cap_kind = 0;
-              u64 cap_serial = 0;            // this frame's capture, drawn at hi-res on the present thread
-              u64 show[2] = {0, 0};          // per screen: the capture whose picture it shows, or 0
-              u64 cap_of[3] = {0, 0, 0};     // present thread: the last captures' serials ...
-              unsigned cap_tex[3] = {0, 0, 0};   // ... and their hi-res textures
+              int scr = -1; u32 mode = 0; int cap_kind = 0; bool has_dl = false;
+              struct Cap { std::vector<u32> img; unsigned tex = 0; };   // present thread: the last captures, 1x and hi-res
+              Cap caps[3]; int cap_next = 0;
             };
             static GlFrame gf;
             static u64 gl_job = 0;
-            static const bool hr_dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
-            static u32 hr_n = 0, hr_now = 0, hr_cap = 0, hr_fromcap = 0;
             ds::sdl::PresentThread& pt = ds::sdl::PresentThread::get();
             pt.wait(gl_job);
-            // A display capture of engine A is drawn at hi-res too, and its 1x
-            // picture kept (as the DS shows a capture again: 15-bit, through
-            // VRAM). A screen whose 1x picture is exactly a recent capture's --
-            // engine A's mode 2, or engine B showing the bank -- shows that
-            // capture's hi-res picture, whatever order the game moves them in
-            // (Golden Sun swaps engine A between the screens every frame).
-            struct Cap { u64 serial = 0; std::vector<u32> img; };
-            static Cap caps[3];
-            static u64 cap_serial = 0;
-            auto same5 = [](const u32* a, const u32* b) {   // 5 bits a channel: VRAM's precision
-              for (u32 k = 0; k < 256 * 192; ++k) if ((a[k] ^ b[k]) & 0xF8F8F8u) return false;
-              return true;
-            };
-            gf.scr = -1; gf.now = false; gf.cap_kind = 0; gf.cap_serial = 0; gf.show[0] = gf.show[1] = 0;
+            gf.scr = -1; gf.mode = 0; gf.cap_kind = 0; gf.has_dl = false;
             if (gl_hires) {
               const int scr = nds.gpu.screen_a();
               const auto& ref = nds.gpu.frame_3d_shown();
-              const u32 mode = nds.gpu.display_mode_a();
-              ++hr_n;
-              for (int sc = 0; sc < 2; ++sc)
-                for (const Cap& c : caps) if (c.serial && same5(fb[sc], c.img.data())) { gf.show[sc] = c.serial; break; }
-              if (scr >= 0) {
+              if (scr >= 0 && ref.dlist && nds.gpu.hires_lines()) {
                 gf.scr = scr;
-                gf.now = mode == 1 && ref.dlist && !gf.show[scr];
-                gf.cap_kind = ref.dlist ? ds::gpu::Gpu::hires_capture(nds.gpu.captured_last()) : 0;
-                if (gf.cap_kind == 1 && nds.gpu.hires_lines()) {   // its 1x picture, as it will be shown
-                  Cap& c = caps[cap_serial % 3];
-                  c.serial = ++cap_serial; c.img.resize(256 * 192);
-                  u16 v15[256];
-                  for (u32 y = 0; y < 192; ++y) {
-                    ds::gpu::kern::active::capture_a15(nds.gpu.hires_lines()[y].out, 256, v15);
-                    ds::gpu::kern::active::output_vram_line(v15, 0, &c.img[y * 256]);
-                  }
-                  gf.cap_serial = c.serial;
-                  if (static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr; tr) {
-                    u32 d0 = 0, d1 = 0;
-                    for (u32 k = 0; k < 256 * 192; ++k) { d0 += ((fb[0][k] ^ c.img[k]) & 0xF8F8F8u) != 0; d1 += ((fb[1][k] ^ c.img[k]) & 0xF8F8F8u) != 0; }
-                    auto mean = [](const u32* q) { u64 t = 0; for (u32 k = 0; k < 256 * 192; k += 7) t += (q[k] & 0xFF) + (q[k] >> 8 & 0xFF) + (q[k] >> 16 & 0xFF); return (unsigned)(t / (3 * 256 * 192 / 7)); };
-                    std::fprintf(stderr, "hrtrace this capture differs from screen 0 in %u px, screen 1 in %u; means cap %u fb %u %u\n", d0, d1, mean(c.img.data()), mean(fb[0]), mean(fb[1]));
-                  }
-                }
-                if (ref.dlist && (gf.now || gf.cap_kind)) {
+                gf.mode = nds.gpu.display_mode_a();
+                gf.cap_kind = ds::gpu::Gpu::hires_capture(nds.gpu.captured_last());
+                if (gf.mode == 1 || gf.cap_kind == 1) {
                   const auto& src = *ref.dlist;
                   gf.dl.polys.assign(src.polys.begin(), src.polys.begin() + src.npoly);
                   gf.dl.verts.assign(src.verts.begin(), src.verts.begin() + src.nvert);
@@ -3904,13 +3867,9 @@ sdl_ready:
                   if (atop > gf.arena_top) std::memcpy(gf.arena.data() + gf.arena_top, arena.data() + gf.arena_top, (atop - gf.arena_top) * sizeof(u32));
                   gf.arena_top = atop;
                   gf.lines = nds.gpu.hires_lines();
+                  gf.has_dl = true;
                 }
               }
-              if (static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr; tr)
-                std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d (serial %llu) shows %llu/%llu\n", hr_n, scr, mode, gf.now, gf.cap_kind,
-                             (unsigned long long)gf.cap_serial, (unsigned long long)gf.show[0], (unsigned long long)gf.show[1]);
-              hr_now += gf.now; hr_fromcap += (gf.show[0] != 0) + (gf.show[1] != 0); hr_cap += gf.cap_kind != 0;
-              if (hr_dbg && hr_n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u screens shown from a capture\n", hr_n, hr_now, hr_cap, hr_fromcap);
             }
             for (int sc = 0; sc < 2; ++sc) gf.fb[sc].assign(fb[sc], fb[sc] + 256 * 192);
             ds::sdl::Display* const wins[2] = {&display, dual_window ? &display2 : nullptr};
@@ -3919,16 +3878,40 @@ sdl_ready:
               GlFrame& g = gf;
               const u32* const sfb[2] = {g.fb[0].data(), g.fb[1].data()};
               auto win_of = [&](int sc) -> ds::sdl::Display* { for (ds::sdl::Display* w : wins) if (w && w->gl() && w->shows(sc)) return w; return nullptr; };
-              if (gh && wins[0]->gl()) {
+              if (gh && wins[0]->gl() && g.scr >= 0) {
                 wins[0]->gl()->make_current();   // one context group: textures are shared
+                // A display capture of engine A is drawn at hi-res too, and its
+                // 1x picture kept (as the DS shows a capture again: 15-bit,
+                // through VRAM). A screen whose 1x picture is exactly a recent
+                // capture's -- engine A's mode 2, or engine B showing the bank
+                // -- shows that capture's hi-res picture, whatever order the
+                // game moves them in (Golden Sun swaps engine A between the
+                // screens every frame). All here, off the emulation thread.
+                auto same5 = [](const u32* a, const u32* b) {   // 5 bits a channel: VRAM's precision
+                  for (u32 k = 0; k < 256 * 192; ++k) if ((a[k] ^ b[k]) & 0xF8F8F8u) return false;
+                  return true;
+                };
+                int show[2] = {-1, -1};
                 for (int sc = 0; sc < 2; ++sc)
-                  if (g.show[sc]) for (int k = 0; k < 3; ++k) if (g.cap_of[k] == g.show[sc] && g.cap_tex[k]) { if (ds::sdl::Display* w = win_of(sc)) w->gl()->set_hires(sc, g.cap_tex[k]); }
-                if (g.now && g.scr >= 0) if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines)) { if (ds::sdl::Display* w = win_of(g.scr)) w->gl()->set_hires(g.scr, tex); }
-                if (g.cap_serial) {
-                  const int k = static_cast<int>(g.cap_serial % 3);
-                  g.cap_of[k] = g.cap_serial;
-                  g.cap_tex[k] = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
+                  for (int k = 0; k < 3; ++k) if (g.caps[k].tex && same5(sfb[sc], g.caps[k].img.data())) { show[sc] = k; break; }
+                for (int sc = 0; sc < 2; ++sc) if (show[sc] >= 0) if (ds::sdl::Display* w = win_of(sc)) w->gl()->set_hires(sc, g.caps[show[sc]].tex);
+                const bool now = g.mode == 1 && g.has_dl && show[g.scr] < 0;
+                if (now) if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines)) { if (ds::sdl::Display* w = win_of(g.scr)) w->gl()->set_hires(g.scr, tex); }
+                if (g.cap_kind == 1 && g.has_dl) {   // into the oldest slot
+                  GlFrame::Cap& c = g.caps[g.cap_next]; g.cap_next = (g.cap_next + 1) % 3;
+                  c.img.resize(256 * 192);
+                  u16 v15[256];
+                  for (u32 y = 0; y < 192; ++y) {
+                    ds::gpu::kern::active::capture_a15(g.lines[y].out, 256, v15);
+                    ds::gpu::kern::active::output_vram_line(v15, 0, &c.img[y * 256]);
+                  }
+                  c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
                 }
+                static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr, dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
+                static u32 n = 0, n_now = 0, n_cap = 0, n_fromcap = 0;
+                ++n; n_now += now; n_cap += g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
+                if (tr) std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d shows %d/%d\n", n, g.scr, g.mode, now, g.cap_kind, show[0], show[1]);
+                if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u screens shown from a capture\n", n, n_now, n_cap, n_fromcap);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
             });
