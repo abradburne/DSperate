@@ -465,6 +465,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   }
   glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
 
+  static const bool finish_each = std::getenv("DS_HIRES_FINISH") && std::atoi(std::getenv("DS_HIRES_FINISH")) == 2;
+  static double t_gpu_raster = 0;
+  if (finish_each) { const auto F0 = clk::now(); glFinish(); t_gpu_raster += ms(F0, clk::now()); }
   const auto T4 = clk::now();
   // Engine A's planes for the composite.
   for (u32 y = 0; y < 192; ++y) {
@@ -522,9 +525,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const auto T6 = clk::now();
     t_arena += ms(T0, T1); t_fans += ms(T1, T2); t_vbo += ms(T2, T3); t_raster += ms(T3, T4); t_planes += ms(T4, T5); t_comp += ms(T5, T6);
     if (++tn == 120) {
-      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f, gpu wait %.2f (%zu verts)\n",
-                   t_arena / tn, t_fans / tn, t_vbo / tn, t_raster / tn, t_planes / tn, t_comp / tn, t_gpu / tn, d.vb.size());
-      t_arena = t_fans = t_vbo = t_raster = t_planes = t_comp = t_gpu = 0; tn = 0;
+      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f, gpu wait %.2f, of it raster %.2f (%zu verts)\n",
+                   t_arena / tn, t_fans / tn, t_vbo / tn, t_raster / tn, t_planes / tn, t_comp / tn, t_gpu / tn, t_gpu_raster / tn, d.vb.size());
+      t_arena = t_fans = t_vbo = t_raster = t_planes = t_comp = t_gpu = t_gpu_raster = 0; tn = 0;
     }
   }
   // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
