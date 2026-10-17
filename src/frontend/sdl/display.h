@@ -11,6 +11,7 @@
 #include "display_drm.h"  // complete types for the unique_ptr
 #include "display_fbdev.h"
 #include "display_wl.h"
+#include "gl_present.h"
 
 #include <SDL2/SDL.h>
 
@@ -48,6 +49,12 @@ public:
   void close();
 
   void draw(const u32* const fb[SCREENS]);
+  // video.hires3d: the renderer tier opens its own GLES context (GlPresent)
+  // instead of an SDL_Renderer. Set before open().
+  void set_gl(bool on) { gl_wanted_ = on; }
+  GlPresent* gl() { return glp_.get(); }
+  void draw_gl_now(const u32* const fb[SCREENS]) { if (glp_) glp_->draw_now(views_, nviews_, fb); }   // on the present thread
+  bool shows(int screen) const { for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) return true; return false; }
   // The frame loop's present: each GPU-presenting window of `ds` takes the
   // frame on the present thread (present_thread.h) and this returns once the
   // frame is copied out, so `fb` may change straight after. The others draw
@@ -222,6 +229,8 @@ private:
   SDL_Window*   win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
   SDL_Texture*  tex_[SCREENS] = {nullptr, nullptr};
+  bool gl_wanted_ = false;
+  std::unique_ptr<GlPresent> glp_;
   View          views_[SCREENS] = {};
   int           nviews_ = SCREENS;
   int           only_screen_ = -1;
