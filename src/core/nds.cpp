@@ -455,6 +455,8 @@ bool NDS::load_gba(const std::string& path, const std::string& bios_path, std::s
   rom_id = g->rom_id;
   bios_id = g->bios_id;
   gba = std::move(g);
+  spu.drain();
+  spu.set_external_rate(gba::Audio::SAMPLE_RATE);
   frame_count = 0;
   frame_ready = false;
   return true;
@@ -465,6 +467,9 @@ static void run_gba_frame(NDS& nds) {
   nds.gba->set_keys(nds.io.keyinput & 0x3FF);
   nds.gba->run_frame();
   nds.gpu.show_gba(nds.gba->framebuffer());
+  std::vector<s16>& snd = nds.gba->audio.out;
+  nds.spu.push_frames(snd.data(), snd.size() / 2);
+  snd.clear();
   nds.frame_ready = true;
   ++nds.frame_count;
 }

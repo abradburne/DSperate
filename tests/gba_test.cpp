@@ -5,7 +5,9 @@
 #include "check.h"
 #include "core/gba/gba.h"
 #include "core/state/state.h"
+#include "core/psg/gb_psg.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -153,9 +155,67 @@ void test_state_round_trip() {
   CHECK(picture_hash(g) == later);
 }
 
+u32 GbPsg_clock_quarter() { return psg::GbPsg::CLOCK_HZ / 4; }
+
+// The Game Boy PSG on its own: a square's pitch, the length counter, an envelope.
+void test_psg() {
+  psg::GbPsg p(psg::GbPsg::Model::Agb);
+  p.write(0x26, 0x80);                 // on
+  p.write(0x24, 0x77); p.write(0x25, 0xFF);
+  p.write(0x16, 0x80);                 // channel 2: 50% duty, length 64
+  p.write(0x17, 0xF0);                 // volume 15, no envelope
+  p.write(0x18, 0x00); p.write(0x19, 0x87);   // frequency 1792: (2048 - 1792) * 4 * 8 cycles = 512 Hz; trigger
+  int changes = 0, prev = 0;
+  for (u32 i = 0; i < 32768; ++i) {    // one second at 32768 samples
+    p.run(128);
+    s32 lv[4], l, r;
+    p.sample(lv);
+    p.mix(lv, l, r);
+    const int sign = l > 0 ? 1 : l < 0 ? -1 : 0;
+    if (sign && prev && sign != prev) ++changes;
+    if (sign) prev = sign;
+  }
+  CHECK(changes >= 1020 && changes <= 1026);   // two per cycle
+  CHECK(p.read(0x26) & 2);
+  // Length: 1 step left, counted at 256 Hz once enabled.
+  p.write(0x16, 0xBF); p.write(0x19, 0xC7);
+  p.run(8192 * 2 + 1);
+  CHECK(!(p.read(0x26) & 2));
+  // Envelope: from 15 down one step every 1/64 s; silent within a quarter second.
+  p.write(0x17, 0xF1); p.write(0x19, 0x87);
+  p.run(GbPsg_clock_quarter());
+  s32 lv[4]; p.sample(lv);
+  p.run(128); p.sample(lv);
+  CHECK(lv[1] == -15);                 // volume 0: the DAC's floor
+  CHECK(p.read(0x11) == 0);            // AGB: write-only bits read 0
+}
+
+// Direct Sound: timer 0 at 32768 Hz pops FIFO A, DMA1 refills it from EWRAM.
+void test_direct_sound() {
+  Gba g;
+  CHECK(g.load_rom(loop_cart()));
+  g.reset();
+  for (u32 i = 0; i < 4096; ++i) g.write8(0x02000000 + i, (i & 1) ? 0x81 : 0x7F);   // +127, -127 (DMA walks on through it)
+  g.write16(0x04000084, 0x0080);       // master on
+  g.write16(0x04000082, 0x0B04);       // FIFO A: 100%, left and right, timer 0, reset
+  g.write32(0x040000BC, 0x02000000);   // DMA1 from EWRAM ...
+  g.write32(0x040000C0, 0x040000A0);   // ... to FIFO A
+  g.write16(0x040000C6, 0xB640);       // enable, repeat, 32-bit, sound timing, destination fixed
+  g.write16(0x04000100, static_cast<u16>(0x10000 - 512));
+  g.write16(0x04000102, 0x0080);
+  for (int i = 0; i < 3; ++i) g.run_frame();   // the first runs from reset to VBlank only
+  const std::vector<s16>& out = g.audio.out;
+  CHECK(out.size() == 2 * ((197120 + 2 * 280896) / 512));   // one frame per 512 cycles
+  s16 lo = 0, hi = 0;
+  for (size_t i = out.size() / 2; i < out.size(); i += 2) { lo = std::min(lo, out[i]); hi = std::max(hi, out[i]); }
+  CHECK(hi > 12000 && lo < -12000);    // a full-scale square at 16 kHz
+}
+
 } // namespace
 
 int main() {
+  test_psg();
+  test_direct_sound();
   test_bus();
   test_timers_dma_irq();
   test_suites();

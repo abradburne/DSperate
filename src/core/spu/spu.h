@@ -35,7 +35,11 @@ public:
   void write_sndexcnt(u16 value, u16 mask);
   // Real mixer rate (not the nominal 32768 Hz): 67027964/2048 = 32728.5 Hz,
   // or 47605.1 Hz in DSi high-rate mode. Use for stream conversion.
-  double output_rate_hz() const { return static_cast<double>(ARM9_CLOCK_HZ) / mix_period_; }
+  double output_rate_hz() const { return ext_rate_ > 0 ? ext_rate_ : static_cast<double>(ARM9_CLOCK_HZ) / mix_period_; }
+  // GBA mode (core/gba): frames mixed there go into this ring at their own
+  // rate (0 = the SPU's), so the frontends play and dump them unchanged.
+  void set_external_rate(double hz) { ext_rate_ = hz; }
+  void push_frames(const s16* lr, size_t frames) { for (size_t i = 0; i < frames; ++i) push(lr[i * 2], lr[i * 2 + 1]); }
   void set_apply_bias(bool on) { apply_bias_ = on; }
   void catch_up();
 
@@ -115,6 +119,7 @@ private:
   u32  timer_step_ = TIMER_STEP;         // mix_period_ / 4
   bool apply_bias_ = true;               // SOUNDBIAS: DS yes, DSi no
   u32  batch_ = 16;                      // samples per mix event
+  double ext_rate_ = 0;                  // set_external_rate
 
   static constexpr size_t RING_FRAMES = 16384;   // half a second
   std::array<s16, RING_FRAMES * 2> ring_{};

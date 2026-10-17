@@ -12,15 +12,16 @@
 // cycles; run_frame() runs to the start of VBlank (line 160), so the picture
 // it leaves is the one just drawn.
 //
-// Not yet (phase 3/4 of pocketos/emu/gba-plan.md): sound (PSG + Direct Sound
-// FIFOs; the registers are stored, timers already report overflows to
-// timer_overflow()), save chips beyond plain SRAM (Flash, EEPROM), the
-// prefetch buffer and exact wait-state timing, RTC/GPIO, the recompiler.
+// Sound is gba_audio.cpp (the Game Boy PSG of core/psg plus Direct Sound).
+// Not yet (phase 3/4 of pocketos/emu/gba-plan.md): save chips beyond plain
+// SRAM (Flash, EEPROM), the prefetch buffer and exact wait-state timing,
+// RTC/GPIO, the recompiler.
 #pragma once
 #include "core/types.h"
 #include "core/cpu/cpu.h"
 #include "core/mem/page_table.h"
 #include "core/gba/gba_ppu.h"
+#include "core/gba/gba_audio.h"
 
 #include <array>
 #include <memory>
@@ -46,7 +47,7 @@ enum Irq : u16 {
   IRQ_TIMER0 = 1 << 3, IRQ_SERIAL = 1 << 7, IRQ_DMA0 = 1 << 8, IRQ_KEYPAD = 1 << 12, IRQ_GAMEPAK = 1 << 13,
 };
 
-enum class Ev : u8 { Ppu, Timer0, Timer1, Timer2, Timer3, Count };
+enum class Ev : u8 { Ppu, Timer0, Timer1, Timer2, Timer3, Audio, Count };
 
 using TraceFn = void (*)(CpuContext& cpu, u32 instr, void* user);
 
@@ -114,10 +115,14 @@ struct Gba {
   mem::PageBuf bios, ewram, iwram, palette, vram, oam, rom, sram;
   std::array<u8, IO_SIZE> io{};     // register backing (what reads see, where nothing computes it)
   Ppu ppu;
+  Audio audio;
 
   // Interrupts.
   u16 ie = 0, if_ = 0, ime = 0;
   void raise_irq(u16 bits) { if_ |= bits; update_irq(); }
+  // A Direct Sound FIFO (0 = A, 1 = B) is half empty: the DMA channel aimed
+  // at it in sound timing (1 or 2, mode 3) moves four words.
+  void dma_fifo(int fifo, u64 at);
   void update_irq();
 
 private:

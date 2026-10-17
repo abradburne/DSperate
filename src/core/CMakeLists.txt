@@ -61,6 +61,8 @@ add_library(dsperate_core STATIC
   io/dsi_nwifi.cpp
   gba/gba.cpp
   gba/gba_ppu.cpp
+  gba/gba_audio.cpp
+  psg/gb_psg.cpp
   gba/gba_interp.cpp
   gba/gba_interp_arm.cpp
   gba/gba_interp_thumb.cpp

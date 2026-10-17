@@ -48,7 +48,7 @@ Gba::Gba()
       bios(mem::alloc_page_buf(BIOS_SIZE)), ewram(mem::alloc_page_buf(EWRAM_SIZE)), iwram(mem::alloc_page_buf(IWRAM_SIZE)),
       palette(mem::alloc_page_buf(2 * PALETTE_SIZE)), vram(mem::alloc_page_buf(VRAM_SIZE)), oam(mem::alloc_page_buf(2 * OAM_SIZE)),
       rom(mem::alloc_page_buf(ROM_MAX)), sram(mem::alloc_page_buf(SRAM_SIZE)),
-      ppu(*this), timing_(size_t{1} << 17) {
+      ppu(*this), audio(*this), timing_(size_t{1} << 17) {
   std::memcpy(bios.get(), kCultBios, BIOS_SIZE);
   bios_id = hash_bytes(bios.get(), BIOS_SIZE);
   std::memset(sram.get(), 0xFF, SRAM_SIZE);
@@ -278,6 +278,7 @@ u16 Gba::io_read16(u32 off) {
   case 0x208: return ime;
   default: break;
   }
+  if (off >= 0x60 && off < 0xB0) return audio.read16(off);
   if (off >= 0xB0 && off < 0xE0) {   // DMA: only CNT_H reads back
     const u32 i = (off - 0xB0) / 12, r = (off - 0xB0) % 12;
     return r == 10 ? dma_[i].control : 0;
@@ -318,6 +319,7 @@ void Gba::io_write16(u32 off, u16 v, u16 mask) {
     return;
   default: break;
   }
+  if (off >= 0x60 && off < 0xB0) { audio.write16(off, v, mask); return; }
   if (off >= 0xB0 && off < 0xE0) {
     const int i = static_cast<int>((off - 0xB0) / 12);
     const u32 base = 0xB0 + static_cast<u32>(i) * 12, r = off - base;
@@ -373,6 +375,7 @@ void Gba::fire(Ev e, u64 at) {
   case Ev::Ppu: if (in_hblank_) line_start(at); else hblank_start(at); break;
   case Ev::Timer0: case Ev::Timer1: case Ev::Timer2: case Ev::Timer3:
     timer_overflow(static_cast<int>(e) - static_cast<int>(Ev::Timer0), at); break;
+  case Ev::Audio: audio.sample(at); schedule(Ev::Audio, at + Audio::SAMPLE_CYCLES); break;
   default: break;
   }
 }
@@ -431,7 +434,7 @@ void Gba::timer_overflow(int i, u64 at) {
   t.counter = t.reload;
   t.start = at;
   if (t.control & 0x40) raise_irq(static_cast<u16>(IRQ_TIMER0 << i));
-  // Phase 3: Direct Sound FIFO A/B are clocked from here (SOUNDCNT_H bits 10/14).
+  if (i < 2) audio.timer_overflow(i, at);   // Direct Sound FIFO A/B (SOUNDCNT_H bits 10/14)
   if (i < 3) timer_tick_cascade(i + 1, at);
   timer_schedule(i);
 }
@@ -466,7 +469,7 @@ void Gba::dma_run(int i) {
   Dma& d = dma_[i];
   const u16 ctl = d.control;
   const u32 timing = (ctl >> 12) & 3;
-  if (timing == 3) return;   // sound FIFO (DMA1/2) and video capture (DMA3): phase 3
+  if (timing == 3) return;   // sound FIFO (DMA1/2: dma_fifo) and video capture (DMA3, not yet)
   const bool word = ctl & 0x400;
   const s32 step = word ? 4 : 2;
   const u32 dmode = (ctl >> 5) & 3, smode = (ctl >> 7) & 3;
@@ -504,6 +507,30 @@ void Gba::dma_run(int i) {
   else now_ += cycles;
 }
 
+void Gba::dma_fifo(int fifo, u64 at) {
+  const u32 target = 0x040000A0u + 4u * static_cast<u32>(fifo);
+  for (int i = 1; i <= 2; ++i) {
+    Dma& d = dma_[i];
+    if (!(d.control & 0x8000) || ((d.control >> 12) & 3) != 3 || (d.dad & ~3u) != target) continue;
+    // Four words, whatever the count and width say; the destination stays put.
+    const u32 smode = (d.control >> 7) & 3;
+    const s32 sinc = smode == 1 ? -4 : smode == 2 ? 0 : 4;
+    const u8* ts = timing_[d.src >> 15].data();
+    for (int k = 0; k < 4; ++k) {
+      const u32 v = d.src >= 0x02000000 ? read32(d.src) : dma_latch_;
+      write32(target, v);
+      dma_latch_ = v;
+      d.src += static_cast<u32>(sinc);
+    }
+    if (d.control & 0x4000) raise_irq(static_cast<u16>(IRQ_DMA0 << i));
+    if (!(d.control & 0x200)) d.control &= 0x7FFF;
+    const u64 cycles = 2 + ts[2] + 3u * ts[3] + 4;   // + four 1-cycle I/O writes
+    if (in_cpu_) cpu->hot.cycle_budget -= static_cast<s32>(cycles);
+    else now_ = std::max(now_, at) + cycles;
+    return;
+  }
+}
+
 // ---- running ----------------------------------------------------------------
 
 void Gba::reset() {
@@ -534,7 +561,9 @@ void Gba::reset() {
   frame_count = 0;
   rebuild_timing();
   ppu.reset();
+  audio.reset();
   schedule(Ev::Ppu, HDRAW_CYCLES);
+  schedule(Ev::Audio, Audio::SAMPLE_CYCLES);
   if (skip_bios) {
     // Where the BIOS leaves things when it jumps to the cartridge.
     cpu->hot.regs[13] = 0x03007FE0;           // SVC (the mode after reset)
@@ -595,6 +624,7 @@ template <class S> void Gba::sync_state(S& s) {
   s.end();
   cpu->sync_state(s);
   ppu.sync_state(s);
+  audio.sync_state(s);
 }
 template void Gba::sync_state<state::Writer>(state::Writer&);
 template void Gba::sync_state<state::Reader>(state::Reader&);
