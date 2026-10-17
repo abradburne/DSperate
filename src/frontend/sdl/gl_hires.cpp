@@ -436,7 +436,13 @@ bool GlHires::init(u32 scale, std::string* why) {
 
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                          const gpu::Engine2D::HiresLine* lines, int mode) {
-  if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines) return 0;
+  if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines) {
+    if (std::getenv("DS_HIRES_DEBUG")) {
+      static u32 nv = 0, ne = 0; nv += !dl.valid; ne += dl.valid && dl.epoch != arena_epoch;
+      std::fprintf(stderr, "hires3d: frame drawn at 1x (%u without a list, %u stale arena)\n", nv, ne);
+    }
+    return 0;
+  }
   Impl& d = *d_;
   using clk = std::chrono::steady_clock;
   static const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
