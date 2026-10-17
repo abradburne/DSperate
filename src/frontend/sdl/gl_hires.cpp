@@ -8,7 +8,7 @@ struct GlHires::Impl {};
 GlHires::GlHires() = default;
 GlHires::~GlHires() = default;
 bool GlHires::init(u32, std::string* why) { if (why) *why = "built without GLES"; return false; }
-unsigned GlHires::render(const Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const Engine2D::HiresLine*, const u32*) { return 0; }
+unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, const u32*) { return 0; }
 } // namespace ds::sdl
 #else
 #include <GLES3/gl31.h>
@@ -291,8 +291,8 @@ bool GlHires::init(u32 scale, std::string* why) {
   return true;
 }
 
-unsigned GlHires::render(const Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
-                         const Engine2D::HiresLine* lines, const u32* fb) {
+unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
+                         const gpu::Engine2D::HiresLine* lines, const u32* fb) {
   if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines || !fb) return 0;
   Impl& d = *d_;
   const u32 S = d.S;
@@ -391,7 +391,7 @@ unsigned GlHires::render(const Renderer3D::DisplayList& dl, const std::vector<u3
 
   // Engine A's planes for the composite.
   for (u32 y = 0; y < 192; ++y) {
-    const Engine2D::HiresLine& h = lines[y];
+    const gpu::Engine2D::HiresLine& h = lines[y];
     d.regs[y * 2] = static_cast<u32>(h.bldcnt) | (static_cast<u32>(h.eva) << 16) | (static_cast<u32>(h.evb) << 21) | (static_cast<u32>(h.evy) << 26);
     d.regs[y * 2 + 1] = static_cast<u32>(h.mbright) | (h.valid ? 0x80000000u : 0u);
     if (!h.valid) continue;
