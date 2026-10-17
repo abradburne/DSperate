@@ -196,7 +196,9 @@ void Engine2D::render_line(u32 line) {
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
   if (hires_lines_ && line < 192) {
     HiresLine& h = hires_lines_[line];
-    h.valid = !num_ && (cur_.dispcnt & 8) && bg_[0].any;
+    // Every line the 3D layer is on, covered at 1x or not: the hi-res raster
+    // can reach a line the 1x one does not (a model moving up or down).
+    h.valid = !num_ && (cur_.dispcnt & 8) && (cur_.layer_enable & 1);
     const u16 mb0 = master_bright();
     const bool bright0 = ((mb0 >> 14) == 1 || (mb0 >> 14) == 2) && (mb0 & 0x1F);
     // What the 3D layer covers, and where it would be on top if drawn there:

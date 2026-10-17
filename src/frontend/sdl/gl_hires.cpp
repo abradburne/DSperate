@@ -61,6 +61,7 @@ in vec3 v_rgb; in vec2 v_st; flat in uvec4 v_poly; flat in uint v_flags;
 uniform highp usampler2D u_texels;
 uniform uint u_dispcnt, u_alpha_ref;
 uniform uint u_toon[32];
+uniform int u_wbuf;
 out vec4 o_col;
 layout(location = 1) out uint o_id;   // edge marking: the polygon id | 0x80 (an opaque polygon drew here)
 uint texel(uint i) { return texelFetch(u_texels, ivec2(int(i & 4095u), int(i >> 12)), 0).r; }
@@ -107,6 +108,12 @@ void main() {
   uint ab = a == 0u ? 0u : min(255u, (a + 1u) * 8u);
   o_col = vec4(float(r), float(g), float(b), float(ab)) / 255.0;
   o_id = ((attr >> 24) & 0x3Fu) | 0x80u;
+  // The DS compares integer depths: rounded to them, surfaces at the same
+  // depth tie exactly and the test (LESS: the earlier polygon keeps the
+  // pixel) decides as the DS does, instead of float noise that flickered
+  // as models moved.
+  if (u_wbuf != 0) gl_FragDepth = 1.0 / max(floor(1.0 / gl_FragCoord.z + 0.5), 1.0);
+  else gl_FragDepth = floor(gl_FragCoord.z * 16777215.0 + 0.5) / 16777215.0;
 }
 )";
 
@@ -307,7 +314,7 @@ struct GlHires::Impl {
   GLint f_scale = -1;
   GLuint t_base = 0, t_under = 0, dep_out = 0;
   std::vector<u32> base, under;
-  GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1;
+  GLint e_dispcnt = -1, e_alpha_ref = -1, e_toon = -1, e_wbuf = -1, r_wbuf = -1;
   std::vector<std::pair<u32, bool>> prefix_runs;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
@@ -356,11 +363,13 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.S = scale_ = std::clamp(scale, 2u, 4u);
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
   const std::string fs_late = std::string("#version 310 es\n") + kRasterFS;
-  const std::string fs_early = std::string("#version 310 es\n#define EARLY 1\nlayout(early_fragment_tests) in;\n") + kRasterFS;
+  // EARLY: no discard. (No early_fragment_tests: the shader writes the depth.)
+  const std::string fs_early = std::string("#version 310 es\n#define EARLY 1\n") + kRasterFS;
   d.raster = program(kRasterVS, fs_late.c_str(), why);
   d.raster_early = program(kRasterVS, fs_early.c_str(), why);
   if (!d.raster_early) return false;
   d.e_dispcnt = glGetUniformLocation(d.raster_early, "u_dispcnt");
+  d.e_wbuf = glGetUniformLocation(d.raster_early, "u_wbuf");
   d.e_alpha_ref = glGetUniformLocation(d.raster_early, "u_alpha_ref");
   d.e_toon = glGetUniformLocation(d.raster_early, "u_toon");
   glUseProgram(d.raster_early);
@@ -383,6 +392,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   glUniform1i(glGetUniformLocation(d.fast, "u_scale"), static_cast<GLint>(d.S));
   if (!d.raster || !d.comp) return false;
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
+  d.r_wbuf = glGetUniformLocation(d.raster, "u_wbuf");
   d.u_alpha_ref = glGetUniformLocation(d.raster, "u_alpha_ref");
   d.u_toon = glGetUniformLocation(d.raster, "u_toon");
   glUseProgram(d.raster);
@@ -579,9 +589,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glStencilFunc(GL_ALWAYS, 0, 0xFF);
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
   glUseProgram(d.raster_early);
-  glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon);
+  glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon); glUniform1i(d.e_wbuf, wbuf ? 1 : 0);
   glUseProgram(d.raster);
-  glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon);
+  glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon); glUniform1i(d.r_wbuf, wbuf ? 1 : 0);
   for (size_t r = 0; r < d.prefix_runs.size(); ++r) {
     const u32 v0 = d.prefix_runs[r].first, v1 = r + 1 < d.prefix_runs.size() ? d.prefix_runs[r + 1].first : opaque_end;
     glUseProgram(d.prefix_runs[r].second ? d.raster_early : d.raster);
