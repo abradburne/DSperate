@@ -3850,8 +3850,11 @@ sdl_ready:
             ds::sdl::PresentThread& pt = ds::sdl::PresentThread::get();
             pt.wait(gl_job);
             const auto snap0 = std::chrono::steady_clock::now();
-            for (int sc = 0; sc < 2; ++sc) gf.fb[sc].assign(fb[sc], fb[sc] + 256 * 192);
             static int prev_scr_a = -1;
+            // Last frame's 1x picture of each screen (gf.fb still holds it): a screen
+            // showing a capture of engine A shows exactly what engine A drew there.
+            bool same_as_last[2] = {false, false};
+            for (int sc = 0; sc < 2; ++sc) same_as_last[sc] = gf.fb[sc].size() == 256 * 192 && std::memcmp(gf.fb[sc].data(), fb[sc], 256 * 192 * 4) == 0;
             gf.scr = -1; gf.now = gf.show_cap = gf.alt = false; gf.cap_kind = 0;
             if (gl_hires) {
               const int scr = nds.gpu.screen_a();
@@ -3865,7 +3868,7 @@ sdl_ready:
                 gf.cap_kind = ref.dlist ? ds::gpu::Gpu::hires_capture(nds.gpu.captured_last()) : 0;
                 // 3D on both screens, the DS way: engine A draws one screen per frame and
                 // captures it, and the other screen shows that capture the frame after.
-                gf.alt = prev_scr_a >= 0 && prev_scr_a != scr && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) != 0;
+                gf.alt = prev_scr_a >= 0 && prev_scr_a != scr && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) != 0 && same_as_last[prev_scr_a];
                 if (ref.dlist && (gf.now || gf.cap_kind)) {
                   const auto& src = *ref.dlist;
                   gf.dl.polys.assign(src.polys.begin(), src.polys.begin() + src.npoly);
@@ -3888,6 +3891,7 @@ sdl_ready:
               snap_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snap0).count();
               if (hr_dbg && hr_n % 300 == 0) { std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u shown from a capture; snapshot %.2f ms/frame\n", hr_n, hr_now, hr_cap, hr_fromcap, snap_ms / 300); snap_ms = 0; }
             }
+            for (int sc = 0; sc < 2; ++sc) gf.fb[sc].assign(fb[sc], fb[sc] + 256 * 192);
             ds::sdl::Display* const wins[2] = {&display, dual_window ? &display2 : nullptr};
             ds::sdl::GlHires* const gh = gl_hires.get();
             gl_job = pt.post([wins, gh] {
