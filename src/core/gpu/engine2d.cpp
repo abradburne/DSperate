@@ -194,6 +194,48 @@ void Engine2D::render_line(u32 line) {
     if (cur_.dispcnt & 0xE000) prof::add(prof::C_2D_WIN_PRESENT, 1);
   }
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
+  if (hires_lines_ && line < 192) {
+    HiresLine& h = hires_lines_[line];
+    h.valid = !num_ && (cur_.dispcnt & 8) && bg_[0].any;
+    const u16 mb0 = master_bright();
+    const bool bright0 = ((mb0 >> 14) == 1 || (mb0 >> 14) == 2) && (mb0 & 0x1F);
+    if (h.valid && !bright0 && !effect_possible()) {
+      // No colour effect on the line: the cheap select, as at 1x; every 3D
+      // pixel on top is the hi-res sample as it is, nothing else involves it.
+      { DS_PROF(SELECT); select_layers_flat(); }
+      for (u32 x = 0; x < 256; ++x) h.cls[x] = top_tid_[x] == T_BG0 ? 1 : 0;
+      h.full = false;
+      h.bldcnt = cur_.bldcnt; h.eva = cur_.eva; h.evb = cur_.evb; h.evy = cur_.evy; h.mbright = mb0;
+      return;
+    }
+    if (h.valid) {
+      { DS_PROF(SELECT); select_layers(); }
+      // A pixel the 3D layer is neither the top nor the second target of is
+      // exact at 1x; one it is the top of, with no effect that could reach it,
+      // is the hi-res sample itself; the rest need the planes.
+      const u32 effect = (cur_.bldcnt >> 6) & 3;
+      const u16 mb = master_bright();
+      bool full = (mb >> 14) == 1 || (mb >> 14) == 2 ? (mb & 0x1F) != 0 : false;   // master brightness touches every pixel
+      for (u32 x = 0; x < 256; ++x) {
+        const bool t3 = top_kind_[x] == K_3D;
+        u8 c = 0;
+        if (t3) c = ((cur_.bldcnt & (static_cast<u32>(second_id_[x]) << 8)) || ((cur_.bldcnt & L_BG0) && (win_[x] & 0x20) && effect)) ? 2 : 1;
+        else if (second_id_[x] == L_BG0) c = 2;
+        h.cls[x] = c;
+        full |= c == 2;
+      }
+      h.full = full;
+      if (full) {
+        std::memcpy(h.top, top_.data(), sizeof h.top); std::memcpy(h.second, second_.data(), sizeof h.second);
+        std::memcpy(h.top_id, top_id_.data(), 256); std::memcpy(h.top_kind, top_kind_.data(), 256);
+        std::memcpy(h.top_alpha, top_alpha_.data(), 256); std::memcpy(h.second_id, second_id_.data(), 256);
+        std::memcpy(h.win, win_.data(), 256);
+      }
+      h.bldcnt = cur_.bldcnt; h.eva = cur_.eva; h.evb = cur_.evb; h.evy = cur_.evy; h.mbright = mb;
+      { DS_PROF(EFFECTS); colour_effects(); }
+      return;
+    }
+  }
   if (!effect_possible()) {
     // No colour effect touches this line: skip second-layer bookkeeping and
     // pick the cheapest applicable pass below.

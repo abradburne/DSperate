@@ -493,6 +493,7 @@ void Gpu::on_scanline_start() {
     nds_.dma.check(Cpu::ARM9, dma::MODE9_VBLANK);
     nds_.dma.check(Cpu::ARM7, dma::MODE7_VBLANK);
     { prof::Scope v(prof::GX_VBLANK); nds_.gpu3d.vblank(); }
+    cap_prev_ = cap_last_; cap_last_ = capture_on_ ? (capcnt_ | (1u << 31)) : 0;   // hi-res 3D: what this frame captured
     if (capture_on_) { capcnt_ &= ~(1u << 31); capture_on_ = false; }
   } else if (line_ == 262) nds_.io.set_vblank(false);
   if (line_ >= 2 && line_ < 194) nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_START);
@@ -543,6 +544,7 @@ void Gpu::begin_frame() {
   screens_on_ = nds_.io.powcnt1 & 1;
   // FIFO only needs clocking when something displays/captures from it, or a DMA channel awaits it.
   run_fifo_ = uses_fifo() || nds_.dma.in_mode(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
+  if (!hires_lines_.empty()) { hl_cur_ ^= SCREEN_H; engine[0].set_hires_export(hires_lines_.data() + hl_cur_); }
   if (capcnt_ & (1u << 31)) capture_on_ = true;
   if (capture_on_) capture_recent_ = CAPTURE_STICKY; else if (capture_recent_) --capture_recent_;
   // 3D frame this display frame reads, latched here since the raster moves on
@@ -792,6 +794,11 @@ void Gpu::step_engine(int e, u32 line) {
   // Reading the 3D line joins the raster bands: skip it when the raster never ran.
   if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
   if (draw) { en.render_line(line); output_engine(e, line); }
+  if (e == 0 && draw && !hires_lines_.empty() && line < SCREEN_H) {   // hi-res 3D: the line as engine A composited it, before master brightness
+    Engine2D::HiresLine& h = hires_lines_[hl_cur_ + line];
+    std::memcpy(h.out, en.output(), sizeof h.out);
+    h.mbright = en.master_bright();
+  }
   if (e == 0 && capture_render_ && !skip_frame_) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
   if (draw && line < SCREEN_H - 1) {
@@ -804,6 +811,14 @@ void Gpu::step_engine(int e, u32 line) {
 // The output stage for one engine's line: display mode, master brightness,
 // 6->8 bit expansion, into the screen POWCNT1 bit 15 gives it (or scaled
 // straight into the frontend's buffer).
+void Gpu::set_hires(bool on) {
+  if (on == hires_on()) return;
+  if (on) hires_lines_.assign(2 * SCREEN_H, Engine2D::HiresLine{});
+  else hires_lines_.clear();
+  hl_cur_ = 0;
+  engine[0].set_hires_export(on ? hires_lines_.data() : nullptr);
+}
+
 void Gpu::output_engine(int e, u32 line) {
   prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];
