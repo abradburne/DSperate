@@ -3838,15 +3838,19 @@ sdl_ready:
             // and composited on the GPU, in the context of the window showing it.
             const int scr = nds.gpu.hires_screen();
             const auto& ref = nds.gpu.frame_3d();
+            static const bool hr_dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
+            static u32 hr_n = 0, hr_drawn = 0, hr_noscr = 0, hr_nolist = 0;
+            ++hr_n; if (scr < 0) ++hr_noscr; else if (!ref.dlist) ++hr_nolist;
             if (scr >= 0 && ref.dlist) {
               ds::sdl::Display& dd = (dual_window && !display.shows(scr)) ? display2 : display;
               if (dd.gl()) {
                 dd.gl()->make_current();
                 u32 atop = 0; u64 aep = 0;
                 const auto& arena = nds.gpu3d.renderer().display_arena(&atop, &aep);
-                if (const unsigned tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr))) dd.gl()->set_hires(scr, tex);
+                if (const unsigned tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr))) { dd.gl()->set_hires(scr, tex); ++hr_drawn; }
               }
             }
+            if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames, %u at hi-res, %u no screen, %u no list (valid %d)\n", hr_n, hr_drawn, hr_noscr, hr_nolist, ref.dlist ? (int)ref.dlist->valid : -1);
           } else if (nds.gpu.hires_on()) {
             static std::vector<u32> hires_buf;
             u32 hs = 0; int hscr = -1;
