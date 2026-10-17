@@ -508,7 +508,10 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   for (u32 k = prefix; k < dl.npoly; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;   // shadow volumes: not yet
-    const u32 key = ((p.flags & DS_PF_TRANSLUCENT) ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u);
+    // Translucent runs also break on the polygon id: the stencil keeps the DS
+    // rule that a translucent pixel does not blend over one of its own id.
+    const bool tr = (p.flags & DS_PF_TRANSLUCENT) != 0;
+    const u32 key = (tr ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u) | (tr ? ((((p.attr >> 24) & 0x3Fu) + 1u) << 2) : 0u);
     if (runs.empty() || runs.back().second != key) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
     fan(p);
   }
@@ -559,6 +562,12 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(wbuf ? GL_GREATER : GL_LESS);
   glDisable(GL_BLEND);
+  // Stencil: the id + 1 of the translucent polygon that last blended a pixel,
+  // 0 where an opaque one drew last.
+  glEnable(GL_STENCIL_TEST);
+  glStencilMask(0xFF);
+  glStencilFunc(GL_ALWAYS, 0, 0xFF);
+  glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
   glUseProgram(d.raster_early);
   glUniform1ui(d.e_dispcnt, f.dispcnt); glUniform1ui(d.e_alpha_ref, f.alpha_ref); glUniform1uiv(d.e_toon, 32, dl.post.toon);
   glUseProgram(d.raster);
@@ -573,6 +582,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
     const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
     { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, trans ? GL_NONE : GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }   // translucent: the opaque id stays
+    const GLint sref = static_cast<GLint>(runs[r].second >> 2);
+    if (trans) glStencilFunc(GL_NOTEQUAL, sref, 0xFF);   // not over its own id's blend; writes its id where it draws
+    else glStencilFunc(GL_ALWAYS, 0, 0xFF);              // an opaque pixel: any id may blend over it again
     if (trans) {
       glEnable(GL_BLEND);
       glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
@@ -581,7 +593,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     } else { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
     if (v1 > v0) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
   }
-  glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
+  glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_STENCIL_TEST);
   // Edge marking, into its own texture, which the composite reads instead.
   GLuint layer3d = d.col3d;
   if (f.dispcnt & 0x20u) {
