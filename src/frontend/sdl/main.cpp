@@ -3881,6 +3881,8 @@ sdl_ready:
                 }
               }
               prev_scr_a = scr;
+              static u32 hr_alt = 0; hr_alt += gf.alt;
+              if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames with both screens in 3D\n", hr_alt);
               hr_now += gf.now; hr_fromcap += gf.show_cap; hr_cap += gf.cap_kind != 0;
               static double snap_ms = 0;
               snap_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snap0).count();
