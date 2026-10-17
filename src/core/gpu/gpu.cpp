@@ -493,6 +493,7 @@ void Gpu::on_scanline_start() {
     nds_.dma.check(Cpu::ARM9, dma::MODE9_VBLANK);
     nds_.dma.check(Cpu::ARM7, dma::MODE7_VBLANK);
     { prof::Scope v(prof::GX_VBLANK); nds_.gpu3d.vblank(); }
+    cap_prev_ = cap_last_; cap_last_ = capture_on_ ? (capcnt_ | (1u << 31)) : 0;   // hi-res 3D: what this frame captured
     if (capture_on_) { capcnt_ &= ~(1u << 31); capture_on_ = false; }
   } else if (line_ == 262) nds_.io.set_vblank(false);
   if (line_ >= 2 && line_ < 194) nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_START);

@@ -3835,22 +3835,39 @@ sdl_ready:
           // with the GPU raster's hi-res frame, shown instead of its 1x picture.
           if (gl_hires) {
             // video.hires3d: the CPU-drawn frame's polygon list drawn again at S x
-            // and composited on the GPU, in the context of the window showing it.
-            const int scr = nds.gpu.hires_screen();
-            const auto& ref = nds.gpu.frame_3d();
+            // and composited on the GPU, in the context of the window showing
+            // engine A. Shown at once in display mode 1; a display capture of
+            // engine A is drawn too and shown the frame after, when display
+            // mode 2 reads the bank it went to (the DS's own one-frame delay).
             static const bool hr_dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
-            static u32 hr_n = 0, hr_drawn = 0, hr_noscr = 0, hr_nolist = 0;
-            ++hr_n; if (scr < 0) ++hr_noscr; else if (!ref.dlist) ++hr_nolist;
-            if (scr >= 0 && ref.dlist) {
+            static u32 hr_n = 0, hr_now = 0, hr_cap = 0, hr_fromcap = 0;
+            static unsigned cap_tex = 0;
+            const int scr = nds.gpu.screen_a();
+            const auto& ref = nds.gpu.frame_3d();
+            const u32 mode = nds.gpu.display_mode_a();
+            const int cap_kind = ds::gpu::Gpu::hires_capture(nds.gpu.captured_last());
+            ++hr_n;
+            if (scr >= 0) {
               ds::sdl::Display& dd = (dual_window && !display.shows(scr)) ? display2 : display;
               if (dd.gl()) {
                 dd.gl()->make_current();
                 u32 atop = 0; u64 aep = 0;
                 const auto& arena = nds.gpu3d.renderer().display_arena(&atop, &aep);
-                if (const unsigned tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr))) { dd.gl()->set_hires(scr, tex); ++hr_drawn; }
+                const unsigned prev_cap = cap_tex;
+                cap_tex = 0;
+                if (mode == 1 && ref.dlist) {
+                  if (const unsigned tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr))) { dd.gl()->set_hires(scr, tex); ++hr_now; }
+                } else if (mode == 2 && prev_cap && ds::gpu::Gpu::hires_capture(nds.gpu.captured_prev()) && nds.gpu.display_bank_a() == ((nds.gpu.captured_prev() >> 16) & 3)) {
+                  dd.gl()->set_hires(scr, prev_cap); ++hr_fromcap;
+                }
+                if (cap_kind && ref.dlist) {   // after the show: its texture is the one render() leaves alone
+                  cap_tex = gl_hires->render(*ref.dlist, arena, atop, aep, nds.gpu.hires_lines(), nds.gpu.framebuffer(scr), cap_kind == 2 ? 2 : 1);
+                  if (cap_tex) ++hr_cap;
+                }
               }
             }
-            if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames, %u at hi-res, %u no screen, %u no list (valid %d)\n", hr_n, hr_drawn, hr_noscr, hr_nolist, ref.dlist ? (int)ref.dlist->valid : -1);
+            if (hr_dbg && hr_n % 60 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u shown from a capture (mode %u, cap %08x/%08x, bank %u)\n",
+                                                      hr_n, hr_now, hr_cap, hr_fromcap, mode, nds.gpu.captured_last(), nds.gpu.captured_prev(), nds.gpu.display_bank_a());
           } else if (nds.gpu.hires_on()) {
             static std::vector<u32> hires_buf;
             u32 hs = 0; int hscr = -1;

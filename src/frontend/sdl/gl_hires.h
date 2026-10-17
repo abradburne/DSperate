@@ -28,8 +28,13 @@ public:
   // that screen's finished 1x picture (0xAARRGGBB), shown where a line has no
   // 3D. Returns the composited S x texture (RGBA8, row 0 = the DS's top line),
   // or 0 when the frame cannot be drawn at hi-res (show the 1x picture).
+  // `mode`: 0 = the screen as shown (master brightness applied), 1 = as a
+  // display capture takes it (engine A's graphics, before master brightness),
+  // 2 = the 3D layer alone (a capture of 3D). Each call draws into the
+  // other of two textures, so the previous result stays valid (a capture is
+  // shown the frame after it was taken).
   unsigned render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
-                  const gpu::Engine2D::HiresLine* lines, const u32* fb);
+                  const gpu::Engine2D::HiresLine* lines, const u32* fb, int mode = 0);
 
   struct Impl;
 private:

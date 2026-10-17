@@ -8,7 +8,7 @@ struct GlHires::Impl {};
 GlHires::GlHires() = default;
 GlHires::~GlHires() = default;
 bool GlHires::init(u32, std::string* why) { if (why) *why = "built without GLES"; return false; }
-unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, const u32*) { return 0; }
+unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, const u32*, int) { return 0; }
 } // namespace ds::sdl
 #else
 #include <GLES3/gl31.h>
@@ -119,6 +119,7 @@ precision highp float; precision highp int; precision highp usampler2D; precisio
 uniform highp usampler2D u_top, u_second, u_meta, u_win, u_regs, u_fb;
 uniform highp sampler2D u_3d;
 uniform int u_scale;
+uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness), 2 the 3D alone
 out vec4 o_col;
 uint blend(uint a, uint b, uint eva, uint evb) {
   uint r = min((((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
@@ -141,6 +142,11 @@ uint darken(uint v, uint f, uint bias) { return dn(v & 0x3Fu, f, bias) | (dn((v 
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   ivec2 d = p / u_scale;
+  if (u_mode == 2) {   // a capture of the 3D layer: its colour, 6 -> 8 bits
+    uvec3 c6 = uvec3(round(texelFetch(u_3d, p, 0).rgb * 255.0));
+    o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
+    return;
+  }
   uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
   if ((regs.y >> 31) == 0u) {   // no 3D on the line: its finished 1x pixel
     uint c = texelFetch(u_fb, d, 0).r;
@@ -173,7 +179,7 @@ void main() {
     else if (effect == 3u) o = darken(top, evy, 7u);
   }
   // Master brightness, then 6 -> 8 bits.
-  uint mb = regs.y & 0xFFFFu, mode = mb >> 14, f = min(mb & 0x1Fu, 16u);
+  uint mb = u_mode == 1 ? 0u : regs.y & 0xFFFFu, mode = mb >> 14, f = min(mb & 0x1Fu, 16u);
   if (mode == 1u) o = brighten(o, f, 0u);
   else if (mode == 2u) o = darken(o, f, 0xFu);
   uvec3 c6 = uvec3(o & 0x3Fu, (o >> 8) & 0x3Fu, (o >> 16) & 0x3Fu);
@@ -215,24 +221,25 @@ GLuint tex2d(GLenum fmt, GLsizei w, GLsizei h) {
 struct GlHires::Impl {
   u32 S = 2;
   GLuint raster = 0, comp = 0;
-  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1;
+  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
   size_t vbo_cap = 0;
   GLuint arena = 0;
   u32 arena_up = 0; u64 arena_epoch = ~0ull;   // words of the arena on the GPU, and of which generation
   GLuint fbo3d = 0, col3d = 0, dep3d = 0;
-  GLuint fbo_out = 0, out = 0;
+  GLuint fbo_out[2] = {0, 0}, out[2] = {0, 0};
+  int slot = 0;
   GLuint t_top = 0, t_second = 0, t_meta = 0, t_win = 0, t_regs = 0, t_fb = 0;
   std::vector<Vtx> vb;
   std::vector<u32> top, second, meta, regs;
   std::vector<u8> win;
 
   ~Impl() {
-    GLuint texs[] = {arena, col3d, out, t_top, t_second, t_meta, t_win, t_regs, t_fb};
+    GLuint texs[] = {arena, col3d, out[0], out[1], t_top, t_second, t_meta, t_win, t_regs, t_fb};
     for (GLuint t : texs) if (t) glDeleteTextures(1, &t);
     if (dep3d) glDeleteRenderbuffers(1, &dep3d);
     if (fbo3d) glDeleteFramebuffers(1, &fbo3d);
-    if (fbo_out) glDeleteFramebuffers(1, &fbo_out);
+    glDeleteFramebuffers(2, fbo_out);
     if (vbo) glDeleteBuffers(1, &vbo);
     if (vao) glDeleteVertexArrays(1, &vao);
     if (vao_empty) glDeleteVertexArrays(1, &vao_empty);
@@ -261,6 +268,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   const char* names[] = {"u_top", "u_second", "u_meta", "u_win", "u_regs", "u_fb", "u_3d"};
   for (int i = 0; i < 7; ++i) glUniform1i(glGetUniformLocation(d.comp, names[i]), i);
   d.u_scale = glGetUniformLocation(d.comp, "u_scale");
+  d.u_mode = glGetUniformLocation(d.comp, "u_mode");
   glUniform1i(d.u_scale, static_cast<GLint>(d.S));
 
   d.arena = tex2d(GL_R32UI, kArenaW, static_cast<GLsizei>(kArenaH));
@@ -270,10 +278,12 @@ bool GlHires::init(u32 scale, std::string* why) {
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.col3d, 0);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, d.dep3d);
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "3D framebuffer incomplete"; return false; }
-  d.out = tex2d(GL_RGBA8, W, H);
-  glGenFramebuffers(1, &d.fbo_out); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.out, 0);
-  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "output framebuffer incomplete"; return false; }
+  for (int i = 0; i < 2; ++i) {
+    d.out[i] = tex2d(GL_RGBA8, W, H);
+    glGenFramebuffers(1, &d.fbo_out[i]); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[i]);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.out[i], 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "output framebuffer incomplete"; return false; }
+  }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   d.t_top = tex2d(GL_R32UI, 256, 192); d.t_second = tex2d(GL_R32UI, 256, 192); d.t_meta = tex2d(GL_R32UI, 256, 192);
   d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192);
@@ -293,7 +303,7 @@ bool GlHires::init(u32 scale, std::string* why) {
 }
 
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
-                         const gpu::Engine2D::HiresLine* lines, const u32* fb) {
+                         const gpu::Engine2D::HiresLine* lines, const u32* fb, int mode) {
   if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines || !fb) return 0;
   Impl& d = *d_;
   const u32 S = d.S;
@@ -411,9 +421,11 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   up(d.t_fb, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, fb);
 
   // The composite at S x.
-  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out);
+  d.slot ^= 1;
+  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
   glViewport(0, 0, W, H);
   glUseProgram(d.comp);
+  glUniform1i(d.u_mode, mode);
   const GLuint ts[7] = {d.t_top, d.t_second, d.t_meta, d.t_win, d.t_regs, d.t_fb, d.col3d};
   for (int i = 0; i < 7; ++i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
   glActiveTexture(GL_TEXTURE0);
@@ -434,7 +446,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  return d.out;
+  return d.out[d.slot];
 }
 
 } // namespace ds::sdl

@@ -100,6 +100,25 @@ public:
   int hires_screen() const { return !hires_lines_.empty() && screens_on_ && ((engine[0].dispcnt() >> 16) & 3) == 1 ? engine[0].screen() : -1; }
   const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data(); }
   const Renderer3D::FrameRef& frame_3d() const { return ref3d_; }
+  // Display capture, for hi-res 3D shown through VRAM (display mode 2): the
+  // DISPCAPCNT of the frame just run and of the one before (bit 31 set when
+  // it captured; 0 when it did not). hires_capture(cap) says whether such a
+  // capture is one hi-res can redo: engine A's whole screen or its 3D alone,
+  // 256x192, at offset 0, with no blend of source B. 1 = graphics screen,
+  // 2 = 3D only, 0 = no.
+  u32 captured_last() const { return cap_last_; }
+  u32 captured_prev() const { return cap_prev_; }
+  static int hires_capture(u32 cap) {
+    if (!(cap & (1u << 31))) return 0;
+    const u32 src = (cap >> 29) & 3, size = (cap >> 20) & 3, woff = (cap >> 18) & 3;
+    if (size != 3 || woff != 0) return 0;
+    if (src != 0 && !(src >= 2 && (cap & 0x1F) >= 16 && ((cap >> 8) & 0x1F) == 0)) return 0;
+    return (cap & (1u << 24)) ? 2 : 1;
+  }
+  // Engine A's display mode (DISPCNT bits 16-17) and VRAM block for mode 2 (bits 18-19).
+  u32 display_mode_a() const { return (engine[0].dispcnt() >> 16) & 3; }
+  u32 display_bank_a() const { return (engine[0].dispcnt() >> 18) & 3; }
+  int screen_a() const { return screens_on_ ? engine[0].screen() : -1; }
 
   // A screen the frontend does not show. Its driving engine skips drawing but
   // keeps journal/latches/windows/lazy-2D bookkeeping running so it's exact
@@ -213,6 +232,7 @@ private:
   void update_phase();
   u16 master_bright_g_[2] = {0, 0};   // guest-visible; the engines hold the render-side value
   u32 capcnt_ = 0;
+  u32 cap_last_ = 0, cap_prev_ = 0;   // hi-res 3D: the last two frames' captures
   bool capture_on_ = false;
   std::array<u16, 16> fifo_{};
   u8 fifo_rd_ = 0, fifo_wr_ = 0;
