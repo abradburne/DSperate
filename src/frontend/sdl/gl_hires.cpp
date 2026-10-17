@@ -326,7 +326,6 @@ struct GlHires::Impl {
   std::vector<std::pair<u32, bool>> prefix_runs;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1, r_split = -1;
   GLuint vao = 0, vbo = 0, vao_empty = 0;
-  size_t vbo_cap = 0;
   GLuint arena = 0;
   u32 arena_up = 0; u64 arena_epoch = ~0ull;   // words of the arena on the GPU, and of which generation
   GLuint fbo3d = 0, col3d = 0, dep3d = 0, id3d = 0;
@@ -339,10 +338,24 @@ struct GlHires::Impl {
   std::vector<Vtx> vb;
   std::vector<u32> top, second, meta, regs;
   std::vector<u8> win, cls;
+  // The per-frame inputs (planes, classes, vertices) in a ring of sets, one
+  // per render: rewriting the one the GPU still reads made Panfrost shadow
+  // it (a new buffer, mapped and faulted, every upload), ~3 ms a frame of
+  // kernel time on the present thread. t_*, vao and vbo name this render's.
+  static constexpr int kSets = 3;
+  struct Set { GLuint top = 0, second = 0, meta = 0, win = 0, regs = 0, fb = 0, cls = 0, base = 0, under = 0, vao = 0, vbo = 0; size_t vbo_cap = 0; };
+  Set sets[kSets];
+  int set_k = 0;
 
   ~Impl() {
+    for (Set& st : sets) {
+      GLuint ts[] = {st.top, st.second, st.meta, st.win, st.regs, st.fb, st.cls, st.base, st.under};
+      for (GLuint t : ts) if (t) glDeleteTextures(1, &t);
+      if (st.vbo) glDeleteBuffers(1, &st.vbo);
+      if (st.vao) glDeleteVertexArrays(1, &st.vao);
+    }
     glDeleteTextures(kOut, out);
-    GLuint texs[] = {arena, col3d, t_top, t_second, t_meta, t_win, t_regs, t_fb, t_class};
+    GLuint texs[] = {arena, col3d};
     for (GLuint t : texs) if (t) glDeleteTextures(1, &t);
     if (dep3d) glDeleteTextures(1, &dep3d);
     if (id3d) glDeleteTextures(1, &id3d);
@@ -351,15 +364,11 @@ struct GlHires::Impl {
     if (edge) glDeleteProgram(edge);
     if (fbo3d) glDeleteFramebuffers(1, &fbo3d);
     glDeleteFramebuffers(kOut, fbo_out);
-    if (vbo) glDeleteBuffers(1, &vbo);
-    if (vao) glDeleteVertexArrays(1, &vao);
     if (vao_empty) glDeleteVertexArrays(1, &vao_empty);
     if (raster) glDeleteProgram(raster);
     if (raster_early) glDeleteProgram(raster_early);
     if (comp) glDeleteProgram(comp);
     if (fast) glDeleteProgram(fast);
-    if (t_base) glDeleteTextures(1, &t_base);
-    if (t_under) glDeleteTextures(1, &t_under);
     if (dep_out) glDeleteRenderbuffers(1, &dep_out);
   }
 };
@@ -370,6 +379,10 @@ GlHires::~GlHires() = default;
 bool GlHires::init(u32 scale, std::string* why) {
   d_ = std::make_unique<Impl>();
   Impl& d = *d_;
+  d.set_k = (d.set_k + 1) % Impl::kSets;
+  { const Impl::Set& st = d.sets[d.set_k];
+    d.t_top = st.top; d.t_second = st.second; d.t_meta = st.meta; d.t_win = st.win; d.t_regs = st.regs; d.t_fb = st.fb; d.t_class = st.cls; d.t_base = st.base; d.t_under = st.under;
+    d.vao = st.vao; d.vbo = st.vbo; }
   d.S = scale_ = std::clamp(scale, 2u, 4u);
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
   const std::string fs_late = std::string("#version 310 es\n") + kRasterFS;
@@ -442,19 +455,23 @@ bool GlHires::init(u32 scale, std::string* why) {
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "output framebuffer incomplete"; return false; }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  d.t_top = tex2d(GL_R32UI, 256, 192); d.t_second = tex2d(GL_R32UI, 256, 192); d.t_meta = tex2d(GL_R32UI, 256, 192);
-  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192); d.t_class = tex2d(GL_R8UI, 256, 192); d.t_base = tex2d(GL_RGBA8, 256, 192); d.t_under = tex2d(GL_RGBA8, 256, 192);
+  for (Impl::Set& st : d.sets) {
+    st.top = tex2d(GL_R32UI, 256, 192); st.second = tex2d(GL_R32UI, 256, 192); st.meta = tex2d(GL_R32UI, 256, 192);
+    st.win = tex2d(GL_R8UI, 256, 192); st.regs = tex2d(GL_RG32UI, 192, 1); st.fb = tex2d(GL_R32UI, 256, 192); st.cls = tex2d(GL_R8UI, 256, 192); st.base = tex2d(GL_RGBA8, 256, 192); st.under = tex2d(GL_RGBA8, 256, 192);
+  }
   d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.base.resize(256 * 192); d.under.resize(256 * 192); d.regs.resize(192 * 2);
 
   glGenVertexArrays(1, &d.vao_empty);
-  glGenVertexArrays(1, &d.vao); glBindVertexArray(d.vao);
-  glGenBuffers(1, &d.vbo); glBindBuffer(GL_ARRAY_BUFFER, d.vbo);
+  for (Impl::Set& st : d.sets) {
+  glGenVertexArrays(1, &st.vao); glBindVertexArray(st.vao);
+  glGenBuffers(1, &st.vbo); glBindBuffer(GL_ARRAY_BUFFER, st.vbo);
   glEnableVertexAttribArray(0); glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, pos)));
   glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, rgb)));
   glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, st)));
   glEnableVertexAttribArray(3); glVertexAttribIPointer(3, 4, GL_UNSIGNED_INT, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, attr)));
   glEnableVertexAttribArray(4); glVertexAttribIPointer(4, 1, GL_UNSIGNED_INT, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, flags)));
   glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(offsetof(Vtx, dz)));
+  }
   glBindVertexArray(0);
   if (glGetError() != GL_NO_ERROR) { if (why) *why = "GL error during setup"; return false; }
   return true;
@@ -574,10 +591,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glBindVertexArray(d.vao);
   glBindBuffer(GL_ARRAY_BUFFER, d.vbo);
   const size_t bytes = std::max<size_t>(d.vb.size(), 1) * sizeof(Vtx);
-  // A new store every frame (orphaned): writing the one the GPU still reads
-  // from last frame stalled or copied it, ~3.5 ms a frame in Golden Sun.
-  if (bytes > d.vbo_cap) d.vbo_cap = bytes * 2;
-  glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(d.vbo_cap), nullptr, GL_STREAM_DRAW);
+  if (bytes > d.sets[d.set_k].vbo_cap) { d.sets[d.set_k].vbo_cap = bytes * 2; glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes * 2), nullptr, GL_STREAM_DRAW); }
   if (!d.vb.empty()) glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(d.vb.size() * sizeof(Vtx)), d.vb.data());
 
   const auto T3 = clk::now();

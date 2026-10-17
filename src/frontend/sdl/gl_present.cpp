@@ -74,7 +74,8 @@ struct GlPresent::Impl {
   SDL_Window* win = nullptr;
   SDL_GLContext ctx = nullptr;
   bool linear = false;
-  GLuint p_fb = 0, p_tex = 0, vao = 0, fbtex[2] = {0, 0};
+  GLuint p_fb = 0, p_tex = 0, vao = 0, fbtex[2][3] = {};
+  int fb_k[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
   u32 frames = 0;           // DS_PRESENT_PPM
   int index = 0;            // the window's order of opening
@@ -104,7 +105,7 @@ bool GlPresent::open(SDL_Window* win, bool vsync, bool linear) {
   glUseProgram(d.p_fb); glUniform1i(glGetUniformLocation(d.p_fb, "u_fb"), 0);
   glUseProgram(d.p_tex); glUniform1i(glGetUniformLocation(d.p_tex, "u_tex"), 0);
   glGenVertexArrays(1, &d.vao);
-  for (GLuint& t : d.fbtex) {
+  for (auto& ring : d.fbtex) for (GLuint& t : ring) {
     glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, 256, 192);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -122,7 +123,7 @@ void GlPresent::close() {
   pt.wait(pt.post([&] { if (d.ctx) SDL_GL_MakeCurrent(d.win, nullptr); }));   // released there, taken here to tear down
   if (d.ctx) {
     SDL_GL_MakeCurrent(d.win, d.ctx);
-    glDeleteTextures(2, d.fbtex); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
+    glDeleteTextures(6, &d.fbtex[0][0]); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
     if (--g_contexts == 0) g_first = nullptr;
     SDL_GL_DeleteContext(d.ctx);
   }
@@ -166,7 +167,9 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, flt); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, flt);
     } else {
       glUseProgram(d.p_fb);
-      glBindTexture(GL_TEXTURE_2D, d.fbtex[v.screen]);
+      // A ring per screen: rewriting the texture the GPU still reads made Panfrost shadow it.
+      const GLuint t = d.fbtex[v.screen][d.fb_k[v.screen]]; d.fb_k[v.screen] = (d.fb_k[v.screen] + 1) % 3;
+      glBindTexture(GL_TEXTURE_2D, t);
       glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, fb[v.screen]);
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
