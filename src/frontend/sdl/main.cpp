@@ -1458,6 +1458,9 @@ static int run(int argc, char** argv) {
   }
   VideoSetup vs;
   if (!parse_video(cfg, vs)) return 2;
+  // GBA mode has one picture (on the top screen): one screen's layout,
+  // unless the settings name one. With a window per panel the top panel shows it.
+  if (gba_game && !cfg.has("video.layout") && !vs.dual_window) { vs.layout.mode = ds::sdl::Display::Mode::Single; vs.layout.primary = 0; }
   const u32& grid = vs.grid;
   const u8& seam_blend = vs.seam_blend;
   u8& chunky = vs.chunky;
