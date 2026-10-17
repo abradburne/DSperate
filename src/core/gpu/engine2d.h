@@ -84,6 +84,7 @@ public:
   // composited again with the 3D taken from a hi-res frame. The CPU
   // composite still runs: output(), capture and the 1x picture are as before.
   struct HiresLine {
+    alignas(16) Pixel out[256];   // engine A's composited line, before master brightness (every line; Gpu fills it)
     alignas(16) Pixel top[256], second[256];
     alignas(16) u8 top_id[256], top_kind[256], top_alpha[256], second_id[256], win[256];
     u16 bldcnt = 0, mbright = 0; u8 eva = 0, evb = 0, evy = 0;

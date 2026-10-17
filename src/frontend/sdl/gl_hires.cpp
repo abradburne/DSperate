@@ -117,7 +117,7 @@ void main() {
 // taken from the hi-res frame.
 const char* kCompositeFS = R"(#version 310 es
 precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
-uniform highp usampler2D u_top, u_second, u_meta, u_win, u_regs, u_fb;
+uniform highp usampler2D u_top, u_second, u_meta, u_win, u_regs, u_fb, u_class;
 uniform highp sampler2D u_3d;
 uniform int u_scale;
 uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness), 2 the 3D alone
@@ -148,16 +148,30 @@ void main() {
     o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
     return;
   }
-  uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
-  if ((regs.y >> 31) == 0u) {   // no 3D on the line: its finished 1x pixel
-    uint c = texelFetch(u_fb, d, 0).r;
-    o_col = vec4(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u), 255.0) / 255.0;
+  // Per DS pixel (the CPU's verdict): 0 = the 3D layer plays no part, so the
+  // finished 1x pixel is exact; 1 = the 3D layer on top with nothing applied
+  // after it, so the hi-res sample is the pixel; 2 = the whole composite.
+  uint cls = texelFetch(u_class, d, 0).r;
+  if (cls == 0u) {   // engine A's own 1x pixel (u_fb: its composited line, before master brightness)
+    uint o = texelFetch(u_fb, d, 0).r & 0xFFFFFFu;
+    uint mb = u_mode == 1 ? 0u : texelFetch(u_regs, ivec2(d.y, 0), 0).g & 0xFFFFu, mode = mb >> 14, f = min(mb & 0x1Fu, 16u);
+    if (mode == 1u) o = brighten(o, f, 0u);
+    else if (mode == 2u) o = darken(o, f, 0xFu);
+    uvec3 c6 = uvec3(o & 0x3Fu, (o >> 8) & 0x3Fu, (o >> 16) & 0x3Fu);
+    o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
     return;
   }
+  vec4 h0 = texelFetch(u_3d, p, 0);
+  if (cls == 1u && h0.a > 0.0) {
+    uvec3 c6 = uvec3(round(h0.rgb * 255.0));
+    o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
+    return;
+  }
+  uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
   uint top = texelFetch(u_top, d, 0).r, second = texelFetch(u_second, d, 0).r, meta = texelFetch(u_meta, d, 0).r;
   uint win = texelFetch(u_win, d, 0).r;
   uint top_id = meta & 0xFFu, kind = (meta >> 8) & 0xFFu, talpha = (meta >> 16) & 0xFFu, second_id = meta >> 24;
-  vec4 h = texelFetch(u_3d, p, 0);
+  vec4 h = h0;
   uint ha8 = uint(round(h.a * 255.0));
   uint ha = ha8 == 0u ? 0u : (ha8 >> 3) - 1u;
   uint hpx = uint(round(h.r * 255.0)) | (uint(round(h.g * 255.0)) << 8) | (uint(round(h.b * 255.0)) << 16) | (ha << 24);
@@ -230,13 +244,13 @@ struct GlHires::Impl {
   GLuint fbo3d = 0, col3d = 0, dep3d = 0;
   GLuint fbo_out[2] = {0, 0}, out[2] = {0, 0};
   int slot = 0;
-  GLuint t_top = 0, t_second = 0, t_meta = 0, t_win = 0, t_regs = 0, t_fb = 0;
+  GLuint t_top = 0, t_second = 0, t_meta = 0, t_win = 0, t_regs = 0, t_fb = 0, t_class = 0;
   std::vector<Vtx> vb;
   std::vector<u32> top, second, meta, regs;
-  std::vector<u8> win;
+  std::vector<u8> win, cls;
 
   ~Impl() {
-    GLuint texs[] = {arena, col3d, out[0], out[1], t_top, t_second, t_meta, t_win, t_regs, t_fb};
+    GLuint texs[] = {arena, col3d, out[0], out[1], t_top, t_second, t_meta, t_win, t_regs, t_fb, t_class};
     for (GLuint t : texs) if (t) glDeleteTextures(1, &t);
     if (dep3d) glDeleteRenderbuffers(1, &dep3d);
     if (fbo3d) glDeleteFramebuffers(1, &fbo3d);
@@ -266,8 +280,8 @@ bool GlHires::init(u32 scale, std::string* why) {
   glUseProgram(d.raster);
   glUniform1i(glGetUniformLocation(d.raster, "u_texels"), 0);
   glUseProgram(d.comp);
-  const char* names[] = {"u_top", "u_second", "u_meta", "u_win", "u_regs", "u_fb", "u_3d"};
-  for (int i = 0; i < 7; ++i) glUniform1i(glGetUniformLocation(d.comp, names[i]), i);
+  const char* names[] = {"u_top", "u_second", "u_meta", "u_win", "u_regs", "u_fb", "u_3d", "u_class"};
+  for (int i = 0; i < 8; ++i) glUniform1i(glGetUniformLocation(d.comp, names[i]), i);
   d.u_scale = glGetUniformLocation(d.comp, "u_scale");
   d.u_mode = glGetUniformLocation(d.comp, "u_mode");
   glUniform1i(d.u_scale, static_cast<GLint>(d.S));
@@ -287,8 +301,8 @@ bool GlHires::init(u32 scale, std::string* why) {
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   d.t_top = tex2d(GL_R32UI, 256, 192); d.t_second = tex2d(GL_R32UI, 256, 192); d.t_meta = tex2d(GL_R32UI, 256, 192);
-  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192);
-  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.regs.resize(192 * 2);
+  d.t_win = tex2d(GL_R8UI, 256, 192); d.t_regs = tex2d(GL_RG32UI, 192, 1); d.t_fb = tex2d(GL_R32UI, 256, 192); d.t_class = tex2d(GL_R8UI, 256, 192);
+  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.regs.resize(192 * 2);
 
   glGenVertexArrays(1, &d.vao_empty);
   glGenVertexArrays(1, &d.vao); glBindVertexArray(d.vao);
@@ -305,7 +319,8 @@ bool GlHires::init(u32 scale, std::string* why) {
 
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                          const gpu::Engine2D::HiresLine* lines, const u32* fb, int mode) {
-  if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines || !fb) return 0;
+  if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines) return 0;
+  (void)fb;   // engine A's own lines (HiresLine::out) stand in for it, captures included
   Impl& d = *d_;
   using clk = std::chrono::steady_clock;
   static const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
@@ -415,7 +430,21 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     const gpu::Engine2D::HiresLine& h = lines[y];
     d.regs[y * 2] = static_cast<u32>(h.bldcnt) | (static_cast<u32>(h.eva) << 16) | (static_cast<u32>(h.evb) << 21) | (static_cast<u32>(h.evy) << 26);
     d.regs[y * 2 + 1] = static_cast<u32>(h.mbright) | (h.valid ? 0x80000000u : 0u);
-    if (!h.valid) continue;
+    u8* cl = &d.cls[y * 256];
+    if (!h.valid) { std::memset(cl, 0, 256); continue; }
+    // A pixel the 3D layer is neither the top nor the second target of is
+    // exact at 1x. One it is the top of, with no effect that could reach it
+    // (no 3D blend with the second, no colour effect, no master brightness in
+    // the shown mode), is the hi-res sample itself.
+    const u32 effect = (h.bldcnt >> 6) & 3;
+    const bool bright = mode != 1 && (h.mbright >> 14) != 0 && (h.mbright >> 14) != 3 && (h.mbright & 0x1F);
+    for (u32 x = 0; x < 256; ++x) {
+      if (h.top_kind[x] != 3 && h.second_id[x] != 1) { cl[x] = 0; continue; }
+      if (h.top_kind[x] != 3) { cl[x] = 2; continue; }
+      const bool blend3d = (h.bldcnt & (static_cast<u32>(h.second_id[x]) << 8)) != 0;
+      const bool fx = (h.bldcnt & 1u) && (h.win[x] & 0x20) && effect != 0;
+      cl[x] = (blend3d || fx || bright) ? 2 : 1;
+    }
     std::memcpy(&d.top[y * 256], h.top, 256 * 4);
     std::memcpy(&d.second[y * 256], h.second, 256 * 4);
     std::memcpy(&d.win[y * 256], h.win, 256);
@@ -428,7 +457,9 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   up(d.t_meta, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.meta.data());
   up(d.t_win, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_BYTE, d.win.data());
   up(d.t_regs, 192, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, d.regs.data());
-  up(d.t_fb, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, fb);
+  for (u32 y = 0; y < 192; ++y) std::memcpy(&d.top[y * 256], lines[y].out, 256 * 4);   // reuse: engine A's own lines
+  up(d.t_fb, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.top.data());
+  up(d.t_class, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_BYTE, d.cls.data());
 
   const auto T5 = clk::now();
   // The composite at S x.
@@ -437,8 +468,8 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glViewport(0, 0, W, H);
   glUseProgram(d.comp);
   glUniform1i(d.u_mode, mode);
-  const GLuint ts[7] = {d.t_top, d.t_second, d.t_meta, d.t_win, d.t_regs, d.t_fb, d.col3d};
-  for (int i = 0; i < 7; ++i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
+  const GLuint ts[8] = {d.t_top, d.t_second, d.t_meta, d.t_win, d.t_regs, d.t_fb, d.col3d, d.t_class};
+  for (int i = 0; i < 8; ++i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
   glActiveTexture(GL_TEXTURE0);
   glBindVertexArray(d.vao_empty);
   glDrawArrays(GL_TRIANGLES, 0, 3);

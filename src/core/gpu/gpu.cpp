@@ -793,6 +793,11 @@ void Gpu::step_engine(int e, u32 line) {
   // Reading the 3D line joins the raster bands: skip it when the raster never ran.
   if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
   if (draw) { en.render_line(line); output_engine(e, line); }
+  if (e == 0 && draw && !hires_lines_.empty() && line < SCREEN_H) {   // hi-res 3D: the line as engine A composited it, before master brightness
+    Engine2D::HiresLine& h = hires_lines_[line];
+    std::memcpy(h.out, en.output(), sizeof h.out);
+    h.mbright = en.master_bright();
+  }
   if (e == 0 && capture_render_ && !skip_frame_) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
   if (draw && line < SCREEN_H - 1) {
