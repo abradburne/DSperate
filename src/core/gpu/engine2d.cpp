@@ -244,8 +244,26 @@ void Engine2D::render_line(u32 line) {
       return;
     }
     if (h.valid) {
-      under_pass();
       { DS_PROF(SELECT); select_layers(); }
+      {
+        // The under pass, read off the full select: where the 3D is on top,
+        // what is under it is the second layer (the best of the rest, the
+        // backdrop at worst); elsewhere the top, and whether BG0 would win
+        // there is the priority rule against it.
+        DS_PROF(SELECT);
+        const u32 p0 = cur_.bgcnt[0] & 3;
+        for (u32 x = 0; x < 256; ++x) {
+          const u8 t = top_tid_[x];
+          if (t == 0) { h.under[x] = second_[x]; w3[x] = true; continue; }
+          h.under[x] = top_[x];
+          bool wins;
+          if (!(win_[x] & 1)) wins = false;
+          else if (t == T_BACKDROP || t == T_NONE) wins = true;
+          else if (t <= T_BG3) wins = p0 <= (cur_.bgcnt[t] & 3u);
+          else wins = p0 < (obj_attr_[x] & OA_PRIO);
+          w3[x] = wins;
+        }
+      }
       // A pixel the 3D layer is neither the top nor the second target of is
       // exact at 1x; one it is the top of, with no effect that could reach it,
       // is the hi-res sample itself; the rest need the planes.
