@@ -513,6 +513,22 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     fan(p);
   }
   const u32 total = static_cast<u32>(d.vb.size());
+  // DS_HIRES_POLYS=x0,y0,x1,y1 (DS pixels): the polygons over that box, once, at render 60 (debug).
+  if (static const char* pd = std::getenv("DS_HIRES_POLYS"); pd) {
+    static u32 n = 0;
+    if (++n == 60) {
+      int x0 = 0, y0 = 0, x1 = 0, y1 = 0; std::sscanf(pd, "%d,%d,%d,%d", &x0, &y0, &x1, &y1);
+      std::fprintf(stderr, "polys over %d,%d-%d,%d (first_ordered %u, %s):\n", x0, y0, x1, y1, f.first_ordered, wbuf ? "W" : "Z");
+      for (u32 k = 0; k < dl.npoly; ++k) {
+        const GpuPoly& p = dl.polys[k];
+        if (p.xmax < x0 || p.xmin > x1 || p.ybot < y0 || p.ytop > y1) continue;
+        s32 zl = 0x7FFFFFFF, zh = -0x7FFFFFFF;
+        for (u32 v = 0; v < p.nverts; ++v) { zl = std::min(zl, dl.verts[p.first_vert + v].z); zh = std::max(zh, dl.verts[p.first_vert + v].z); }
+        std::fprintf(stderr, "  #%u attr %08x flags %02x id %u alpha %u eq %d dw %d n %u x %d-%d y %d-%d z %d-%d\n", k, p.attr, p.flags, (p.attr >> 24) & 63, (p.attr >> 16) & 31,
+                     (p.attr >> 14) & 1, (p.attr >> 11) & 1, p.nverts, p.xmin, p.xmax, p.ytop, p.ybot, zl, zh);
+      }
+    }
+  }
 
   const auto T2 = clk::now();
   glBindVertexArray(d.vao);
