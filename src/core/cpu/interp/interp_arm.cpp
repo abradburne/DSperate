@@ -292,10 +292,11 @@ void exec_arm(CpuContext& cpu, u32 instr) {
   case AOp::B: case AOp::Bl: {
     s32 off = static_cast<s32>(static_cast<u32>(instr) << 8) >> 6;
     if (op == AOp::Bl) R(cpu, 14) = R(cpu, 15) - 4;
+    BRANCH_FETCH(cpu);
     cpu.jump(R(cpu, 15) + static_cast<u32>(off), false);
     return;
   }
-  case AOp::Bx: cpu.jump(R(cpu, instr & 0xF), true); return;
+  case AOp::Bx: BRANCH_FETCH(cpu); cpu.jump(R(cpu, instr & 0xF), true); return;
   case AOp::BlxReg: {
     if (!is_arm9(cpu)) break;
     u32 target = R(cpu, instr & 0xF);
@@ -331,7 +332,9 @@ void exec_arm(CpuContext& cpu, u32 instr) {
       if (!is_arm9(cpu)) cpu.hot.cpsr &= ~FLAG_C;
     }
     const bool sgn = (op == AOp::Smull || op == AOp::Smlal);
-    charge_CI(cpu, mul_cycles(cpu, instr & (1u << 20), rs_v, sgn, 1));
+    // The ARM7TDMI's long accumulate takes another cycle (m+2); the DS model, after melonDS, charges m+1.
+    const u32 acc = (DS_INTERP_GBA && (op == AOp::Umlal || op == AOp::Smlal)) ? 1 : 0;
+    charge_CI(cpu, mul_cycles(cpu, instr & (1u << 20), rs_v, sgn, 1 + acc));
     return;
   }
 
@@ -415,6 +418,7 @@ void exec_arm(CpuContext& cpu, u32 instr) {
 #if !DS_INTERP_GBA
     if ((cpu.nds->dsi_font_hle || cpu.nds->dsi_loader_watch) && cpu.nds->dsi_hle_swi(cpu, (instr >> 16) & 0xFF)) return;
 #endif
+    BRANCH_FETCH(cpu);
     cpu.raise_exception(CpuContext::Exception::Swi); return;
   case AOp::Bkpt: cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;
 

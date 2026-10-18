@@ -136,7 +136,9 @@ void test_timers_dma_irq() {
   CHECK(!g.cpu->hot.irq_pending);
   g.write16(0x04000208, 1);
   g.if_ |= IRQ_VBLANK; g.update_irq();
-  CHECK(g.cpu->hot.irq_pending);
+  CHECK(!g.cpu->hot.irq_pending);     // the CPU sees it IRQ_DELAY cycles later
+  g.write16(0x04000208, 0);
+  CHECK(!g.cpu->hot.irq_pending);
 }
 
 void test_state_round_trip() {

@@ -51,7 +51,9 @@ enum Irq : u16 {
   IRQ_TIMER0 = 1 << 3, IRQ_SERIAL = 1 << 7, IRQ_DMA0 = 1 << 8, IRQ_KEYPAD = 1 << 12, IRQ_GAMEPAK = 1 << 13,
 };
 
-enum class Ev : u8 { Ppu, Timer0, Timer1, Timer2, Timer3, Audio, Count };
+enum class Ev : u8 { Ppu, Timer0, Timer1, Timer2, Timer3, Audio, Irq, Count };
+// Cycles from an interrupt being raised (IE & IF with IME) to the CPU seeing it.
+constexpr u32 IRQ_DELAY = 7;
 
 using TraceFn = void (*)(CpuContext& cpu, u32 instr, void* user);
 
@@ -102,6 +104,21 @@ struct Gba {
 
   // The CPU's prefetched instructions (gba_interp.cpp): addresses | Thumb bit.
   struct Pipeline { u32 addr[2] = {}, val[2] = {}, n = 0; } pipe;
+
+  // The cartridge prefetch buffer (WAITCNT bit 14), charged by
+  // gba_cpu_cycles.h: while the CPU leaves the cartridge bus alone (internal
+  // cycles, other memories) it reads the next halfwords of code ahead, up to
+  // eight; a code fetch it already holds takes one cycle. `next` is the
+  // halfword being fetched, the `count` before it are held.
+  struct Prefetch { bool on = false, active = false; u32 next = 0, count = 0, progress = 0; } pf;
+  u32  pf_fetch(u32 addr, u32 halfwords, bool seq);   // a code fetch from the cartridge: its cycles
+  void pf_idle(u32 cycles);
+  void pf_flush() { pf.active = false; pf.count = 0; pf.progress = 0; }
+  void pf_restart(u32 addr) {
+    pf.count = 0; pf.progress = 0;
+    pf.active = pf.on && addr >= 0x08000000 && addr < 0x0E000000;
+    pf.next = addr;
+  }
 
   // ---- bus (gba_cpu_mem.h's slow paths; DMA uses the *_raw forms) ----
   u8  read8(u32 addr);

@@ -16,9 +16,18 @@
 #endif
 #if DS_INTERP_GBA
 #include "core/gba/gba_cpu_mem.h"
+#include "core/gba/gba_cpu_cycles.h"
 #endif
 
 namespace ds::DS_INTERP_NS {
+
+// A branch's own code fetch (the S before its N+S refill). The DS model
+// leaves it out, as melonDS does; the GBA, measured against mGBA's suite, pays it.
+#if DS_INTERP_GBA
+#define BRANCH_FETCH(cpu) charge_C(cpu)
+#else
+#define BRANCH_FETCH(cpu) ((void)0)
+#endif
 
 // r15 holds instruction address + 8 (ARM) / + 4 (Thumb) on entry; handlers
 // that branch call cpu.jump(). Every handler charges its cycles through

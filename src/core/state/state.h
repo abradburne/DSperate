@@ -29,6 +29,7 @@ public:
   void end() { const u32 n = static_cast<u32>(buf_.size() - len_at_ - 4); std::memcpy(&buf_[len_at_], &n, 4); }
   bool more() const { return true; }
   size_t remaining() const { return 0; }   // mirrors Reader::remaining
+  bool next_is(const char*) const { return true; }   // mirrors Reader::next_is: a writer writes every chunk
 
   template <class T> void put(const T& v) {
     if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) blob(&v, sizeof v);
@@ -72,6 +73,8 @@ public:
     return true;
   }
   void end() { if (ok_) p_ = chunk_end_; }
+  // Whether the next chunk is `tag` (an optional chunk a newer build adds).
+  bool next_is(const char tag[4]) const { return ok_ && end_ - p_ >= 8 && std::memcmp(p_, tag, 4) == 0; }
   bool more() const { return ok_ && p_ < chunk_end_; }
   size_t remaining() const { return ok_ ? static_cast<size_t>(chunk_end_ - p_) : 0; }
 

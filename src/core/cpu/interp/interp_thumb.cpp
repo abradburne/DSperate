@@ -103,6 +103,7 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
       if (!is_arm9(cpu)) break;
       R(cpu, 14) = (R(cpu, 15) - 2) | 1;
     }
+    BRANCH_FETCH(cpu);
     cpu.jump(target, true);
     return;
   }
@@ -224,6 +225,7 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
     const u32 cond = (instr >> 8) & 0xF;
     if (!arm::check_condition(cond, cpu.hot.cpsr)) { charge_C(cpu); return; }
     s32 off = static_cast<s8>(instr & 0xFF) * 2;
+    BRANCH_FETCH(cpu);
     cpu.jump(R(cpu, 15) + static_cast<u32>(off), false);
     return;
   }
@@ -231,12 +233,14 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
 #if !DS_INTERP_GBA
     if ((cpu.nds->dsi_font_hle || cpu.nds->dsi_loader_watch) && cpu.nds->dsi_hle_swi(cpu, instr & 0xFF)) return;
 #endif
+    BRANCH_FETCH(cpu);
     cpu.raise_exception(CpuContext::Exception::Swi); return;
   case TOp::Bkpt:
     if (!is_arm9(cpu)) break;
     cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;
   case TOp::B: {
     s32 off = (static_cast<s32>(static_cast<u32>(instr) << 21) >> 20);
+    BRANCH_FETCH(cpu);
     cpu.jump(R(cpu, 15) + static_cast<u32>(off), false);
     return;
   }
@@ -251,6 +255,7 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
     const u32 ret = (R(cpu, 15) - 2) | 1;
     u32 target = R(cpu, 14) + ((instr & 0x7FF) << 1);
     R(cpu, 14) = ret;
+    BRANCH_FETCH(cpu);
     if (op == TOp::BlxSuffix) { cpu.jump(target & ~3u, true); }   // bit0 clear => ARM
     else cpu.jump(target | 1, true);
     return;

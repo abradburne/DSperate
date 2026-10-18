@@ -12,6 +12,8 @@
 
 namespace ds::gba_interp {
 
+void cart_data_access(CpuContext& cpu) { machine(cpu).pf_flush(); }
+
 // The ARM7TDMI's pipeline: the two instructions after the one executing were
 // fetched before it ran, so a store over them (self-modifying code) is not
 // seen until they are refetched. Kept by address; a jump empties it.
@@ -44,8 +46,9 @@ void run(CpuContext& cpu) {
       exec_arm(cpu, instr);
       if (!cpu.jumped) cpu.hot.regs[15] += 4;
     }
+    if (cpu.jumped) g.pf_restart(cpu.hot.regs[15] & ~1u);   // the refill fetched the target and the next; it reads on from there
     if (cpu.halted) return;
-    if (cpu.hot.irq_pending) cpu.check_irq();
+    if (cpu.hot.irq_pending) { cpu.jumped = false; cpu.check_irq(); if (cpu.jumped) g.pf_restart(cpu.hot.regs[15] & ~1u); }
   }
 }
 

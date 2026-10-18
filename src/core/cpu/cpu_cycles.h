@@ -20,6 +20,10 @@
 namespace ds {
 
 
+// The GBA build of the interpreter charges through its own model with the
+// cartridge prefetch buffer (core/gba/gba_cpu_cycles.h); these are kept out
+// of its translation units, as cpu_mem.h's accessors are.
+#if !defined(DS_INTERP_GBA) || !DS_INTERP_GBA
 // ARM9 numC at the moment of charging: the odd halfword of a Thumb pair is
 // already in the prefetch buffer.
 inline u32 num_c9(const CpuContext& cpu) {
@@ -94,6 +98,8 @@ inline void charge_CD(CpuContext& cpu) {
   else cost = max3(numC + numD - 3, numC, numD);
   cpu.hot.cycle_budget -= static_cast<s32>(cost);
 }
+
+#endif // !DS_INTERP_GBA
 
 // ARM9 prefetch cost for the instruction about to execute (r15 = two ahead).
 inline void prefetch_cost9(CpuContext& cpu) {

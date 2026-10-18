@@ -24,12 +24,18 @@ u32  bus_fetch(CpuContext& cpu, u32 addr, u32 width);
 
 namespace ds::gba_interp {
 
-// width: 0 = 8/16-bit, 1 = 32-bit. data_region never reads as 0x02: the DS's
-// ARM7 main-RAM overlap rules (cpu_cycles.h) are not the GBA's EWRAM.
+// width: 0 = 8/16-bit, 1 = 32-bit.
+// data_region keeps the region (low byte) above 0xFF, so it never reads as the
+// DS's main RAM (0x02); a cartridge access stops the prefetch buffer.
+void cart_data_access(CpuContext& cpu);
 inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq, bool) {
   const u8* t = cpu.timing7[addr >> 15];
-  const u32 c = seq ? t[width ? 3 : 1] : t[width ? 2 : 0];
-  if (seq) cpu.data_cycles += c; else { cpu.data_cycles = c; cpu.data_region = 0xFF; }
+  // A burst that crosses into another region starts again there, non-sequential.
+  const bool s = seq && (addr >> 24) == (cpu.data_region & 0xFF);
+  const u32 c = s ? t[width ? 3 : 1] : t[width ? 2 : 0];
+  if (seq) cpu.data_cycles += c; else cpu.data_cycles = c;
+  cpu.data_region = 0x100 | (addr >> 24);
+  if (addr >= 0x08000000 && addr < 0x0E000000) cart_data_access(cpu);
 }
 
 inline u8 mem_read8(CpuContext& cpu, u32 addr, bool seq = false) {

@@ -160,6 +160,36 @@ void Gba::rebuild_timing() {
   fill(0x0E, sr, sr, sr, sr);
   fill(0x0F, sr, sr, sr, sr);
   cpu->timing7 = reinterpret_cast<const u8 (*)[4]>(timing_.data());
+  const bool on = w & 0x4000;
+  if (on != pf.on) { pf.on = on; pf_flush(); }
+}
+
+void Gba::pf_idle(u32 n) {
+  if (!pf.active) return;
+  const u32 duty = timing_[pf.next >> 15][1];
+  while (n && pf.count < 8) {
+    const u32 need = duty - pf.progress;
+    if (n < need) { pf.progress += n; return; }
+    n -= need; pf.progress = 0; ++pf.count; pf.next += 2;
+  }
+}
+
+u32 Gba::pf_fetch(u32 a, u32 halfwords, bool seq) {
+  const u8* t = timing_[a >> 15].data();
+  u32 cost = 0;
+  for (u32 h = 0; h < halfwords; ++h, a += 2) {
+    if (pf.count && pf.next - 2 * pf.count == a) {   // held: a cycle (both halves of a word in one)
+      --pf.count;
+      if (h == 0) { cost += 1; pf_idle(1); }
+    } else if (pf.active && !pf.count && pf.next == a) {   // on its way: what is left of it
+      cost += t[1] - pf.progress;
+      pf.progress = 0; pf.next += 2;
+    } else {   // a miss: an ordinary access, and the buffer starts again behind it
+      cost += h ? t[1] : t[seq ? 1 : 0];
+      pf.active = true; pf.count = 0; pf.progress = 0; pf.next = a + 2;
+    }
+  }
+  return cost;
 }
 
 void Gba::debug_write(u32 addr, u32 v, u32 width) {
@@ -416,10 +446,18 @@ void Gba::io_write16(u32 off, u16 v, u16 mask) {
   if ((off >= 0x28 && off < 0x30) || (off >= 0x38 && off < 0x40)) ppu.ref_written(off);
 }
 
+// The CPU sees an interrupt IRQ_DELAY cycles after it is raised (mGBA's
+// suite: a timer IRQ lets three or four more instructions run); it goes away
+// at once when IE, IF or IME drop it. A halted CPU wakes as soon as IE & IF.
 void Gba::update_irq() {
   const bool any = (ie & if_ & 0x3FFF) != 0;
-  cpu->hot.irq_pending = (any && (ime & 1)) ? 1u : 0u;
-  if (any && !in_cpu_) cpu->halted = false;
+  if (any && (ime & 1)) {
+    if (!cpu->hot.irq_pending && ev_at_[static_cast<size_t>(Ev::Irq)] == ~u64{0}) schedule(Ev::Irq, now() + IRQ_DELAY);
+  } else {
+    cpu->hot.irq_pending = 0;
+    if (ev_at_[static_cast<size_t>(Ev::Irq)] != ~u64{0}) cancel(Ev::Irq);
+  }
+  if (any && !in_cpu_ && ev_at_[static_cast<size_t>(Ev::Irq)] == ~u64{0}) cpu->halted = false;
 }
 
 void Gba::set_keys(u16 keyinput) {
@@ -459,6 +497,10 @@ void Gba::fire(Ev e, u64 at) {
   case Ev::Timer0: case Ev::Timer1: case Ev::Timer2: case Ev::Timer3:
     timer_overflow(static_cast<int>(e) - static_cast<int>(Ev::Timer0), at); break;
   case Ev::Audio: audio.sample(at); schedule(Ev::Audio, at + Audio::SAMPLE_CYCLES); break;
+  case Ev::Irq:
+    cpu->hot.irq_pending = ((ie & if_ & 0x3FFF) && (ime & 1)) ? 1u : 0u;
+    if (cpu->hot.irq_pending) cpu->halted = false;
+    break;
   default: break;
   }
 }
@@ -489,11 +531,12 @@ void Gba::hblank_start(u64 at) {
 
 u16 Gba::timer_read(int i) {
   const Timer& t = timers_[i];
-  if (!timer_counting(i)) return t.counter;
-  return static_cast<u16>(t.counter + ((now() - t.start) >> timer_shift(t.control)));
+  const u64 n = now();
+  if (!timer_counting(i) || n < t.start) return t.counter;
+  return static_cast<u16>(t.counter + ((n - t.start) >> timer_shift(t.control)));
 }
 
-void Gba::timer_freeze(int i) { timers_[i].counter = timer_read(i); timers_[i].start = now(); }
+void Gba::timer_freeze(int i) { timers_[i].counter = timer_read(i); timers_[i].start = std::max(now(), timers_[i].start); }
 
 void Gba::timer_schedule(int i) {
   const Ev e = static_cast<Ev>(static_cast<int>(Ev::Timer0) + i);
@@ -507,8 +550,9 @@ void Gba::timer_write_control(int i, u16 v) {
   if (timer_counting(i)) timer_freeze(i);
   const u16 old = t.control;
   t.control = v & (i == 0 ? 0xC3 : 0xC7);
-  if (!(old & 0x80) && (v & 0x80)) t.counter = t.reload;
-  t.start = now();
+  // Enabling: the reload is taken and the count starts 2 cycles after the write.
+  if (!(old & 0x80) && (v & 0x80)) { t.counter = t.reload; t.start = now() + 2; }
+  else t.start = std::max(now(), t.start);
   timer_schedule(i);
 }
 
@@ -642,6 +686,7 @@ void Gba::reset() {
   dma_latch_ = 0;
   bios_latch_ = 0;
   pipe = {};
+  pf = {};
   frame_count = 0;
   rebuild_timing();
   ppu.reset();
@@ -665,6 +710,9 @@ void Gba::reset() {
 }
 
 void Gba::run_cpu_until(u64 until) {
+  // Halt ends on IE & IF, IME or not -- unless an IRQ is on its way to the CPU:
+  // then it sleeps until it arrives (the BIOS's IntrWait halts just after IME = 1).
+  if (cpu->halted && (ie & if_ & 0x3FFF) && ev_at_[static_cast<size_t>(Ev::Irq)] == ~u64{0}) cpu->halted = false;
   if (cpu->halted) { now_ = until; return; }
   const s64 slice = std::min<s64>(static_cast<s64>(until - now_), s64{1} << 20);
   slice_budget_ = static_cast<s32>(slice);
@@ -696,23 +744,39 @@ void Gba::run_frame() {
 
 // ---- save states ------------------------------------------------------------
 
+// "GBA2"; a "GBAM" chunk (dsperate .47/.49) also had 64 KB of SRAM in it
+// and no save, RTC or IRQ-delay state: it still loads.
 template <class S> void Gba::sync_state(S& s) {
-  s.begin("GBAM");
+  bool old = false;
+  if constexpr (S::reading) old = s.next_is("GBAM");
+  s.begin(old ? "GBAM" : "GBA2");
   s.blob(ewram.get(), EWRAM_SIZE);
   s.blob(iwram.get(), IWRAM_SIZE);
   s.blob(palette.get(), 2 * PALETTE_SIZE);
   s.blob(vram.get(), VRAM_SIZE);
   s.blob(oam.get(), 2 * OAM_SIZE);
+  if constexpr (S::reading) {
+    if (old) {
+      std::vector<u8> sram(64 * 1024);
+      s.blob(sram.data(), sram.size());
+      if (save.type() == Save::Type::None) save.set_type(Save::Type::Sram);
+      if (save.type() == Save::Type::Sram) save.load(sram.data(), 0x8000);
+    }
+  }
   s.blob(io.data(), IO_SIZE);
-  s.fields(ie, if_, ime, ev_at_, now_, vcount_, in_hblank_, keyinput_, bios_latch_, dma_latch_, frame_count);
+  s.fields(ie, if_, ime);
+  for (size_t k = 0; k <= static_cast<size_t>(Ev::Audio); ++k) s.put(ev_at_[k]);
+  s.fields(now_, vcount_, in_hblank_, keyinput_, bios_latch_, dma_latch_, frame_count);
   for (Timer& t : timers_) s.fields(t.reload, t.control, t.counter, t.start);
   for (Dma& d : dma_) s.fields(d.sad, d.dad, d.count, d.control, d.src, d.dst, d.left);
+  if constexpr (S::reading) ev_at_[static_cast<size_t>(Ev::Irq)] = ~u64{0};
+  s.put(ev_at_[static_cast<size_t>(Ev::Irq)]);
   s.end();
   cpu->sync_state(s);
   ppu.sync_state(s);
-  save.sync_state(s);
-  rtc.sync_state(s);
   audio.sync_state(s);
+  if (s.next_is("GSAV")) save.sync_state(s);
+  if (s.next_is("GRTC")) rtc.sync_state(s);
 }
 template void Gba::sync_state<state::Writer>(state::Writer&);
 template void Gba::sync_state<state::Reader>(state::Reader&);
