@@ -285,16 +285,18 @@ void main() {
 }
 )";
 
-// Engine A's kept lines (Engine2D::HiresLine), uploaded as they lie in
-// memory: u_px holds each line's out, under, top and second records side by
-// side (x, x + 256, x + 512, x + 768; 6-bit RGB), u_bytes its top id, top
-// kind, top alpha, second id and window byte (x, x + 256, ... x + 1024), u_cls
-// its pixel classes, u_regs its effect registers (x) and master brightness
-// with the line's valid bit (y, bit 31). Compiled for one scale (SCALE): a
+// Engine A's kept lines (Engine2D::HiresLine) in a buffer, copied as they lie
+// in memory, LINE_WORDS words a line: the out, under, top and second records
+// (6-bit RGB; words 0, 256, 512, 768), then the top id, top kind, top alpha,
+// second id, window and class bytes (planes 0-5 from word 1024), then the
+// line's registers (word 1408: BLDCNT | MASTER_BRIGHT << 16; 1409: EVA, EVB,
+// EVY and the valid flag, a byte each). Compiled for one scale (SCALE): a
 // division by a uniform was half the composite's GPU time on the G52.
 #define LINE_PLANES R"(
-precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
-uniform highp usampler2D u_px, u_bytes, u_cls, u_regs;
+precision highp float; precision highp int; precision highp sampler2D;
+layout(std430, binding = 2) readonly buffer Lines { uint lw[]; };
+uint px(ivec2 d, int plane) { return lw[d.y * LINE_WORDS + plane * 256 + d.x]; }   // 0 out, 1 under, 2 top, 3 second
+uint byte_of(ivec2 d, int plane) { return (lw[d.y * LINE_WORDS + 1024 + plane * 64 + (d.x >> 2)] >> ((d.x & 3) * 8)) & 0xFFu; }   // 0 top id ... 5 class
 uniform highp sampler2D u_3d;
 uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness)
 out vec4 o_col;
@@ -322,18 +324,17 @@ vec4 finish(uint o, uint mb) {
 const char* kFastFS = LINE_PLANES R"(
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy), d = p / SCALE;
-  uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
-  uint mb = u_mode == 1 ? 0u : regs.y & 0xFFFFu;
+  uint mb = u_mode == 1 ? 0u : lw[d.y * LINE_WORDS + 1408] >> 16;
   bool bright = ((mb >> 14) == 1u || (mb >> 14) == 2u) && (mb & 0x1Fu) != 0u;
-  uint cls = (regs.y & 0x80000000u) != 0u ? texelFetch(u_cls, d, 0).r : 0u;
+  uint cls = (lw[d.y * LINE_WORDS + 1409] & 0xFF000000u) != 0u ? byte_of(d, 5) : 0u;
   if (cls == 2u || (cls == 1u && bright)) discard;
   if (cls == 1u) {
     vec4 h = texelFetch(u_3d, p, 0);
     if (h.a > 0.0) { uvec3 c6 = uvec3(round(h.rgb * 255.0)); o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0); return; }
-    o_col = finish(texelFetch(u_px, ivec2(d.x + 256, d.y), 0).r, 0u);
+    o_col = finish(px(d, 1), 0u);
     return;
   }
-  o_col = finish(texelFetch(u_px, d, 0).r, mb);
+  o_col = finish(px(d, 0), mb);
 }
 )";
 
@@ -357,11 +358,9 @@ uint blend_3d(uint a, uint b) {
 }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy), d = p / SCALE;
-  uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
-  uint top = texelFetch(u_px, ivec2(d.x + 512, d.y), 0).r, second = texelFetch(u_px, ivec2(d.x + 768, d.y), 0).r;
-  uint top_id = texelFetch(u_bytes, d, 0).r, kind = texelFetch(u_bytes, ivec2(d.x + 256, d.y), 0).r;
-  uint talpha = texelFetch(u_bytes, ivec2(d.x + 512, d.y), 0).r, second_id = texelFetch(u_bytes, ivec2(d.x + 768, d.y), 0).r;
-  uint win = texelFetch(u_bytes, ivec2(d.x + 1024, d.y), 0).r;
+  uint r0 = lw[d.y * LINE_WORDS + 1408], r1 = lw[d.y * LINE_WORDS + 1409];
+  uint top = px(d, 2), second = px(d, 3);
+  uint top_id = byte_of(d, 0), kind = byte_of(d, 1), talpha = byte_of(d, 2), second_id = byte_of(d, 3), win = byte_of(d, 4);
   vec4 h = texelFetch(u_3d, p, 0);
   uint ha8 = uint(round(h.a * 255.0));
   uint ha = ha8 == 0u ? 0u : (ha8 >> 3) - 1u;
@@ -370,7 +369,7 @@ void main() {
     if (ha != 0u) { top = hpx; talpha = ha; }
     else { top = second; top_id = second_id; kind = 0u; talpha = 0u; }   // past the polygon's hi-res edge: what lay beneath
   } else if (second_id == 1u && ha != 0u) second = hpx;
-  uint bldcnt = regs.x & 0xFFFFu, eva = (regs.x >> 16) & 0x1Fu, evb = (regs.x >> 21) & 0x1Fu, evy = (regs.x >> 26) & 0x1Fu;
+  uint bldcnt = r0 & 0xFFFFu, eva = r1 & 0x1Fu, evb = (r1 >> 8) & 0x1Fu, evy = (r1 >> 16) & 0x1Fu;
   uint effect = (bldcnt >> 6) & 3u;
   uint t2 = second_id << 8;
   uint o = top & 0xFFFFFFu;
@@ -384,7 +383,7 @@ void main() {
     else if (effect == 2u) o = brighten(top, evy, 8u);
     else if (effect == 3u) o = darken(top, evy, 7u);
   }
-  o_col = finish(o, u_mode == 1 ? 0u : regs.y & 0xFFFFu);
+  o_col = finish(o, u_mode == 1 ? 0u : r0 >> 16);
 }
 )";
 
@@ -449,13 +448,14 @@ struct GlHires::Impl {
   GLuint fbo_out[kOut] = {}, out[kOut] = {};
   int slot = 0;
   std::vector<Vtx> vb;
-  std::vector<u32> regs;
   // The per-frame inputs (planes, classes, vertices) in a ring of sets, one
   // per render: rewriting the one the GPU still reads made Panfrost shadow
   // it (a new buffer, mapped and faulted, every upload), ~3 ms a frame of
   // kernel time on the present thread. t_*, vao and vbo name this render's.
   static constexpr int kSets = 3;
-  struct Set { GLuint px = 0, bytes = 0, cls = 0, regs = 0, vao = 0, vbo = 0; size_t vbo_cap = 0; };
+  // lines: engine A's kept lines for a composite, written through an
+  // unsynchronised map once `fence` (the last composite that read it) is done.
+  struct Set { GLuint lines = 0, vao = 0, vbo = 0; GLsync fence = nullptr; size_t vbo_cap = 0; };
   Set sets[kSets];
   int set_k = 0, vb_k = 0;   // the planes' set (a composite's), the vertices' (a 3D draw's)
   GLuint layer3d = 0;        // the last draw3d's 3D layer for the composite, 0 when none
@@ -492,8 +492,8 @@ struct GlHires::Impl {
 
   ~Impl() {
     for (Set& st : sets) {
-      GLuint ts[] = {st.px, st.bytes, st.cls, st.regs};
-      for (GLuint t : ts) if (t) glDeleteTextures(1, &t);
+      if (st.lines) glDeleteBuffers(1, &st.lines);
+      if (st.fence) glDeleteSync(st.fence);
       if (st.vbo) glDeleteBuffers(1, &st.vbo);
       if (st.vao) glDeleteVertexArrays(1, &st.vao);
     }
@@ -544,7 +544,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.w_dispcnt = glGetUniformLocation(d.resolve, "u_dispcnt"); d.w_toon = glGetUniformLocation(d.resolve, "u_toon");
   glGenBuffers(3, d.polys);
   for (GLuint b : d.polys) { glBindBuffer(GL_SHADER_STORAGE_BUFFER, b); glBufferData(GL_SHADER_STORAGE_BUFFER, DS_MAX_POLYS * 32, nullptr, GL_STREAM_DRAW); }
-  const std::string scale_def = "#version 310 es\n#define SCALE " + std::to_string(d.S) + "\n";
+  const std::string scale_def = "#version 310 es\n#define SCALE " + std::to_string(d.S) + "\n#define LINE_WORDS " + std::to_string(sizeof(gpu::Engine2D::HiresLine) / 4) + "\n";
   d.comp = program(kFullVS, (scale_def + kCompositeFS).c_str(), why);
   d.fast = program(kFullVS, (scale_def + kFastFS).c_str(), why);
   if (!d.fast) return false;
@@ -563,8 +563,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   // The composite's two passes read the same planes, on the same units.
   for (GLuint pr : {d.fast, d.comp}) {
     glUseProgram(pr);
-    const char* names[] = {"u_px", "u_bytes", "u_cls", "u_regs", "u_3d"};
-    for (int i = 0; i < 5; ++i) glUniform1i(glGetUniformLocation(pr, names[i]), i);
+    glUniform1i(glGetUniformLocation(pr, "u_3d"), 0);
   }
   d.f_mode = glGetUniformLocation(d.fast, "u_mode");
   d.u_mode = glGetUniformLocation(d.comp, "u_mode");
@@ -621,9 +620,9 @@ bool GlHires::init(u32 scale, std::string* why) {
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   for (Impl::Set& st : d.sets) {
-    st.px = tex2d(GL_R32UI, 4 * 256, 192); st.bytes = tex2d(GL_R8UI, 5 * 256, 192); st.cls = tex2d(GL_R8UI, 256, 192); st.regs = tex2d(GL_RG32UI, 192, 1);
+    glGenBuffers(1, &st.lines); glBindBuffer(GL_SHADER_STORAGE_BUFFER, st.lines);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, 192 * sizeof(gpu::Engine2D::HiresLine), nullptr, GL_DYNAMIC_DRAW);
   }
-  d.regs.resize(192 * 2);
 
   glGenVertexArrays(1, &d.vao_empty);
   for (Impl::Set& st : d.sets) {
@@ -1037,37 +1036,35 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
   const GLuint layer3d = d.layer3d;
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
   d.set_k = (d.set_k + 1) % Impl::kSets;
-  const Impl::Set& st = d.sets[d.set_k];
   auto stage = [&](int k) { d.stage(k); };
   stage(5);
   const auto T4 = clk::now();
-  // Engine A's planes for the composite, uploaded as they lie in Gpu's lines
-  // (one row a line, a line's records sizeof(HiresLine) apart). The full
-  // composite's (top, second, ids, kind, alpha, window) only when a line
-  // takes it: a class 2 pixel, or master brightness over a class 1 one.
+  // Engine A's lines for the composite, copied as they lie in Gpu's (LINE_PLANES
+  // reads them): records and classes, and the registers after them. The full
+  // composite's planes (top, second, ids, kind, alpha, window) only when a
+  // line takes it: a class 2 pixel, or master brightness over a class 1 one.
   using HL = gpu::Engine2D::HiresLine;
-  static_assert(sizeof(HL) % 4 == 0 && offsetof(HL, under) == offsetof(HL, out) + 1024 && offsetof(HL, top) == offsetof(HL, out) + 2048 &&
-                offsetof(HL, second) == offsetof(HL, out) + 3072 && offsetof(HL, top_kind) == offsetof(HL, top_id) + 256 &&
-                offsetof(HL, top_alpha) == offsetof(HL, top_id) + 512 && offsetof(HL, second_id) == offsetof(HL, top_id) + 768 &&
-                offsetof(HL, win) == offsetof(HL, top_id) + 1024, "HiresLine's planes side by side");
+  static_assert(sizeof(HL) % 4 == 0 && offsetof(HL, out) == 0 && offsetof(HL, under) == 1024 && offsetof(HL, top) == 2048 && offsetof(HL, second) == 3072 &&
+                offsetof(HL, top_id) == 4096 && offsetof(HL, top_kind) == 4352 && offsetof(HL, top_alpha) == 4608 && offsetof(HL, second_id) == 4864 &&
+                offsetof(HL, win) == 5120 && offsetof(HL, cls) == 5376 && offsetof(HL, bldcnt) == 5632 && offsetof(HL, mbright) == 5634 &&
+                offsetof(HL, eva) == 5636 && offsetof(HL, evb) == 5637 && offsetof(HL, evy) == 5638 && offsetof(HL, valid) == 5639, "LINE_PLANES' layout");
   bool full = false;
-  for (u32 y = 0; y < 192; ++y) {
-    const HL& h = lines[y];
-    d.regs[y * 2] = static_cast<u32>(h.bldcnt) | (static_cast<u32>(h.eva) << 16) | (static_cast<u32>(h.evb) << 21) | (static_cast<u32>(h.evy) << 26);
-    d.regs[y * 2 + 1] = static_cast<u32>(h.mbright) | (h.valid ? 0x80000000u : 0u);
-    full |= h.valid && h.full;
-  }
+  for (u32 y = 0; y < 192; ++y) full |= lines[y].valid && lines[y].full;
   if (bench_skip_ & 16) full = false;
-  auto up = [](GLuint t, GLsizei w, GLenum fmt, GLenum type, const void* px) { glBindTexture(GL_TEXTURE_2D, t); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 192, fmt, type, px); };
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  glPixelStorei(GL_UNPACK_ROW_LENGTH, sizeof(HL) / 4);
-  up(st.px, full ? 4 * 256 : 2 * 256, GL_RED_INTEGER, GL_UNSIGNED_INT, lines[0].out);
-  glPixelStorei(GL_UNPACK_ROW_LENGTH, sizeof(HL));
-  up(st.cls, 256, GL_RED_INTEGER, GL_UNSIGNED_BYTE, lines[0].cls);
-  if (full) up(st.bytes, 5 * 256, GL_RED_INTEGER, GL_UNSIGNED_BYTE, lines[0].top_id);
-  glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-  glBindTexture(GL_TEXTURE_2D, st.regs);
-  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 192, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, d.regs.data());
+  Impl::Set& st = d.sets[d.set_k];
+  if (st.fence) { glClientWaitSync(st.fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100'000'000); glDeleteSync(st.fence); st.fence = nullptr; }
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, st.lines);
+  if (u8* m = static_cast<u8*>(glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 192 * sizeof(HL), GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT))) {
+    if (full) std::memcpy(m, lines, 192 * sizeof(HL));
+    else for (u32 y = 0; y < 192; ++y) {
+      u8* l = m + y * sizeof(HL);
+      const u8* src = reinterpret_cast<const u8*>(&lines[y]);
+      std::memcpy(l, src, 2048);                                              // out, under
+      std::memcpy(l + offsetof(HL, cls), src + offsetof(HL, cls), offsetof(HL, valid) + 1 - offsetof(HL, cls));   // classes, registers
+    }
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+  }
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, st.lines);
   stage(-1);
   const auto T5 = clk::now();
   stage(4);
@@ -1080,8 +1077,7 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
   // is 0.5; ALWAYS writes it), cleared 1 where it discarded.
   glClearDepthf(1.f); glClear(GL_DEPTH_BUFFER_BIT);
   glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
-  const GLuint ts[5] = {st.px, st.bytes, st.cls, st.regs, layer3d};
-  for (int i = 4; i >= 0; --i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, layer3d);
   glUseProgram(d.fast);
   glUniform1i(d.f_mode, mode);
   if (!(bench_skip_ & 16)) glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -1095,6 +1091,7 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
   { const GLenum dead = GL_DEPTH_ATTACHMENT; glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &dead); }   // the composite's depth: only within it
   glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
   glBindVertexArray(0);
+  st.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
   stage(-1);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   if (d.timing) {
