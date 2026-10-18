@@ -261,6 +261,7 @@ int main(int argc, char** argv) {
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   const char* pc_profile = nullptr;
   int dump_from = 0, dump_count = 0;   // --dump-from/--dump-count: window of a large dump
+  int dump_every = 0;                  // --dump-every N
   long gpu_dump_frame = -1; const char* gpu_dump_path = nullptr;   // --dump-gpu-frame
   const char* rec3d_path = nullptr;   // --dump-3d
   bool gpu3d = false;   // --gpu3d
@@ -361,6 +362,7 @@ int main(int argc, char** argv) {
     else if (arg("--dump-scaled")) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
     else if (arg("--dump-from")) dump_from = std::atoi(argv[++i]);    // first frame to dump
     else if (arg("--dump-count")) dump_count = std::atoi(argv[++i]);  // how many (0 = to the end)
+    else if (arg("--dump-every")) dump_every = std::atoi(argv[++i]);  // only every Nth frame of those (the last of each N)
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
@@ -878,7 +880,7 @@ int main(int argc, char** argv) {
     }
     if (scaled_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
       for (int k = 0; k < 2; ++k) std::fwrite(scaled_px[k].data(), 4, scaled_px[k].size(), scaled_out);
-    if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
+    if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count) && (dump_every <= 1 || (i + 1) % dump_every == 0)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
       std::fwrite(nds.gpu.framebuffer(1), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
@@ -928,7 +930,8 @@ int main(int argc, char** argv) {
   wd_stop.store(true); if (wd.joinable()) wd.join();
   if (nds.gba) {
     const ds::CpuContext& c = *nds.gba->cpu;
-    std::fprintf(stderr, "gba: end pc %08x cpsr %08x r0 %08x r12 %08x\n", c.hot.regs[15] - (c.thumb() ? 4 : 8), c.hot.cpsr, c.hot.regs[0], c.hot.regs[12]);
+    std::fprintf(stderr, "gba: end pc %08x cpsr %08x r0 %08x r12 %08x, save %s written %u times\n", c.hot.regs[15] - (c.thumb() ? 4 : 8), c.hot.cpsr, c.hot.regs[0], c.hot.regs[12],
+                 ds::gba::Save::name(nds.gba->save.type()), nds.gba->save.writes);
     if (std::getenv("DS_GBA_DEBUG")) {
       int nz = 0; for (ds::u32 k = 0; k < ds::gba::VRAM_SIZE; ++k) nz += nds.gba->vram[k] != 0;
       std::fprintf(stderr, "gba: dispcnt %04x vram nonzero %d pal0 %04x pal1 %04x bg2pa %04x\n", nds.gba->io_read16(0), nz,
