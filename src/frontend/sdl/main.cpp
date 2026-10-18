@@ -3925,12 +3925,14 @@ sdl_ready:
             // Sun's field takes ~21 ms of GPU a frame, and waiting ran the whole
             // game at 47 fps). Decided per display period, so a game that moves
             // engine A between the screens through captures keeps each pair whole.
-            // DS_PRESENT_WAIT=1: always wait, as before.
+            // DS_PRESENT_WAIT=1: always wait, as before. At 1x the GPU's share is
+            // small and what is left of the job is its swap waiting for a flip:
+            // waiting is vsync pacing there, skipping a needless repeat.
             static const bool gl_hold = std::getenv("DS_PRESENT_WAIT") != nullptr;
             static int gl_left = 0;
             static bool gl_skipping = false;
             if (gl_left <= 0) {
-              gl_skipping = !gl_hold && !pt.done(gl_job);
+              gl_skipping = !gl_hold && gl_hires && !pt.done(gl_job);
               gl_left = std::max<int>(1, nds.gpu.display_phase_period());
             }
             --gl_left;
