@@ -42,6 +42,7 @@
 #include "audio.h"
 #include "config.h"
 #include "display.h"
+#include "hires_governor.h"
 #include "input.h"
 #include "lid.h"
 #include "loader_cart.h"
@@ -1603,6 +1604,9 @@ sdl_ready:
       } else { std::fprintf(stderr, "hires3d: unavailable (%s)\n", why.c_str()); gl_hires.reset(); }
     } else std::fprintf(stderr, "hires3d: needs video.sink = renderer and GLES; showing 1x\n");
   }
+  // video.hires3d_fallback (default on): the 3D at 1x while the GPU cannot keep up at S x (hires_governor.h).
+  ds::sdl::HiresGovernor hires_gov;
+  hires_gov.set_enabled(cfg.flag("video.hires3d_fallback", true));
   // video.gpu3d (DS_GPU3D=1 overrides): the 3D layer on the GPU (Renderer3D::set_gpu).
   // After the displays: the Vulkan device opens the DRM node, and under direct
   // KMS the display must take master first.
@@ -3930,17 +3934,20 @@ sdl_ready:
             // waiting is vsync pacing there, skipping a needless repeat.
             static const bool gl_hold = std::getenv("DS_PRESENT_WAIT") != nullptr;
             static int gl_left = 0;
-            static bool gl_skipping = false;
-            if (gl_left <= 0) {
-              gl_skipping = !gl_hold && gl_hires && !pt.done(gl_job);
+            static bool gl_skipping = false, gl_hi = true;
+            if (gl_left <= 0) {   // resolution too changes only between display periods
+              gl_hi = gl_hires && hires_gov.hires();
+              gl_skipping = !gl_hold && gl_hi && !pt.done(gl_job);
               gl_left = std::max<int>(1, nds.gpu.display_phase_period());
             }
             --gl_left;
+            if (gl_hires && hires_gov.frame(gl_skipping))
+              VLOG("hires3d: %s (%u drops to 1x so far; 2x tried again after %u frames)\n", hires_gov.hires() ? "back to 2x" : "GPU behind, 3D at 1x", hires_gov.drops(), hires_gov.wait_frames());
             if (gl_skipping) ++gl_late;
             else {
             pt.wait(gl_job);
             gf.scr = -1; gf.mode = 0; gf.cap_kind = 0; gf.has_dl = false;
-            if (gl_hires) {
+            if (gl_hi) {
               const int scr = nds.gpu.screen_a();
               const auto& ref = nds.gpu.frame_3d_shown();
               if (scr >= 0 && ref.dlist && nds.gpu.hires_lines()) {
