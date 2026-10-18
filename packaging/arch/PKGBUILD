@@ -5,11 +5,15 @@
 # plus the fork's commits). pkgver: upstream base, commits on top (so pacman orders
 # them), head. To build a local checkout instead: _src=/path/to/DSperate makepkg.
 #
+# It also ships DSlot's game launcher (/usr/lib/dslot/launch: DS and GBA games go to DSperate)
+# with the RG DS+'s settings. A system where the launcher came from elsewhere needs
+# --overwrite /usr/lib/dslot/launch once.
+#
 # PGO: when the fork carries a profile for the compiler doing the build
 # (pgo/aarch64-gcc<version>/, trained on the handheld by bench/core/pgo-train.sh),
 # the build uses it; otherwise it builds without. See docs/rk3568-port.md.
 pkgname=dsperate
-pkgver=0.r7c1fb67.119.9778293
+pkgver=0.r7c1fb67.121.ed72176
 pkgrel=1
 pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
 arch=(aarch64)
@@ -20,7 +24,7 @@ makedepends=(git cmake ninja vulkan-headers)
 optdepends=('vulkan-driver: video.gpu3d (on the Mali-G52 ~5x slower than the GLES path)')
 # DSperate's own flags only: makepkg's would change the build that was measured.
 options=(!buildflags !debug)
-_commit=977829337dd5ed499ed63e32f079111f4c3a1e36
+_commit=ed72176de707cac8e3b846b5d9937691679aefa6
 source=("DSperate::git+${_src:+file://}${_src:-https://github.com/abradburne/DSperate.git}#commit=$_commit")
 sha256sums=(SKIP)
 
@@ -52,4 +56,9 @@ package() {
     install -Dm644 DSperate/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 DSperate/src/core/bios/LICENSE.freebios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.freebios"
     install -Dm644 DSperate/src/core/gba/bios/LICENSE.cult-bios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.cult-bios"
+    # DSlot's game launcher, and the handheld settings and options example its first run copies
+    # into ~/.config (packaging/arch/dslot).
+    install -Dm755 DSperate/packaging/arch/dslot/launch "$pkgdir/usr/lib/dslot/launch"
+    install -Dm644 DSperate/packaging/arch/dslot/dsperate.ini "$pkgdir/usr/share/dsperate/dslot/dsperate.ini"
+    install -Dm644 DSperate/packaging/arch/dslot/launch.conf "$pkgdir/usr/share/dsperate/dslot/launch.conf"
 }
