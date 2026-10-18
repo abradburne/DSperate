@@ -40,6 +40,7 @@
 #include "config.h"
 #include "debug_options.h"
 #include "display.h"
+#include "gba_frontend.h"
 #include "gl_frame_presenter.h"
 #include "input.h"
 #include "lid.h"
@@ -302,19 +303,8 @@ bool peek_game_code(const std::string& rom, char out[4]) {
   return true;
 }
 
-// The four-letter code states, screenshots and cheats are keyed by: the DS
-// card's, the GBA cartridge's (GBA mode), or NONE (firmware boot).
-std::string game_code(const NDS& nds) {
-  if (nds.cart) return std::string(nds.cart->header().game_code, 4);
-  if (nds.gba) {
-    const u32 c = nds.gba->game_code();
-    std::string s(reinterpret_cast<const char*>(&c), 4);
-    for (char& ch : s) if (ch < 0x20 || ch >= 0x7f) ch = '_';
-    return s;
-  }
-  return "NONE";
-}
-bool has_game(const NDS& nds) { return nds.cart || nds.gba; }
+using ds::sdl::game_code;   // gba_frontend.h: the DS card's or the GBA cartridge's
+using ds::sdl::has_game;
 
 std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
@@ -327,16 +317,7 @@ bool aa_on(const std::string& v) {
 void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
 
 void load_save(NDS& nds, const std::string& path) {
-  if (nds.gba) {   // GBA mode: SRAM, Flash or EEPROM, as the ROM says
-    VLOG("save: %s\n", ds::gba::Save::name(nds.gba->save.type()));
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return;
-    std::vector<u8> data(ds::gba::SAVE_MAX);
-    const size_t got = std::fread(data.data(), 1, data.size(), f);
-    std::fclose(f);
-    if (got && nds.gba->save.load(data.data(), got)) VLOG("save: loaded %zu bytes from %s\n", got, path.c_str());
-    return;
-  }
+  if (nds.gba) { ds::sdl::load_gba_save(*nds.gba, path, verbose()); return; }
   if (!nds.cart) return;
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) {
@@ -362,18 +343,7 @@ void load_save(NDS& nds, const std::string& path) {
 }
 
 void write_save(NDS& nds, const std::string& path) {
-  if (nds.gba) {
-    const std::vector<u8> data = nds.gba->save.data();
-    if (data.empty()) return;
-    const std::string tmp = path + ".tmp";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f) { std::fprintf(stderr, "save: cannot write %s\n", tmp.c_str()); return; }
-    const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
-    std::fclose(f);
-    if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "save: cannot write %s\n", path.c_str()); return; }
-    nds.gba->save.dirty = false;
-    return;
-  }
+  if (nds.gba) { ds::sdl::write_gba_save(*nds.gba, path); return; }
   if (!nds.cart || nds.cart->sram().empty()) return;
   // Write-then-rename: a power cut mid-write leaves the previous file.
   const std::string tmp = path + ".tmp";
@@ -1783,9 +1753,7 @@ sdl_ready:
       if (!err.empty()) std::fprintf(stderr, "gba: %s\n", err.c_str());
       std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1;
     }
-    const u32 code = nds.gba->game_code();
-    std::fprintf(stderr, "gba: %s [%.4s], BIOS %s\n", nds.gba->title().c_str(), reinterpret_cast<const char*>(&code),
-                 nds.gba->bios_native ? cfg.str("paths.gba_bios").c_str() : "built in (Cult-of-GBA)");
+    ds::sdl::print_gba_game(*nds.gba, cfg.str("paths.gba_bios"));
     if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
     merge_game_config(game_code(nds).c_str());
   }
