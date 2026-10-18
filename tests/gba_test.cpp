@@ -4,6 +4,7 @@
 // a save-state round trip on a cartridge that only loops.
 #include "check.h"
 #include "core/gba/gba.h"
+#include "core/nds.h"
 #include "core/state/state.h"
 #include "core/psg/gb_psg.h"
 
@@ -158,6 +159,26 @@ void test_state_round_trip() {
   CHECK(g.now() == t && picture_hash(g) == before && g.read32(0x02000000) != 0xDEADBEEF);
   for (int i = 0; i < 10; ++i) g.run_frame();
   CHECK(picture_hash(g) == later);
+}
+
+// A state that fails part way through (here: cut short) is refused and
+// leaves the machine exactly as it was, running on as if never tried.
+void test_state_refused_intact() {
+  NDS a, b;
+  std::string err;
+  const std::string rom = std::string(GBA_TEST_DATA) + "/hello.gba";
+  CHECK(a.load_gba(rom, "", &err) && b.load_gba(rom, "", &err));
+  for (int i = 0; i < 30; ++i) { a.run_frame(); b.run_frame(); }
+  state::Writer w;
+  CHECK(a.save_state(w, err));
+  std::vector<u8> cut = w.data();
+  cut.resize(cut.size() - 8);   // the last chunk cut short: everything before it read in
+  for (int i = 0; i < 10; ++i) { a.run_frame(); b.run_frame(); }
+  state::Reader r(cut.data(), cut.size());
+  CHECK(!a.load_state(r, err));
+  for (int i = 0; i < 10; ++i) { a.run_frame(); b.run_frame(); }
+  CHECK(picture_hash(*a.gba) == picture_hash(*b.gba) && a.gba->now() == b.gba->now());
+  CHECK(std::memcmp(a.gba->ewram.get(), b.gba->ewram.get(), EWRAM_SIZE) == 0);
 }
 
 u32 GbPsg_clock_quarter() { return psg::GbPsg::CLOCK_HZ / 4; }
@@ -422,6 +443,7 @@ int main() {
   test_timers_dma_irq();
   test_suites();
   test_state_round_trip();
+  test_state_refused_intact();
   std::puts("gba: ok");
   return 0;
 }

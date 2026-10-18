@@ -641,8 +641,20 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     if (code != gba->game_code()) { err = "save state is for another game"; return false; }
     if (ident != rom_id) { err = "save state is for another ROM image"; return false; }
     if (bios != bios_id) { err = "save state was made with a different GBA BIOS"; return false; }
+    // The state is read into the machine as it goes, so one that fails part
+    // way (damaged, or from a build whose chunks differ) would leave it half
+    // overwritten -- and a half-restored GBA can run a frame that never ends.
+    // The machine as it was is kept and put back on failure.
+    state::Writer before;
+    gba->sync_state(before);
     gba->sync_state(r);
-    if (!r.ok()) { err = r.error(); return false; }
+    if (!r.ok()) {
+      err = r.error();
+      state::Reader back(before.data().data(), before.data().size());
+      gba->sync_state(back);
+      gba->after_load();
+      return false;
+    }
     gba->after_load();
     frame_count = frames;
     frame_ready = false;
