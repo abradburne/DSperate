@@ -965,7 +965,12 @@ bool sync_dual_modes(ds::sdl::Display& a, ds::sdl::Display& b) {
 // come back through here with new values.
 bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Display& display2) {
   display.set_gpu_present(vs.gpu_present, vs.gpu_mode); display2.set_gpu_present(vs.gpu_present, vs.gpu_mode);
-  display.set_gl(vs.hires3d > 1); display2.set_gl(vs.hires3d > 1);
+  // The GLES present (gl_present.h) for hi-res 3D, and at 1x on the renderer
+  // sink for a window a screen with nearest scaling: the GL work runs on the
+  // present thread, so the emulation thread no longer waits on each panel's
+  // flip in turn as it did through SDL_Renderer.
+  const bool gl = vs.hires3d > 1 || (vs.want_sink == ds::frontend::Sink::Renderer && vs.dual_window && !vs.linear);
+  display.set_gl(gl); display2.set_gl(gl);
   if (vs.dual_window) {
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
