@@ -10,8 +10,6 @@ GlHires::GlHires() = default;
 GlHires::~GlHires() = default;
 bool GlHires::init(u32, std::string* why) { if (why) *why = "built without GLES"; return false; }
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, int) { return 0; }
-unsigned GlHires::recomposite(const gpu::Engine2D::HiresLine*, int) { return 0; }
-bool GlHires::brightened(const gpu::Engine2D::HiresLine*) { return false; }
 } // namespace ds::sdl
 #else
 #include <GLES3/gl31.h>
@@ -468,7 +466,6 @@ struct GlHires::Impl {
   double t[6] = {}; u32 tn = 0;
   // DS_HIRES_STAGES: GPU time per section (EXT_disjoint_timer_query) -- pre, winners, tail,
   // edge, composite, planes upload -- in a ring of four renders, read three renders late.
-  // A composite again in the same render overwrites its sections' queries.
   const bool stg = std::getenv("DS_HIRES_STAGES") != nullptr;
   GLuint tq[4][6] = {}; u32 tq_n = 0; double sg[6] = {}; u32 sgn = 0; int cur_q = -1;
   void stages_next() {   // a new render: collect the one three back
@@ -725,18 +722,6 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   return tex;
-}
-
-unsigned GlHires::recomposite(const gpu::Engine2D::HiresLine* lines, int mode) {
-  return d_ && lines ? composite(lines, mode) : 0;
-}
-
-bool GlHires::brightened(const gpu::Engine2D::HiresLine* lines) {
-  for (u32 y = 0; y < 192; ++y) {
-    const u16 mb = lines[y].mbright;
-    if (((mb >> 14) == 1 || (mb >> 14) == 2) && (mb & 0x1F)) return true;
-  }
-  return false;
 }
 
 bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch) {

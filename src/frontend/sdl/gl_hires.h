@@ -35,13 +35,6 @@ public:
   // capture is shown the frame after it was taken).
   unsigned render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                   const gpu::Engine2D::HiresLine* lines, int mode = 0);
-  // The same frame composited again in another mode, over the 3D layer the
-  // last render() drew (a frame both shown and captured draws its 3D once).
-  // 0 when that render() drew nothing.
-  unsigned recomposite(const gpu::Engine2D::HiresLine* lines, int mode);
-  // Whether master brightness changes any of these lines: when it does not,
-  // modes 0 and 1 composite to the same picture.
-  static bool brightened(const gpu::Engine2D::HiresLine* lines);
 
   struct Impl;
 private:

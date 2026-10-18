@@ -3989,8 +3989,7 @@ sdl_ready:
                   for (int k = 0; k < 3; ++k) if (g.caps[k].tex && same5(sfb[sc], g.caps[k].img.data())) { show[sc] = k; break; }
                 for (int sc = 0; sc < 2; ++sc) if (show[sc] >= 0) if (ds::sdl::Display* w = win_of(sc)) w->gl()->set_hires(sc, g.caps[show[sc]].tex);
                 const bool now = g.mode == 1 && g.has_dl && show[g.scr] < 0;
-                unsigned now_tex = 0;
-                if (now) if ((now_tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines))) { if (ds::sdl::Display* w = win_of(g.scr)) w->gl()->set_hires(g.scr, now_tex); }
+                if (now) if (const unsigned tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines)) { if (ds::sdl::Display* w = win_of(g.scr)) w->gl()->set_hires(g.scr, tex); }
                 if (g.cap_kind == 1 && g.has_dl) {   // into the oldest slot
                   GlFrame::Cap& c = g.caps[g.cap_next]; g.cap_next = (g.cap_next + 1) % 3;
                   c.img.resize(256 * 192);
@@ -3999,10 +3998,7 @@ sdl_ready:
                     ds::gpu::kern::active::capture_a15(g.lines[y].out, 256, v15);
                     ds::gpu::kern::active::output_vram_line(v15, 0, &c.img[y * 256]);
                   }
-                  // Shown and captured: the 3D drawn once. A capture is taken before
-                  // master brightness, so without any it is the shown picture itself.
-                  if (!now_tex) c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
-                  else c.tex = ds::sdl::GlHires::brightened(g.lines) ? gh->recomposite(g.lines, 1) : now_tex;
+                  c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
                 }
                 static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr, dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
                 static u32 n = 0, n_now = 0, n_cap = 0, n_both = 0, n_fromcap = 0;
