@@ -74,6 +74,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <thread>
 #include <atomic>
 #include <ctime>
@@ -320,6 +321,7 @@ bool aa_on(const std::string& v) {
 void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
 
 void load_save(NDS& nds, const std::string& path) {
+  const ds::sdl::OffRealtime off_rt;
   if (nds.gba) { ds::sdl::load_gba_save(*nds.gba, path, verbose()); return; }
   if (!nds.cart) return;
   FILE* f = std::fopen(path.c_str(), "rb");
@@ -510,6 +512,7 @@ void read_cheevos_chunk(ds::state::Reader& r) {
 
 
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
+  const ds::sdl::OffRealtime off_rt;
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
   write_layout_chunk(w, layout);
@@ -531,6 +534,7 @@ std::string g_state_refused;
 // False if unusable, machine untouched; caller must reset if this fails
 // after the load began. `layout` is set only if the state carries one.
 bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
+  const ds::sdl::OffRealtime off_rt;
   layout_loaded = false;
   std::vector<u8> bytes;
   if (FILE* f = std::fopen(path.c_str(), "rb")) {
@@ -1664,6 +1668,7 @@ sdl_ready:
   // Load runs on a worker; this thread pumps events (B/quit cancels) and
   // redraws the notice. Dots advance only on extraction progress.
   auto load_rom_notice = [&](const std::string& path) -> bool {
+    const ds::sdl::OffRealtime off_rt;   // the worker inherits it
     std::atomic<bool> cancel{false}, done{false};
     std::atomic<u64> progress{0};
     bool ok = false;
@@ -1749,6 +1754,9 @@ sdl_ready:
     if (!nds.load_dsi_nand_title(sc.title_lo, &err)) { std::fprintf(stderr, "dsi: %s: %s\n", path.c_str(), err.c_str()); return false; }
     return true;
   };
+  // From the ROM to the starting state: one-shot work, off the real-time
+  // class (rt_budget.h). A zipped 16 MB GBA ROM alone outlasts RLIMIT_RTTIME.
+  std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
   if (dsi_hle && rom_shortcut) {
     if (!load_shortcut_title(rom_path)) { SDL_Quit(); return 1; }
   } else if (dsi_hle && rom_is_cia) {
@@ -1850,6 +1858,7 @@ sdl_ready:
       if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
     }
   }
+  startup_off_rt.reset();
   ds::sdl::Lid lid;
   if (!replay) lid.open();
   std::vector<s16> mic, mic_raw, mic_queue;
@@ -3085,6 +3094,7 @@ sdl_ready:
   // does the same from a script).
   bool from_list = false;   // the game running was picked from the list: RESET goes back to the firmware
   auto launch_game = [&](const std::string& pick) {
+    const ds::sdl::OffRealtime off_rt;   // reset, ROM, save and state: one-shot work
     VLOG("launcher: %s\n", pick.c_str());
     // DSiWare runs with the launcher hand-off and a made-up NAND; no way
     // back to the DS menu, the session ends when the title does.

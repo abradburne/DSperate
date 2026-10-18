@@ -34,7 +34,7 @@ states are yours to provide and are never part of this repository.
 | `render/power-run.sh` | handheld | battery charge, current and power over a run, CPU and GPU frequency residency |
 | `render/audio-bench.sh`, `bench-realtime.sh`, `run-bench.sh` | handheld | sound break-ups; real time on the panels; DSperate against DraStic (the comparison that chose DSperate) |
 | `latency/` | handheld + computer | button-to-screen latency (`latency.sh`, `matrix.sh`, `lat-press.c`, `analyse.py`, `summary.py`) and frame pacing (`pacing-run.sh`, `pacing.py`), from `DS_DEBUG=latency=` logs |
-| `launch/` | handheld | launch timing from the launcher's shelf (`launch-timing.sh`, `press.py`) |
+| `launch/` | handheld | launch timing from the launcher's shelf (`launch-timing.sh`, `press.py`); games started under the launcher's real-time limits, failing on any the kernel kills (`rt-limits.sh`) |
 | `tools/device-run.sh` | handheld | runs a measurement with the launcher stopped, refusing (or waiting, `WAIT=1`) while a game is running |
 | `tools/framelog.c`, `vblank.c` | handheld | an `LD_PRELOAD` frame timer for other emulators; the panels' real refresh rate |
 | `gba-oracle/` | macOS | mGBA as a reference for GBA mode, frame by frame (not linked into DSperate) |

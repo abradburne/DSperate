@@ -9,7 +9,9 @@
 // its own it was killed within a second. Paced, it naps briefly once a
 // frame as a real-time thread (nap()). Unpaced (fast forward, or the
 // limiter off) it never waits at all, so it is an ordinary task until
-// pacing resumes (set_unpaced()). Linux only; elsewhere both do nothing.
+// pacing resumes (set_unpaced()). One-shot work that can outlast the limit
+// (inflating a zipped ROM, loading or saving a state) runs under an
+// OffRealtime guard instead. Linux only; elsewhere all of it does nothing.
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -69,6 +71,39 @@ private:
   bool unpaced_ = false;
 #if defined(__linux__)
   int policy_ = SCHED_OTHER;   // the policy dropped while unpaced
+  sched_param param_{};
+#endif
+};
+
+// For as long as it lives, the calling thread is an ordinary task: for
+// one-shot work that may run longer than RLIMIT_RTTIME allows without a
+// sleep (a 16 MB zipped GBA ROM inflates for 200 ms on the A55s). Threads
+// started meanwhile inherit SCHED_OTHER too. On the way out the real-time
+// policy comes back and the thread naps once as a real-time thread, so the
+// count starts from nothing. Nests: an inner guard finds nothing to drop.
+class OffRealtime {
+public:
+  OffRealtime() {
+#if defined(__linux__)
+    if (pthread_getschedparam(pthread_self(), &policy_, &param_) != 0 || (policy_ != SCHED_RR && policy_ != SCHED_FIFO)) { policy_ = SCHED_OTHER; return; }
+    sched_param z{};
+    if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &z) != 0) policy_ = SCHED_OTHER;
+#endif
+  }
+  ~OffRealtime() {
+#if defined(__linux__)
+    if (policy_ == SCHED_OTHER) return;
+    if (pthread_setschedparam(pthread_self(), policy_, &param_) != 0) return;
+    timespec ts{0, 20000};
+    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {}
+#endif
+  }
+  OffRealtime(const OffRealtime&) = delete;
+  OffRealtime& operator=(const OffRealtime&) = delete;
+
+private:
+#if defined(__linux__)
+  int policy_ = SCHED_OTHER;
   sched_param param_{};
 #endif
 };

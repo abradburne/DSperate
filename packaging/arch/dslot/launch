@@ -23,8 +23,9 @@
 set -eu
 [ $# -eq 1 ] || { echo "usage: launch ROM" >&2; exit 2; }
 
-nds=/usr/bin/dsperate
-gba="/usr/bin/dsperate --gba"
+# DSPERATE: another dsperate binary for a test run (bench/launch/rt-limits.sh).
+nds=${DSPERATE:-/usr/bin/dsperate}
+gba="$nds --gba"
 gb=/opt/gba-standin/gba-standin
 gbc=$gb
 share=/usr/share/dsperate/dslot
