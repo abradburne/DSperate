@@ -3908,7 +3908,7 @@ sdl_ready:
               ds::gpu::Renderer3D::DisplayList dl;
               std::vector<u32> arena; u32 arena_top = 0; u64 arena_epoch = ~0ull;
               const ds::gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for that frame (two alternate)
-              int scr = -1; u32 mode = 0; int cap_kind = 0; bool has_dl = false;
+              int scr = -1; u32 mode = 0; int cap_kind = 0; bool has_dl = false; u32 cap_raw = 0;
               struct Cap { std::vector<u32> img; unsigned tex = 0; };   // present thread: the last captures, 1x and hi-res
               Cap caps[3]; int cap_next = 0;
             };
@@ -3940,6 +3940,7 @@ sdl_ready:
                 gf.scr = scr;
                 gf.mode = nds.gpu.display_mode_a();
                 gf.cap_kind = ds::gpu::Gpu::hires_capture(nds.gpu.captured_last());
+                gf.cap_raw = nds.gpu.captured_last();
                 if (gf.mode == 1 || gf.cap_kind == 1) {
                   const auto& src = *ref.dlist;
                   gf.dl.polys.assign(src.polys.begin(), src.polys.begin() + src.npoly);
@@ -3995,7 +3996,9 @@ sdl_ready:
                 static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr, dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
                 static u32 n = 0, n_now = 0, n_cap = 0, n_fromcap = 0;
                 ++n; n_now += now; n_cap += g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
-                if (tr) std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d shows %d/%d\n", n, g.scr, g.mode, now, g.cap_kind, show[0], show[1]);
+                if (tr) { const auto& L = g.lines[96]; int c0 = 0, c1 = 0, c2 = 0; for (int x = 0; x < 256; ++x) { c0 += L.cls[x] == 0; c1 += L.cls[x] == 1; c2 += L.cls[x] == 2; }
+                  std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d (%08x) shows %d/%d | l96 bld %04x eva %u evb %u evy %u mb %04x full %d cls %d/%d/%d out %08x\n", n, g.scr, g.mode, now, g.cap_kind, g.cap_raw, show[0], show[1],
+                               L.bldcnt, L.eva, L.evb, L.evy, L.mbright, L.full, c0, c1, c2, L.out[128]); }
                 if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u screens shown from a capture\n", n, n_now, n_cap, n_fromcap);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
