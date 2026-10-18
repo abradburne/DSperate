@@ -10,6 +10,8 @@ GlHires::GlHires() = default;
 GlHires::~GlHires() = default;
 bool GlHires::init(u32, std::string* why) { if (why) *why = "built without GLES"; return false; }
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, int) { return 0; }
+unsigned GlHires::recomposite(const gpu::Engine2D::HiresLine*, int) { return 0; }
+bool GlHires::brightened(const gpu::Engine2D::HiresLine*) { return false; }
 } // namespace ds::sdl
 #else
 #include <GLES3/gl31.h>
@@ -28,6 +30,9 @@ namespace ds::sdl {
 namespace {
 
 bool g_ab_no_shadow = false;   // DS_HIRES_AB's second render
+
+using clk = std::chrono::steady_clock;
+double ms(clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); }
 
 using gpu::vk::GpuPoly;
 using gpu::vk::GpuVert;
@@ -468,7 +473,38 @@ struct GlHires::Impl {
   static constexpr int kSets = 3;
   struct Set { GLuint top = 0, second = 0, meta = 0, win = 0, regs = 0, fb = 0, cls = 0, base = 0, under = 0, vao = 0, vbo = 0; size_t vbo_cap = 0; };
   Set sets[kSets];
-  int set_k = 0;
+  int set_k = 0, vb_k = 0;   // the planes' set (a composite's), the vertices' (a 3D draw's)
+  GLuint layer3d = 0;        // the last draw3d's 3D layer for the composite, 0 when none
+  // DS_HIRES_DEBUG: CPU time per section (arena, fans, vbo, raster calls, planes, composite calls).
+  const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
+  double t[6] = {}; u32 tn = 0;
+  // DS_HIRES_STAGES: GPU time per section (EXT_disjoint_timer_query) -- pre, winners, tail,
+  // edge, composite, planes upload -- in a ring of four renders, read three renders late.
+  // A composite again in the same render overwrites its sections' queries.
+  const bool stg = std::getenv("DS_HIRES_STAGES") != nullptr;
+  GLuint tq[4][6] = {}; u32 tq_n = 0; double sg[6] = {}; u32 sgn = 0; int cur_q = -1;
+  void stages_next() {   // a new render: collect the one three back
+    if (!stg) return;
+    using GetQ = void (*)(GLuint, GLenum, GLuint64*);
+    static const GetQ getq = reinterpret_cast<GetQ>(SDL_GL_GetProcAddress("glGetQueryObjectui64vEXT"));
+    if (!tq[0][0]) for (auto& r : tq) glGenQueries(6, r);
+    ++tq_n;
+    if (tq_n > 3 && getq) {
+      const u32 old = (tq_n - 3) % 4;
+      for (int k = 0; k < 6; ++k) { GLuint64 ns = 0; getq(tq[old][k], 0x8866 /* GL_QUERY_RESULT */, &ns); sg[k] += ns / 1e6; }
+      if (++sgn == 120) {
+        std::fprintf(stderr, "gpu ms: pre %.2f, winners %.2f, tail %.2f, edge %.2f, composite %.2f, planes upload %.2f\n", sg[0] / sgn, sg[1] / sgn, sg[2] / sgn, sg[3] / sgn, sg[4] / sgn, sg[5] / sgn);
+        for (double& x : sg) x = 0;
+        sgn = 0;
+      }
+    }
+  }
+  void stage(int k) {   // ends the running section, starts section k (-1: none)
+    if (!stg) return;
+    if (cur_q >= 0) glEndQuery(0x88BF /* GL_TIME_ELAPSED_EXT */);
+    cur_q = k;
+    if (k >= 0) glBeginQuery(0x88BF, tq[tq_n % 4][k]);
+  }
 
   ~Impl() {
     for (Set& st : sets) {
@@ -653,15 +689,86 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     }
     return 0;
   }
+  if (!draw3d(dl, arena, arena_top, arena_epoch)) return 0;
+  const unsigned tex = composite(lines, mode);
   Impl& d = *d_;
-  d.set_k = (d.set_k + 1) % Impl::kSets;
-  { const Impl::Set& st = d.sets[d.set_k];
-    d.t_top = st.top; d.t_second = st.second; d.t_meta = st.meta; d.t_win = st.win; d.t_regs = st.regs; d.t_fb = st.fb; d.t_class = st.cls; d.t_base = st.base; d.t_under = st.under;
-    d.vao = st.vao; d.vbo = st.vbo; }
-  using clk = std::chrono::steady_clock;
-  static const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
-  static double t_arena = 0, t_fans = 0, t_vbo = 0, t_raster = 0, t_planes = 0, t_comp = 0; static u32 tn = 0;
-  auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+  const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
+  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
+  // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
+  static u32 renders = 0;
+  ++renders;
+  // DS_HIRES_PPM=<n>[+<count>]:<path>: frames n..n+count-1, the path suffixed .<frame> after the first.
+  static const char* dump = std::getenv("DS_HIRES_PPM");
+  static const u32 dump_n = dump ? static_cast<u32>(std::atoi(dump)) : 0, dump_k = dump && std::strchr(dump, '+') && std::strchr(dump, '+') < std::strchr(dump, ':') ? static_cast<u32>(std::atoi(std::strchr(dump, '+') + 1)) : 1;
+  if (dump && std::strchr(dump, ':') && renders >= dump_n && renders < dump_n + dump_k) {
+    std::vector<u8> px(static_cast<size_t>(W) * H * 4);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    const std::string path = std::string(std::strchr(dump, ':') + 1) + (renders == dump_n ? "" : "." + std::to_string(renders));
+    if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
+      std::fprintf(o, "P6\n%d %d\n255\n", W, H);
+      for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
+      std::fclose(o);
+      std::fprintf(stderr, "hires3d: frame %u written to %s\n", renders, path.c_str());
+    }
+  }
+  // DS_HIRES_AB=<n>:<prefix> (debug): render n three ways, for one frame side
+  // by side: <prefix>.hi.ppm as drawn, <prefix>.noshadow.ppm the same list
+  // drawn again without shadow volumes, <prefix>.1x.ppm the CPU's own 1x
+  // engine A line output (the reference: its raster has fog and shadows).
+  static const char* ab = std::getenv("DS_HIRES_AB");
+  static bool in_ab = false;
+  if (ab && !in_ab && lines && std::strchr(ab, ':') && renders == static_cast<u32>(std::atoi(ab))) {
+    const std::string pre = std::strchr(ab, ':') + 1;
+    auto save = [&](const std::string& path) {
+      std::vector<u8> px(static_cast<size_t>(W) * H * 4);
+      glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+      if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
+        std::fprintf(o, "P6\n%d %d\n255\n", W, H);
+        for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
+        std::fclose(o);
+      }
+    };
+    save(pre + ".hi.ppm");
+    if (std::FILE* o = std::fopen((pre + ".1x.ppm").c_str(), "wb")) {
+      std::fprintf(o, "P6\n256 192\n255\n");
+      u16 v15[256]; u32 rgb[256];
+      for (u32 y = 0; y < 192; ++y) {
+        gpu::kern::active::capture_a15(lines[y].out, 256, v15);
+        gpu::kern::active::output_vram_line(v15, 0, rgb);
+        for (u32 x = 0; x < 256; ++x) { const u8 c[3] = {static_cast<u8>(rgb[x] >> 16), static_cast<u8>(rgb[x] >> 8), static_cast<u8>(rgb[x])}; std::fwrite(c, 1, 3, o); }
+      }
+      std::fclose(o);
+    }
+    const int slot = d.slot;
+    in_ab = true; g_ab_no_shadow = true;
+    render(dl, arena, arena_top, arena_epoch, lines, mode);
+    glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
+    save(pre + ".noshadow.ppm");
+    in_ab = false; g_ab_no_shadow = false;
+    d.slot = slot;
+    std::fprintf(stderr, "hires3d: render %u written to %s.{hi,noshadow,1x}.ppm\n", renders - 1, pre.c_str());
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  return tex;
+}
+
+unsigned GlHires::recomposite(const gpu::Engine2D::HiresLine* lines, int mode) {
+  return d_ && lines ? composite(lines, mode) : 0;
+}
+
+bool GlHires::brightened(const gpu::Engine2D::HiresLine* lines) {
+  for (u32 y = 0; y < 192; ++y) {
+    const u16 mb = lines[y].mbright;
+    if (((mb >> 14) == 1 || (mb >> 14) == 2) && (mb & 0x1F)) return true;
+  }
+  return false;
+}
+
+bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch) {
+  Impl& d = *d_;
+  d.layer3d = 0;
+  d.vb_k = (d.vb_k + 1) % Impl::kSets;
+  d.vao = d.sets[d.vb_k].vao; d.vbo = d.sets[d.vb_k].vbo;
   const auto T0 = clk::now();
   const u32 S = d.S;
   const GLsizei W = static_cast<GLsizei>(256 * S), H = static_cast<GLsizei>(192 * S);
@@ -671,8 +778,6 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   // Textures new since the last frame (the arena is append-only per epoch).
   if (d.arena_epoch != arena_epoch) { d.arena_epoch = arena_epoch; d.arena_up = 0; }
   if (arena_top > d.arena_up) {
-    const u32 r0 = d.arena_up / kArenaW, r1 = (arena_top + kArenaW - 1) / kArenaW;
-    (void)r0; (void)r1;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, d.arena);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, static_cast<GLintptr>(d.arena_up) * 4, static_cast<GLsizeiptr>(arena_top - d.arena_up) * 4, arena.data() + d.arena_up);
     d.arena_up = arena_top;
@@ -781,30 +886,13 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glBindVertexArray(d.vao);
   glBindBuffer(GL_ARRAY_BUFFER, d.vbo);
   const size_t bytes = std::max<size_t>(d.vb.size(), 1) * sizeof(Vtx);
-  if (bytes > d.sets[d.set_k].vbo_cap) { d.sets[d.set_k].vbo_cap = bytes * 2; glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes * 2), nullptr, GL_STREAM_DRAW); }
+  if (bytes > d.sets[d.vb_k].vbo_cap) { d.sets[d.vb_k].vbo_cap = bytes * 2; glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes * 2), nullptr, GL_STREAM_DRAW); }
   if (!d.vb.empty()) glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(d.vb.size() * sizeof(Vtx)), d.vb.data());
 
   const auto T3 = clk::now();
-  static const bool stg = std::getenv("DS_HIRES_STAGES") != nullptr;
   const int skip = bench_skip_;
-  // DS_HIRES_STAGES: GPU time of each section (EXT_disjoint_timer_query), read 3 renders late.
-  static GLuint tq[4][6] = {}; static u32 tq_n = 0; static double sg[6] = {}; static u32 sgn = 0;
-  using GetQ = void (*)(GLuint, GLenum, GLuint64*);
-  static GetQ getq = stg ? reinterpret_cast<GetQ>(SDL_GL_GetProcAddress("glGetQueryObjectui64vEXT")) : nullptr;
-  const int tqs = static_cast<int>(tq_n % 4);
-  if (stg && !tq[0][0]) for (auto& r : tq) glGenQueries(6, r);
-  if (stg && tq_n >= 3 && getq) {
-    const int old = static_cast<int>((tq_n - 3) % 4);
-    for (int k = 0; k < 6; ++k) { GLuint64 ns = 0; getq(tq[old][k], 0x8866 /* GL_QUERY_RESULT */, &ns); sg[k] += ns / 1e6; }
-    if (++sgn == 120) { std::fprintf(stderr, "gpu ms: pre %.2f, winners %.2f, tail %.2f, edge %.2f, composite %.2f, planes upload %.2f\n", sg[0] / sgn, sg[1] / sgn, sg[2] / sgn, sg[3] / sgn, sg[4] / sgn, sg[5] / sgn); for (double& x : sg) x = 0; sgn = 0; }
-  }
-  int cur_q = -1;
-  auto stage = [&](int k) {   // ends the running section, starts section k (-1: none)
-    if (!stg) return;
-    if (cur_q >= 0) glEndQuery(0x88BF /* GL_TIME_ELAPSED_EXT */);
-    cur_q = k;
-    if (k >= 0) glBeginQuery(0x88BF, tq[tqs][k]);
-  };
+  d.stages_next();
+  auto stage = [&](int k) { d.stage(k); };
   stage(0);
   // The 3D layer at S x.
   glViewport(0, 0, W, H);
@@ -945,7 +1033,7 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, dead);
   }
   // Edge marking and fog, into their own texture, which the composite reads instead.
-  GLuint layer3d = d.col3d;
+  d.layer3d = d.col3d;
   if (want_id && !(skip & 8)) {
     glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
     glViewport(0, 0, W, H);
@@ -961,13 +1049,26 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
     glActiveTexture(GL_TEXTURE0);
     glBindVertexArray(d.vao_empty);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-    layer3d = d.col_edge;
+    d.layer3d = d.col_edge;
   }
 
+  stage(-1);
+  const auto T4 = clk::now();
+  if (d.timing) { d.t[0] += ms(T0, T1); d.t[1] += ms(T1, T2); d.t[2] += ms(T2, T3); d.t[3] += ms(T3, T4); ++d.tn; }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  return true;
+}
+
+unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
+  Impl& d = *d_;
+  if (!d.layer3d) return 0;
+  const GLuint layer3d = d.layer3d;
+  const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
+  d.set_k = (d.set_k + 1) % Impl::kSets;
+  { const Impl::Set& st = d.sets[d.set_k];
+    d.t_top = st.top; d.t_second = st.second; d.t_meta = st.meta; d.t_win = st.win; d.t_regs = st.regs; d.t_fb = st.fb; d.t_class = st.cls; d.t_base = st.base; d.t_under = st.under; }
+  auto stage = [&](int k) { d.stage(k); };
   stage(5);
-  static const bool finish_each = std::getenv("DS_HIRES_FINISH") && std::atoi(std::getenv("DS_HIRES_FINISH")) == 2;
-  static double t_gpu_raster = 0;
-  if (finish_each) { const auto F0 = clk::now(); glFinish(); t_gpu_raster += ms(F0, clk::now()); }
   const auto T4 = clk::now();
   // Engine A's planes for the composite.
   u32 n_full = 0;   // class-2 pixels: none, and pass 2 and its planes are skipped
@@ -1054,74 +1155,17 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vect
   glDisable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
   glBindVertexArray(0);
   stage(-1);
-  if (stg) ++tq_n;
-  static const bool finish = std::getenv("DS_HIRES_FINISH") != nullptr;
-  static double t_gpu = 0;
-  if (finish) { const auto F0 = clk::now(); glFinish(); t_gpu += ms(F0, clk::now()); }
-  if (timing) {
-    const auto T6 = clk::now();
-    t_arena += ms(T0, T1); t_fans += ms(T1, T2); t_vbo += ms(T2, T3); t_raster += ms(T3, T4); t_planes += ms(T4, T5); t_comp += ms(T5, T6);
-    if (++tn == 120) {
-      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f, gpu wait %.2f, of it raster %.2f (%zu verts, %u full-composite pixels)\n",
-                   t_arena / tn, t_fans / tn, t_vbo / tn, t_raster / tn, t_planes / tn, t_comp / tn, t_gpu / tn, t_gpu_raster / tn, d.vb.size(), n_full);
-      t_arena = t_fans = t_vbo = t_raster = t_planes = t_comp = t_gpu = t_gpu_raster = 0; tn = 0;
-    }
-  }
-  // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
-  static u32 renders = 0;
-  ++renders;
-  // DS_HIRES_PPM=<n>[+<count>]:<path>: frames n..n+count-1, the path suffixed .<frame> after the first.
-  static const char* dump = std::getenv("DS_HIRES_PPM");
-  static const u32 dump_n = dump ? static_cast<u32>(std::atoi(dump)) : 0, dump_k = dump && std::strchr(dump, '+') && std::strchr(dump, '+') < std::strchr(dump, ':') ? static_cast<u32>(std::atoi(std::strchr(dump, '+') + 1)) : 1;
-  if (dump && std::strchr(dump, ':') && renders >= dump_n && renders < dump_n + dump_k) {
-    std::vector<u8> px(static_cast<size_t>(W) * H * 4);
-    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    const std::string path = std::string(std::strchr(dump, ':') + 1) + (renders == dump_n ? "" : "." + std::to_string(renders));
-    if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
-      std::fprintf(o, "P6\n%d %d\n255\n", W, H);
-      for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
-      std::fclose(o);
-      std::fprintf(stderr, "hires3d: frame %u written to %s\n", renders, path.c_str());
-    }
-  }
-  // DS_HIRES_AB=<n>:<prefix> (debug): render n three ways, for one frame side
-  // by side: <prefix>.hi.ppm as drawn, <prefix>.noshadow.ppm the same list
-  // drawn again without shadow volumes, <prefix>.1x.ppm the CPU's own 1x
-  // engine A line output (the reference: its raster has fog and shadows).
-  static const char* ab = std::getenv("DS_HIRES_AB");
-  static bool in_ab = false;
-  if (ab && !in_ab && lines && std::strchr(ab, ':') && renders == static_cast<u32>(std::atoi(ab))) {
-    const std::string pre = std::strchr(ab, ':') + 1;
-    auto save = [&](const std::string& path) {
-      std::vector<u8> px(static_cast<size_t>(W) * H * 4);
-      glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-      if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
-        std::fprintf(o, "P6\n%d %d\n255\n", W, H);
-        for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
-        std::fclose(o);
-      }
-    };
-    save(pre + ".hi.ppm");
-    if (std::FILE* o = std::fopen((pre + ".1x.ppm").c_str(), "wb")) {
-      std::fprintf(o, "P6\n256 192\n255\n");
-      u16 v15[256]; u32 rgb[256];
-      for (u32 y = 0; y < 192; ++y) {
-        gpu::kern::active::capture_a15(lines[y].out, 256, v15);
-        gpu::kern::active::output_vram_line(v15, 0, rgb);
-        for (u32 x = 0; x < 256; ++x) { const u8 c[3] = {static_cast<u8>(rgb[x] >> 16), static_cast<u8>(rgb[x] >> 8), static_cast<u8>(rgb[x])}; std::fwrite(c, 1, 3, o); }
-      }
-      std::fclose(o);
-    }
-    const int slot = d.slot;
-    in_ab = true; g_ab_no_shadow = true;
-    render(dl, arena, arena_top, arena_epoch, lines, mode);
-    glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
-    save(pre + ".noshadow.ppm");
-    in_ab = false; g_ab_no_shadow = false;
-    d.slot = slot;
-    std::fprintf(stderr, "hires3d: render %u written to %s.{hi,noshadow,1x}.ppm\n", renders - 1, pre.c_str());
-  }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  if (d.timing) {
+    const auto T6 = clk::now();
+    d.t[4] += ms(T4, T5); d.t[5] += ms(T5, T6);
+    if (d.tn >= 120) {
+      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f (%zu verts, %u full-composite pixels)\n",
+                   d.t[0] / d.tn, d.t[1] / d.tn, d.t[2] / d.tn, d.t[3] / d.tn, d.t[4] / d.tn, d.t[5] / d.tn, d.vb.size(), n_full);
+      for (double& x : d.t) x = 0;
+      d.tn = 0;
+    }
+  }
   return d.out[d.slot];
 }
 
