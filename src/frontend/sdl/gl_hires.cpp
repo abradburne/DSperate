@@ -271,7 +271,7 @@ vec4 layer3d(ivec2 p) {
     if (d >= 127u) d = 128u;
     // The colour plane holds raw 6-bit channels and the alpha as (a + 1) * 8.
     uvec3 rgb = uvec3(round(c.rgb * 255.0));
-    uint ab = uint(round(c.a * 255.0)), a = ab == 0u ? 0u : (ab >> 3) - 1u;
+    uint ab = uint(round(c.a * 255.0)), a = ab == 0u ? 0u : ((ab + 1u) >> 3) - 1u;   // 255 is alpha 31 ((a + 1) * 8, saturated)
     if (u_fog_alpha == 0) {
       uvec3 f = uvec3(c15_to_18(u_fog_color, 0u), c15_to_18(u_fog_color, 4u), c15_to_18(u_fog_color, 9u));
       rgb = (f * d + rgb * (128u - d)) >> 7;
@@ -362,7 +362,7 @@ void main() {
   uint top_id = byte_of(d, 0), kind = byte_of(d, 1), talpha = byte_of(d, 2), second_id = byte_of(d, 3), win = byte_of(d, 4);
   vec4 h = layer3d(p);
   uint ha8 = uint(round(h.a * 255.0));
-  uint ha = ha8 == 0u ? 0u : (ha8 >> 3) - 1u;
+  uint ha = ha8 == 0u ? 0u : ((ha8 + 1u) >> 3) - 1u;   // 255 is alpha 31 ((a + 1) * 8, saturated)
   uint hpx = uint(round(h.r * 255.0)) | (uint(round(h.g * 255.0)) << 8) | (uint(round(h.b * 255.0)) << 16) | (ha << 24);
   if (kind == 3u) {
     if (ha != 0u) { top = hpx; talpha = ha; }
