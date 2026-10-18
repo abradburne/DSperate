@@ -1906,15 +1906,19 @@ sdl_ready:
            100.0 * runtime_us / period_us, period_us / 1000.0);
     }
   }
-  // video.vsync_lock (auto: on with vsync straight on the panels, KMSDRM):
-  // frames start on the panel's vblanks rather than the console's clock, one
-  // frame a refresh (vsync_lock.h). video.frame_delay: auto (the input taken
-  // as late as recent frames allow), or ms after the vblank before it is.
+  // video.vsync_lock (auto: on with vsync straight on the panels, KMSDRM, in
+  // DS mode): frames start on the panel's vblanks rather than the console's
+  // clock, one frame a refresh (vsync_lock.h). video.frame_delay: auto (the
+  // input taken as late as recent frames allow), or ms after the vblank
+  // before it is. Not in GBA mode by default: its frames take half a refresh,
+  // and the lock's budget (which counts the wait for the flip before) held
+  // them a whole refresh longer (Advance Wars: 60.5 -> 71 ms button to screen).
   ds::sdl::VsyncLock vlock;
   {
     const std::string mode = cfg.str("video.vsync_lock", "auto");
     const char* vd = SDL_GetCurrentVideoDriver();
-    const bool want = mode == "true" || mode == "on" || (mode == "auto" && vs.vsync && vd && SDL_strcasecmp(vd, "kmsdrm") == 0);
+    const bool want = mode == "true" || mode == "on" ||
+                      (mode == "auto" && !nds.gba_mode() && vs.vsync && vd && SDL_strcasecmp(vd, "kmsdrm") == 0);
     if (want && vlock.open(cfg.num("video.vsync_pipe", 0), frame_ns)) {
       const std::string fd = cfg.str("video.frame_delay", "auto");
       vlock.set_delay_ns(fd == "auto" ? -1.0 : std::max(0.0, std::atof(fd.c_str())) * 1e6);
