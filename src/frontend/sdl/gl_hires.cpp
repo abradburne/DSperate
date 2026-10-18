@@ -82,12 +82,6 @@ uniform int u_shadow;  // a shadow polygon: it does not draw over its own polygo
 // and the polygons' records: a shadow's own-id test without reading the id
 // plane the pass is drawing into.
 uniform highp usampler2D u_win;
-// The opaque prefix's DS depth at each pixel (the pre-pass's o_z): a tail
-// fragment at or behind it fails the depth test (the tail only brings the
-// depth nearer), so it is left before it is shaded. Not for shadow masks,
-// which act on a failed test.
-uniform int u_cull;
-uniform highp usampler2D u_pz;
 layout(std430, binding = 1) readonly buffer PolysT { uvec4 polys_t[]; };
 #endif
 #ifdef RESOLVE
@@ -100,7 +94,6 @@ in float v_zp; in vec2 v_zw;
 #ifdef PREPASS
 layout(location = 0) out uint o_g0;
 layout(location = 1) out uint o_g1;
-layout(location = 2) out uint o_z;    // the winner's DS depth: the tail's early cull
 #else
 out vec4 o_col;
 layout(location = 1) out uint o_id;   // edge marking and fog: the polygon id | 0x40 (its fog bit) | 0x80 (an opaque polygon drew here)
@@ -108,17 +101,15 @@ layout(location = 1) out uint o_id;   // edge marking and fog: the polygon id | 
 uint texel(uint i) { return texels[i]; }
 uint c15_to_18(uint c, uint shift) { uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu); return v != 0u ? v + 1u : v; }
 #ifndef RESOLVE
-// The DS's own depth, rounded to its integer; over 2^24 it is the depth
-// buffer's value: exact in a float depth buffer, nearer is smaller in both
-// modes, and surfaces at the same depth tie exactly, so LESS (the earlier
-// polygon keeps the pixel) decides as on the DS. (Through GL's -1..1 clip
-// depth the W-buffer's 1/w lost all its precision: neighbouring surfaces
-// fought and parts vanished.)
-float ds_depth_i() {
+float ds_depth() {
+  // The DS's own depth, rounded to its integer, over 2^24: exact in a float
+  // depth buffer, nearer is smaller in both modes, and surfaces at the same
+  // depth tie exactly, so LESS (the earlier polygon keeps the pixel) decides
+  // as on the DS. (Through GL's -1..1 clip depth the W-buffer's 1/w lost all
+  // its precision: neighbouring surfaces fought and parts vanished.)
   float zds = u_wbuf != 0 ? v_zp : v_zw.x / v_zw.y;
-  return clamp(floor(zds + 0.5), 0.0, 16777215.0);
+  return clamp(floor(zds + 0.5), 0.0, 16777215.0) / 16777216.0;
 }
-float ds_depth() { return ds_depth_i() / 16777216.0; }
 #endif
 // The texel at the DS texel coordinate (s, t), wrapped, flipped or clamped.
 uint fetch(uint texparam, uint tex_offset, uint wh, int s, int t) {
@@ -187,11 +178,9 @@ void main() {
   uint vr = uint(int(round(rgb.r)) >> 3) & 0x3Fu, vg = uint(int(round(rgb.g)) >> 3) & 0x3Fu, vb = uint(int(round(rgb.b)) >> 3) & 0x3Fu;
   o_g0 = ((v_flags >> 12) << 18) | (vr << 12) | (vg << 6) | vb;
   o_g1 = (uint(s) & 0xFFFFu) | (uint(t) << 16);
-  o_z = uint(ds_depth_i());
   gl_FragDepth = ds_depth();
   return;
 #else
-  if (u_cull != 0 && uint(ds_depth_i()) >= texelFetch(u_pz, ivec2(gl_FragCoord.xy), 0).r) discard;
   vec3 rgb = clamp(v_rgb, vec3(0.0), vec3(511.0));
   uint vr = uint(int(round(rgb.r)) >> 3) & 0x3Fu, vg = uint(int(round(rgb.g)) >> 3) & 0x3Fu, vb = uint(int(round(rgb.b)) >> 3) & 0x3Fu;
   uvec4 c = shade(attr, v_poly.y, v_poly.z, v_poly.w, v_flags, vr, vg, vb, s, t);
@@ -434,13 +423,13 @@ struct GlHires::Impl {
   // (the depth from the shader, so nothing is rejected early) with a cheap
   // shader and keeps each pixel's winner, vertex colour and texel coordinate
   // (g0, g1); `resolve` then shades each pixel once, full screen.
-  GLuint pre = 0, resolve = 0, g0 = 0, g1 = 0, gz = 0, fbo_pre = 0;
+  GLuint pre = 0, resolve = 0, g0 = 0, g1 = 0, fbo_pre = 0;
   GLint p_alpha_ref = -1, p_wbuf = -1, w_dispcnt = -1, w_toon = -1;
   GLuint polys[3] = {}; int polys_k = 0;   // the polygons' records for the resolve, a ring
   std::vector<u32> precs;
   GLuint dep_out = 0;
   GLint r_wbuf = -1;
-  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode[2] = {-1, -1}, f_mode[2] = {-1, -1}, r_split = -1, r_shadow = -1, r_cull = -1;
+  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode[2] = {-1, -1}, f_mode[2] = {-1, -1}, r_split = -1, r_shadow = -1;
   u32 nruns = 0;   // DS_HIRES_DEBUG: the last render's tail runs
   // glColorMaski (OES/EXT_draw_buffers_indexed): the id plane's writes switched
   // on and off without changing the draw buffers, which on a tiler ends the
@@ -517,7 +506,6 @@ struct GlHires::Impl {
     if (resolve) glDeleteProgram(resolve);
     if (g0) glDeleteTextures(1, &g0);
     if (g1) glDeleteTextures(1, &g1);
-    if (gz) glDeleteTextures(1, &gz);
     glDeleteBuffers(3, polys);
     if (fbo_pre) glDeleteFramebuffers(1, &fbo_pre);
     if (dep3d) glDeleteTextures(1, &dep3d);
@@ -583,8 +571,6 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.u_toon = glGetUniformLocation(d.raster, "u_toon");
   glUseProgram(d.raster);
   glUniform1i(glGetUniformLocation(d.raster, "u_win"), 3);
-  glUniform1i(glGetUniformLocation(d.raster, "u_pz"), 4);
-  d.r_cull = glGetUniformLocation(d.raster, "u_cull");
   {
     const char* ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
     if (ext && (std::strstr(ext, "GL_OES_draw_buffers_indexed") || std::strstr(ext, "GL_EXT_draw_buffers_indexed"))) {
@@ -608,12 +594,11 @@ bool GlHires::init(u32 scale, std::string* why) {
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d.dep3d, 0);
   { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "3D framebuffer incomplete"; return false; }
-  d.g0 = tex2d(GL_R32UI, W, H); d.g1 = tex2d(GL_R32UI, W, H); d.gz = tex2d(GL_R32UI, W, H);
+  d.g0 = tex2d(GL_R32UI, W, H); d.g1 = tex2d(GL_R32UI, W, H);
   glGenFramebuffers(1, &d.fbo_pre); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_pre);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.g0, 0);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, d.g1, 0);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, d.gz, 0);
-  { const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2}; glDrawBuffers(3, bufs); }
+  { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d.dep3d, 0);
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "pre-pass framebuffer incomplete"; return false; }
   // The composite's depth: pass 1 marks what it drew, so pass 2 shades only the rest.
@@ -895,8 +880,6 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     const GLuint none[4] = {0, 0, 0, 0};
     glClearBufferuiv(GL_COLOR, 0, none);
     glClearBufferuiv(GL_COLOR, 1, none);
-    const GLuint rear_z[4] = {static_cast<GLuint>(std::min(cz, 16777215.f)), 0, 0, 0};   // the depth buffer's clear, as an integer
-    glClearBufferuiv(GL_COLOR, 2, rear_z);
     glClearBufferfi(GL_DEPTH_STENCIL, 0, std::min(cz, 16777215.f) / 16777216.f, 0);
   }
   glEnable(GL_DEPTH_TEST);
@@ -953,8 +936,6 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
   glUseProgram(d.raster);
   glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon); glUniform1i(d.r_wbuf, wbuf ? 1 : 0); glUniform1i(d.r_split, 0);
-  glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, d.gz); glActiveTexture(GL_TEXTURE0);
-  glUniform1i(d.r_cull, 1);
   // The id plane takes opaque pixels only (a translucent one keeps the opaque
   // id under it, and its fog bit); switched only when it changes.
   int id_on = want_id ? 1 : 0;
@@ -978,9 +959,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
       glDisable(GL_BLEND); glDepthMask(GL_FALSE);
       glStencilFunc(GL_ALWAYS, 0x80, 0x80);
       glStencilOp(GL_KEEP, GL_REPLACE, GL_KEEP);
-      glUniform1i(d.r_cull, 0);   // it marks where the depth test fails
       glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
-      glUniform1i(d.r_cull, 1);
       glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
       glStencilMask(0x7F);
       glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
