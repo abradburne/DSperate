@@ -58,6 +58,11 @@ target_link_libraries(test_gba PRIVATE dsperate_core)
 target_compile_definitions(test_gba PRIVATE GBA_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data/gba")
 add_test(NAME gba COMMAND test_gba)
 
+# video.hires3d_fallback's hysteresis (a header of the SDL frontend's; no SDL needed).
+add_executable(test_hires_governor hires_governor_test.cpp)
+target_link_libraries(test_hires_governor PRIVATE dsperate_core)
+add_test(NAME hires_governor COMMAND test_hires_governor)
+
 # The hi-res 3D path on an offscreen GLES 3.1 context (skipped without one).
 if(DSPERATE_GLES)
   add_executable(test_gl_hires gl_hires_test.cpp)

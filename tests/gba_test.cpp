@@ -195,6 +195,47 @@ void test_psg() {
   CHECK(p.read(0x11) == 0);            // AGB: write-only bits read 0
 }
 
+// The other three: channel 1's sweep running the pitch up past the top,
+// the wave channel from the AGB's second bank, the noise channel's LFSR.
+void test_psg_channels() {
+  auto levels = [](psg::GbPsg& p, u32 samples, int ch, s32& lo, s32& hi) {
+    lo = 99; hi = -99;
+    for (u32 i = 0; i < samples; ++i) { p.run(128); s32 lv[4]; p.sample(lv); lo = std::min(lo, lv[ch]); hi = std::max(hi, lv[ch]); }
+  };
+  psg::GbPsg p(psg::GbPsg::Model::Agb);
+  p.write(0x26, 0x80);
+  // Sweep: period 1, shift 1, up. 1024 -> 1536 at the first sweep clock,
+  // 2304 (past 2047) at the second, which turns the channel off. The sweep
+  // clocks at 128 Hz, so it is gone within two clocks: 1/64 s.
+  p.write(0x10, 0x11); p.write(0x11, 0x80); p.write(0x12, 0xF0);
+  p.write(0x13, 0x00); p.write(0x14, 0x84);
+  CHECK(p.read(0x26) & 1);
+  p.run(psg::GbPsg::CLOCK_HZ / 256);
+  CHECK(p.read(0x26) & 1);
+  p.run(psg::GbPsg::CLOCK_HZ / 64);
+  CHECK(!(p.read(0x26) & 1));
+  // Wave: with bank 1 playing the CPU writes bank 0; then bank 0 plays it.
+  p.write(0x1A, 0xC0);
+  for (u32 i = 0; i < 16; ++i) p.wave_write(i, static_cast<u8>(((2 * i) << 4) | (2 * i + 1)));   // a 0..15 ramp, twice
+  p.write(0x1A, 0x80);
+  CHECK(p.wave_read(0) == 0);             // the CPU now sees bank 1, untouched
+  p.write(0x1C, 0x20);                    // 100%
+  p.write(0x1D, 0x00); p.write(0x1E, 0x80);   // the slowest rate: 32 Hz a pass
+  s32 lo, hi;
+  levels(p, 8192, 2, lo, hi);
+  CHECK(lo <= -13 && hi >= 13);
+  p.write(0x1C, 0x40);                    // 50%: the samples shifted right, half the swing
+  levels(p, 8192, 2, lo, hi);
+  CHECK(hi - lo >= 12 && hi - lo <= 14);
+  // Noise: 7-bit LFSR, volume 15, a length of 32 steps (1/8 s at 256 Hz).
+  p.write(0x21, 0xF0); p.write(0x20, 0x20); p.write(0x22, 0x08); p.write(0x23, 0xC0);
+  CHECK(p.read(0x26) & 8);
+  levels(p, 1024, 3, lo, hi);
+  CHECK(lo < 0 && hi > 0);
+  p.run(psg::GbPsg::CLOCK_HZ / 8);
+  CHECK(!(p.read(0x26) & 8));
+}
+
 // Direct Sound: timer 0 at 32768 Hz pops FIFO A, DMA1 refills it from EWRAM.
 void test_direct_sound() {
   Gba g;
@@ -257,6 +298,75 @@ void test_eeprom() {
   CHECK(file.size() == 8192 && file[5 * 8] == 0x01 && file[5 * 8 + 7] == 0xEF);
 }
 
+// The save chip from the SDK's string in the ROM, as Save::detect and
+// Gba::load_rom find it: anywhere in the image, at a word boundary (where
+// the SDK puts it; a match elsewhere is some other data).
+void test_save_detection() {
+  struct Case { const char* tag; Save::Type type; };
+  const Case cases[] = {
+      {"SRAM_V113", Save::Type::Sram},       {"SRAM_F_V100", Save::Type::Sram},
+      {"FLASH_V126", Save::Type::Flash64},   {"FLASH512_V131", Save::Type::Flash64},
+      {"FLASH1M_V103", Save::Type::Flash128}, {"EEPROM_V124", Save::Type::EepromUnsized},
+      {"NO_SAVE_HERE", Save::Type::None},
+  };
+  for (const Case& c : cases)
+    for (u32 at : {0x400u, 0x7FF0u}) {
+      std::vector<u8> rom = loop_cart();
+      rom.resize(0x8000);
+      std::memcpy(rom.data() + at, c.tag, std::strlen(c.tag));
+      CHECK(Save::detect(rom.data(), static_cast<u32>(rom.size())) == c.type);
+      Gba g;
+      CHECK(g.load_rom(std::move(rom)));
+      CHECK(g.save.type() == c.type);
+    }
+  // The 128 KB chip's tag also contains the 64 KB one's prefix: the larger wins.
+  std::vector<u8> rom = loop_cart();
+  rom.resize(0x1000);
+  std::memcpy(rom.data() + 0x200, "FLASH_V126", 10);
+  std::memcpy(rom.data() + 0x300, "FLASH1M_V103", 12);
+  CHECK(Save::detect(rom.data(), static_cast<u32>(rom.size())) == Save::Type::Flash128);
+  std::vector<u8> odd = loop_cart();
+  odd.resize(0x1000);
+  std::memcpy(odd.data() + 0x402, "SRAM_V113", 9);
+  CHECK(Save::detect(odd.data(), static_cast<u32>(odd.size())) == Save::Type::None);
+}
+
+// WAITCNT: every value, against GBATEK's table. Cycles per access are
+// 1 + the wait states; a 32-bit access on the 16-bit cartridge bus is a
+// 16-bit N and an S (S and S in a burst).
+void test_waitcnt() {
+  Gba g;
+  CHECK(g.load_rom(loop_cart()));
+  g.reset();
+  static const u32 first[4] = {4, 3, 2, 8};
+  auto at = [&](u32 addr) { return g.cpu->timing7[addr >> 15]; };
+  for (u32 w = 0; w < 0x800; ++w) {
+    g.write16(0x04000204, static_cast<u16>(w));
+    const u32 sram = 1 + first[w & 3];
+    const u32 ws[3][2] = {{1 + first[(w >> 2) & 3], (w & 0x10) ? 2u : 3u},
+                          {1 + first[(w >> 5) & 3], (w & 0x80) ? 2u : 5u},
+                          {1 + first[(w >> 8) & 3], (w & 0x400) ? 2u : 9u}};
+    for (u32 k = 0; k < 3; ++k)
+      for (u32 mirror : {0u, 0x01000000u, 0x01FF8000u}) {
+        const u8* t = at(0x08000000 + k * 0x02000000 + mirror);
+        const u32 n = ws[k][0], s = ws[k][1];
+        if (t[0] != n || t[1] != s || t[2] != n + s || t[3] != 2 * s) {
+          std::fprintf(stderr, "WAITCNT %03x: wait state %u %08x: %u %u %u %u, want %u %u %u %u\n", w, k, 0x08000000 + k * 0x02000000 + mirror, t[0], t[1], t[2], t[3], n, s, n + s, 2 * s);
+          CHECK(false);
+        }
+      }
+    for (u32 a : {0x0E000000u, 0x0E00FFFFu, 0x0F000000u}) { const u8* t = at(a); CHECK(t[0] == sram && t[1] == sram && t[2] == sram && t[3] == sram); }
+  }
+  // The rest never changes: BIOS and IWRAM single cycles, EWRAM 3 (16-bit
+  // bus), palette and VRAM 1 (16-bit bus), OAM 1.
+  for (u32 w : {0x0000u, 0x4317u, 0x07FFu}) {
+    g.write16(0x04000204, static_cast<u16>(w));
+    auto is = [&](u32 addr, u32 n16, u32 n32) { const u8* t = at(addr); return t[0] == n16 && t[1] == n16 && t[2] == n32 && t[3] == n32; };
+    CHECK(is(0x00000000, 1, 1) && is(0x03000000, 1, 1) && is(0x02000000, 3, 6) && is(0x02038000, 3, 6));
+    CHECK(is(0x05000000, 1, 2) && is(0x06000000, 1, 2) && is(0x07000000, 1, 1));
+  }
+}
+
 // The cartridge RTC, driven pin by pin as Pokemon's code does it.
 void test_rtc() {
   Gba g;
@@ -301,9 +411,12 @@ void test_rtc() {
 } // namespace
 
 int main() {
+  test_save_detection();
+  test_waitcnt();
   test_rtc();
   test_eeprom();
   test_psg();
+  test_psg_channels();
   test_direct_sound();
   test_bus();
   test_timers_dma_irq();
