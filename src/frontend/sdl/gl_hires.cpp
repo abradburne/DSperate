@@ -189,12 +189,10 @@ void main() {
   uint r = c.x, g = c.y, b = c.z, a = c.w;
   if (a <= u_alpha_ref) discard;
   if (u_split != 0 && ((a == 31u) != (u_split == 1))) discard;
-#if !defined(PREPASS) && !defined(RESOLVE)
   if (u_shadow != 0) {
     uint w = texelFetch(u_win, ivec2(gl_FragCoord.xy), 0).r >> 18;
     if (w != 0u && ((polys_t[(w - 1u) * 2u].x >> 24) & 0x3Fu) == ((attr >> 24) & 0x3Fu)) discard;
   }
-#endif
 #endif
 #endif
 #ifndef PREPASS
@@ -230,7 +228,7 @@ const char* kEdgeFS = R"(#version 310 es
 precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
 uniform highp sampler2D u_col, u_depth;
 uniform highp usampler2D u_id;
-uniform int u_scale, u_wbuf;
+uniform int u_scale;
 uniform uint u_edge[8];
 uniform int u_edge_on, u_fog_on, u_fog_alpha;   // DISP3DCNT bit 5; bit 7; bit 6 (fog the alpha only)
 uniform uint u_fog_color, u_fog_offset, u_fog_shift;
@@ -431,7 +429,6 @@ struct GlHires::Impl {
   GLint p_alpha_ref = -1, p_wbuf = -1, w_dispcnt = -1, w_toon = -1;
   GLuint polys[3] = {}; int polys_k = 0;   // the polygons' records for the resolve, a ring
   std::vector<u32> precs;
-  GLint f_scale = -1;
   GLuint dep_out = 0;
   GLint r_wbuf = -1;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode = -1, f_mode = -1, r_split = -1, r_shadow = -1;
@@ -446,7 +443,7 @@ struct GlHires::Impl {
   u32 arena_up = 0; u64 arena_epoch = ~0ull;   // words of the arena on the GPU, and of which generation
   GLuint fbo3d = 0, col3d = 0, dep3d = 0, id3d = 0;
   GLuint edge = 0, fbo_edge = 0, col_edge = 0;   // edge marking's output
-  GLint g_scale = -1, g_wbuf = -1, g_edge = -1;
+  GLint g_scale = -1, g_edge = -1;
   GLint g_edge_on = -1, g_fog_on = -1, g_fog_alpha = -1, g_fog_color = -1, g_fog_offset = -1, g_fog_shift = -1, g_density = -1;
   static constexpr int kOut = 6;   // a ring: the last frames' results (shown, and captures shown a frame or two later) stay valid
   GLuint fbo_out[kOut] = {}, out[kOut] = {};
@@ -556,7 +553,7 @@ bool GlHires::init(u32 scale, std::string* why) {
   glUniform1i(glGetUniformLocation(d.edge, "u_col"), 0);
   glUniform1i(glGetUniformLocation(d.edge, "u_id"), 1);
   glUniform1i(glGetUniformLocation(d.edge, "u_depth"), 2);
-  d.g_scale = glGetUniformLocation(d.edge, "u_scale"); d.g_wbuf = glGetUniformLocation(d.edge, "u_wbuf"); d.g_edge = glGetUniformLocation(d.edge, "u_edge");
+  d.g_scale = glGetUniformLocation(d.edge, "u_scale"); d.g_edge = glGetUniformLocation(d.edge, "u_edge");
   d.g_edge_on = glGetUniformLocation(d.edge, "u_edge_on"); d.g_fog_on = glGetUniformLocation(d.edge, "u_fog_on"); d.g_fog_alpha = glGetUniformLocation(d.edge, "u_fog_alpha");
   d.g_fog_color = glGetUniformLocation(d.edge, "u_fog_color"); d.g_fog_offset = glGetUniformLocation(d.edge, "u_fog_offset");
   d.g_fog_shift = glGetUniformLocation(d.edge, "u_fog_shift"); d.g_density = glGetUniformLocation(d.edge, "u_density");
@@ -768,29 +765,24 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   }
 
   const auto T1 = clk::now();
-  // Fans, placed as lean.vert places them. The opaque prefix is order-free
-  // (the depth test decides), so it is redrawn for the hardware: polygons
-  // that cannot fail the alpha test first, near to far, with the early-depth
-  // shader; then the cut-out ones; then the tail in list order, in runs.
+  // Fans, placed as lean.vert places them: the opaque prefix (the pre-pass),
+  // then the tail in list order, in runs.
   d.vb.clear();
   std::vector<std::pair<u32, u32>> runs;   // tail: [first vertex, key] where key = translucent | depth-write << 1
   auto vert = [&](const GpuPoly& p, u32 vi) {
     const GpuVert& vt = dl.verts[p.first_vert + vi];
     const float w = std::max(static_cast<float>(vt.w), 1.f);
-    const float cx = 0.5f * static_cast<float>(p.xmin + p.xmax);
     const float sxf = static_cast<float>(vt.sx), syf = static_cast<float>(vt.sy);
     // Vertices where the DS put them: the lean raster's right-edge push (its
     // 1x span rule under MSAA) differs between polygons sharing an edge, and
     // at hi-res that opened cracks inside models. A zero-width or -height
     // polygon (a line to the DS) still gets one pixel.
-    (void)cx;
     float ox = 0.f, oy = 0.f;
     if (p.xmax == p.xmin) ox = (vi == 1 || vi == 2) ? 1.f : 0.f;
     if (p.ybot == p.ytop) oy = (vi == 1 || vi == 2) ? 1.f : 0.f;
     const float x = (sxf + ox) / 256.f * 2.f - 1.f, y = (syf + oy) / 192.f * 2.f - 1.f;
     float z = std::clamp(static_cast<float>(vt.z), 0.f, 16777215.f);
     if (p.attr & 0x4000u) z = std::max(z - (wbuf ? 255.f : 512.f), 0.f);
-    (void)wbuf;
     Vtx o{};
     o.pos[0] = x * w; o.pos[1] = y * w; o.pos[2] = 0.f; o.pos[3] = w;   // depth comes from the fragment shader
     o.dz = z;
@@ -812,10 +804,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   }
   const u32 opaque_end = static_cast<u32>(d.vb.size());
   bool last_mask = false;
-  // Debug: DS_HIRES_NOSHADOW=1 leaves shadow volumes out, as before; DS_HIRES_SHADOW_ALT=1 on every other render.
-  static const bool no_shadow_env = std::getenv("DS_HIRES_NOSHADOW") != nullptr, shadow_alt = std::getenv("DS_HIRES_SHADOW_ALT") != nullptr;
-  static u32 shadow_n = 0;
-  const bool no_shadow = no_shadow_env || (shadow_alt && (++shadow_n & 1)) || g_ab_no_shadow;
+  const bool no_shadow = g_ab_no_shadow;
   for (u32 k = prefix; k < dl.npoly; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (no_shadow && (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW)))) continue;
@@ -950,7 +939,6 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
   glUseProgram(d.raster);
   glUniform1ui(d.u_dispcnt, f.dispcnt); glUniform1ui(d.u_alpha_ref, f.alpha_ref); glUniform1uiv(d.u_toon, 32, dl.post.toon); glUniform1i(d.r_wbuf, wbuf ? 1 : 0); glUniform1i(d.r_split, 0);
-  glUseProgram(d.raster);   // the tail: the alpha test may discard
   // The id plane takes opaque pixels only (a translucent one keeps the opaque
   // id under it, and its fog bit); switched only when it changes.
   int id_on = want_id ? 1 : 0;
@@ -1023,7 +1011,6 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
     glViewport(0, 0, W, H);
     glUseProgram(d.edge);
-    glUniform1i(d.g_wbuf, wbuf ? 1 : 0);
     glUniform1uiv(d.g_edge, 8, dl.post.edge);
     glUniform1i(d.g_edge_on, edge_on ? 1 : 0); glUniform1i(d.g_fog_on, fog_on ? 1 : 0); glUniform1i(d.g_fog_alpha, (f.dispcnt & 0x40u) ? 1 : 0);
     glUniform1ui(d.g_fog_color, dl.post.fog_color); glUniform1ui(d.g_fog_offset, dl.post.fog_offset); glUniform1ui(d.g_fog_shift, dl.post.fog_shift);
