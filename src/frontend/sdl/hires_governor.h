@@ -29,14 +29,14 @@ public:
       late_ = late_ - slot + late;
       slot = late;
       if (frame_ - since_ >= WINDOW && late_ * 100 >= WINDOW * DROP_PCT) {
-        if (frame_ - since_ < PROBATION) backoff_ = backoff_ * 2 > MAX_WAIT ? MAX_WAIT : backoff_ * 2;   // dropped again soon after coming back
+        if (retried_ && frame_ - since_ < PROBATION) backoff_ = backoff_ * 2 > MAX_WAIT ? MAX_WAIT : backoff_ * 2;   // dropped again soon after coming back
         hires_ = false; since_ = frame_; ++drops_;
         return true;
       }
       if (frame_ - since_ >= SETTLED) backoff_ = FIRST_WAIT;
       return false;
     }
-    if (frame_ - since_ >= backoff_) { hires_ = true; since_ = frame_; clear(); return true; }
+    if (frame_ - since_ >= backoff_) { hires_ = true; retried_ = true; since_ = frame_; clear(); return true; }
     return false;
   }
   u32 drops() const { return drops_; }
@@ -47,7 +47,7 @@ private:
   static constexpr u32 FIRST_WAIT = 600, MAX_WAIT = 4800;                // 10 s, doubling to 80 s
   static constexpr u32 PROBATION = 180, SETTLED = 1800;                  // 3 s; 30 s
   void clear() { for (bool& b : hist_) b = false; late_ = 0; }
-  bool enabled_ = true, hires_ = true;
+  bool enabled_ = true, hires_ = true, retried_ = false;   // retried_: 2x is back after a drop
   bool hist_[WINDOW] = {};
   u32 late_ = 0;
   u64 frame_ = 0, since_ = 0;
