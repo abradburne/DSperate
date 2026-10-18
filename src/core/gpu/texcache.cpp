@@ -74,7 +74,7 @@ const u32* TextureCache::lookup(const VramMap& vm, u32 fmt, u32 base, u32 width,
 TextureCache::Ref TextureCache::lookup_ref(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0) {
   if (fmt == 0) return {};
   const Entry& e = find_or_decode(vm, fmt, base, width, height, texpal, alpha0);
-  return { e.texels.data(), static_cast<u32>(e.texels.size()), e.id, e.version, e.transparent };
+  return { e.texels.data(), static_cast<u32>(e.texels.size()), e.id, e.version, e.alphas };
 }
 
 TextureCache::Entry& TextureCache::find_or_decode(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0) {
@@ -225,9 +225,12 @@ void TextureCache::decode(const VramMap& vm, Entry& e) {
     src(base, n * 2, false);
     break;
   }
-  bool transparent = false;
-  for (u32 i = 0; i < n && !transparent; ++i) transparent = ((out[i] >> 16) & 0x1Fu) == 0u;
-  e.transparent = transparent;
+  u32 alphas = 0;
+  for (u32 i = 0; i < n && alphas != 7u; ++i) {
+    const u32 a = (out[i] >> 16) & 0x1Fu;
+    alphas |= a == 0 ? ALPHA_ZERO : a == 31 ? ALPHA_FULL : ALPHA_PARTIAL;
+  }
+  e.alphas = static_cast<u8>(alphas);
 }
 
 } // namespace ds::gpu
