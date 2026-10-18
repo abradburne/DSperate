@@ -15,6 +15,9 @@ documented by studying its freely-distributable debug-symbol build (approved
 for distribution by its developer, Exophase) and measuring it on real
 hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques).
 
+This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
+[docs/pocketos.md](docs/pocketos.md).
+
 ## Previews
 
 <img src="dsperate-menu.png">
