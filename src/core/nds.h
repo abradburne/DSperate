@@ -221,6 +221,11 @@ struct NDS {
 
   u64  frame_count = 0;
   bool frame_ready = false;
+  // Called at the start of line 192, before VBlank is raised, when set: the
+  // frontend gives the core its freshest input there, for the game's VBlank
+  // handler to read (emu.input_at = vblank), rather than only at frame start.
+  void (*vblank_input)(void* ctx) = nullptr;
+  void* vblank_input_ctx = nullptr;
   bool frame_in_slices = false;   // run_frame_slice has begun a frame not yet complete
   // ARM7 pulled the power line down (PMIC reg 0 bit 6): console switched
   // itself off. Cleared by reset(); what it means is the frontend's call (SDL saves settings and reboots).

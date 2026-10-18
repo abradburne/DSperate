@@ -49,7 +49,9 @@
 #include "cpu_gov.h"
 #include "pacer.h"
 #include "rt_budget.h"
+#include "vsync_lock.h"
 #include "present_thread.h"
+#include "latency_log.h"
 
 #include <dirent.h>
 #include <algorithm>
@@ -193,6 +195,7 @@ const char* kUsage =
     "                  late frame is heard as a gap\n"
     "  --no-mic        do not open the microphone (M still fakes one)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
+    "  --frame-end E   where an emulated frame ends: line0 (default) | vblank (emu.frame_end)\n"
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
     "                  | exact (melonDS's per-access model); emu.timing\n"
@@ -1141,6 +1144,7 @@ static int run(int argc, char** argv) {
     else if (flag("--no-vsync")) cli.set("video.vsync", "false");
     else if (flag("--interp")) cli.set("emu.jit", "false");
     else if (arg("--timing")) cli.set("emu.timing", argv[++i]);
+    else if (arg("--frame-end")) cli.set("emu.frame_end", argv[++i]);
     else if (arg("--frameskip")) cli.set("emu.frameskip", argv[++i]);
     else if (arg("--frameskip-mode")) cli.set("emu.frameskip_mode", argv[++i]);
     else if (flag("--frameskip-capture")) cli.set("emu.frameskip_capture", "true");
@@ -1188,7 +1192,7 @@ static int run(int argc, char** argv) {
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.gba_bios", "paths.saves", "paths.states", "video.scale", "video.hires3d", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "emu.frame_end", "emu.input_at", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   mark("settings read");
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
@@ -1547,6 +1551,11 @@ sdl_ready:
   mark("displays open");
   // The second window may skip frames that did not change; the first one's swap paces the loop.
   if (display2.gl()) display2.gl()->set_may_skip(true);
+  // emu.frame_end: line0 (default) or vblank (a frame ends at line 192, once
+  // its display lines are drawn: a press shows a frame sooner, but the 2D
+  // worker no longer overlaps VBlank; Gpu::set_end_at_vblank). emu.input_at
+  // (below) gets most of the gain without that cost.
+  nds.gpu.set_end_at_vblank(cfg.str("emu.frame_end", "line0") == "vblank");
   // video.hires3d: the GLES present took the windows; the 3D is drawn again
   // there at S x, at 1x while the GPU cannot keep up (video.hires3d_fallback).
   ds::sdl::GlFramePresenter gl_frames;
@@ -1897,6 +1906,28 @@ sdl_ready:
            100.0 * runtime_us / period_us, period_us / 1000.0);
     }
   }
+  // video.vsync_lock (auto: on with vsync straight on the panels, KMSDRM, in
+  // DS mode): frames start on the panel's vblanks rather than the console's
+  // clock, one frame a refresh (vsync_lock.h). video.frame_delay: auto (the
+  // input taken as late as recent frames allow), or ms after the vblank
+  // before it is. Not in GBA mode by default: its frames take half a refresh,
+  // and the lock's budget (which counts the wait for the flip before) held
+  // them a whole refresh longer (Advance Wars: 60.5 -> 71 ms button to screen).
+  ds::sdl::VsyncLock vlock;
+  {
+    const std::string mode = cfg.str("video.vsync_lock", "auto");
+    const char* vd = SDL_GetCurrentVideoDriver();
+    const bool want = mode == "true" || mode == "on" ||
+                      (mode == "auto" && !nds.gba_mode() && vs.vsync && vd && SDL_strcasecmp(vd, "kmsdrm") == 0);
+    if (want && vlock.open(cfg.num("video.vsync_pipe", 0), frame_ns)) {
+      const std::string fd = cfg.str("video.frame_delay", "auto");
+      vlock.set_delay_ns(fd == "auto" ? -1.0 : std::max(0.0, std::atof(fd.c_str())) * 1e6);
+      if (const double c = ds::sdl::debug::options().vsync_commit_ms; c > 0) vlock.set_commit_ns(c * 1e6);
+      pacer.set_lock(&vlock);
+      VLOG("vsync lock: frames flip on CRTC %d's vblanks, frame delay %s\n", vlock.pipe(), fd.c_str());
+    } else if (want) VLOG("vsync lock: no vblanks to follow; pacing on the console's clock\n");
+  }
+  double lock_speed = 1.0;   // what the lock last told the audio: panel rate / console rate
   // "auto" (default): the console's own 59.8261 Hz. 60 is what a player
   // means by "60 fps" (slightly fast; absorbed by rate control). "off" still
   // presents/plays sound, just doesn't pace. emu.speed multiplies the result.
@@ -3268,6 +3299,26 @@ sdl_ready:
   // The emulation thread takes its core; the audio, SDL and driver threads
   // started so far go to the aux core, and once more after the first frames
   // for the ones started lazily.
+  // emu.input_at = vblank (default): the pad is read again at line 192, just
+  // before VBlank, and given to the core there, so the game's VBlank handler
+  // reads input ~12 ms fresher than the frame start's (a frame ends at line 0).
+  // "frame": only at frame start. Not while the menu is up, paused, recording
+  // or replaying (a log keeps one input a frame), nor when frames end at VBlank anyway.
+  std::function<void()> vblank_input_fn;
+  if (cfg.str("emu.input_at", "vblank") == "vblank" && !nds.gpu.end_at_vblank()) {
+    vblank_input_fn = [&] {
+      if (menu.open() || paused || log.reading() || log.writing()) return;
+      SDL_Event ev;
+      while (SDL_PollEvent(&ev)) input.handle(ev, display, dual_window ? &display2 : nullptr);
+      input.update_stylus();
+      const ds::input::Frame f = input.frame();
+      nds.io.set_buttons(f.buttons);
+      nds.io.set_touch(f.x, f.y, f.down);
+      ds::sdl::latlog::repoll(f.buttons);
+    };
+    nds.vblank_input = [](void* c) { (*static_cast<std::function<void()>*>(c))(); };
+    nds.vblank_input_ctx = &vblank_input_fn;
+  }
   ds::place_current_thread(ds::ThreadRole::Emu);
   ds::place_foreign_threads();
   while (!input.quit() && !g_signalled && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
@@ -3446,6 +3497,7 @@ sdl_ready:
       in = ds::input::Frame{};
       in.lid = lid_was;   // hinge is console state, not an input
     }
+    ds::sdl::latlog::poll(nds.frame_count, in.buttons);
     if (log.reading()) {
       if (!log.read(in)) break;   // the controls still quit; the log ends the run
       ds::input::apply(nds, in);
@@ -3513,6 +3565,12 @@ sdl_ready:
       pacer.reset();
       fs_debt_ms = 0;   // fast forward leaves the debt frozen; the real-time one it left is stale
     }
+    // Locked to the panel only at the console's own rate.
+    pacer.set_lock_engaged(vlock.ok() && !fast && !limiter_off && base_scale == 1.0 && !net_live);
+    if (pacer.lock_engaged() && vlock.measured()) {
+      const double want = frame_ns / vlock.period_ns();
+      if (std::fabs(want - lock_speed) > 2e-5) { lock_speed = want; audio.set_speed(want); frame_budget_ms = vlock.period_ns() / 1e6; }
+    } else if (!pacer.lock_engaged() && lock_speed != 1.0) { lock_speed = 1.0; audio.set_speed(limiter_off ? 1.0 : base_scale); frame_budget_ms = frame_ns / 1e6 / base_scale; }
     // Policy decides for the frame after the one about to run; what the
     // core settled for this one governs the present.
     // Fast forward skips through the same blocks, by ff_skip rather than by
@@ -3558,8 +3616,11 @@ sdl_ready:
     // modulus of the frame number, which a skip pattern could phase-lock
     // against and never land on.
     const bool ff_due = !fast || ff_skip <= 0 || ff_since >= ff_skip;
+    // Locked: not shown when the frame before went out late (vsync_lock.h).
+    const bool lock_shows = !pacer.lock_engaged() || pause_pending || shot_pending || vlock.take_present();
     const bool present = pause_pending || shot_pending ? !skipped
-                                       : (!skipped && !fs_partial && ff_due);
+                                       : (!skipped && !fs_partial && ff_due && lock_shows);
+    const u64 lock_frame = vlock.shown();
     ff_since = present ? 0 : ff_since + 1;
     // Translucent PiP inset comes up to opaque while touched, holds
     // pip_touch_hold frames, then fades back. Only when the inset IS the bottom screen.
@@ -3615,6 +3676,7 @@ sdl_ready:
     } else
 #endif
     nds.run_frame();
+    ds::sdl::latlog::emu_done();
 #if DSPERATE_CHEEVOS
     // Exactly once per emulated frame: rcheevos keeps a delta per memory
     // reference, so a second call collapses delta onto current, stopping
@@ -3807,10 +3869,20 @@ sdl_ready:
           int rt_pol = 0; sched_param rt_sp{};
           const bool drop_rt = present_nort && pthread_getschedparam(pthread_self(), &rt_pol, &rt_sp) == 0 && (rt_pol == SCHED_RR || rt_pol == SCHED_FIFO);
           if (drop_rt) { sched_param z{}; sched_setscheduler(0, SCHED_OTHER, &z); }
-          if (display.gl()) gl_frames.present(nds, fb, display, dual_window ? &display2 : nullptr);   // gl_frame_presenter.h
-          else {
+          if (display.gl()) {
+            // gl_frame_presenter.h; the vsync lock hears when the frame is
+            // handed over and when its windows have swapped.
+            ds::sdl::VsyncLock* const lock = pacer.lock_engaged() ? &vlock : nullptr;
+            ds::sdl::GlFramePresenter::Hooks hooks;
+            hooks.handed_over = [&] { ds::sdl::latlog::post(fb); if (lock) lock->posted(ds::sdl::VblankClock::now_ns()); };
+            if (lock) hooks.swapped = [lock, lock_frame] { lock->swapped(lock_frame, ds::sdl::VblankClock::now_ns()); };
+            gl_frames.present(nds, fb, display, dual_window ? &display2 : nullptr, hooks);
+          } else {
+            ds::sdl::latlog::post(fb);
+            if (pacer.lock_engaged()) vlock.posted(ds::sdl::VblankClock::now_ns());
             display.draw(fb);
             if (dual_window) display2.draw(fb);
+            if (pacer.lock_engaged()) vlock.swapped(lock_frame, ds::sdl::VblankClock::now_ns());
           }
           if (drop_rt) sched_setscheduler(0, rt_pol, &rt_sp);
         }
@@ -3993,6 +4065,12 @@ sdl_ready:
                      emu_ticks * to_ms, draw_ticks * to_ms, wait_ticks * to_ms, fps_pace_ticks * to_ms, pacer.spin_us(),
                      wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames(), audio.rate_trim_ppm(),
                      audio.input_rate(), audio.rate());
+        if (pacer.lock_engaged()) {
+          const auto ls = vlock.take_stats();
+          if (ls.late || ls.skipped || ls.caught_up || ls.rebased)
+            std::fprintf(stderr, "  vsync lock: %u late flips, %u presents left out, %u frames run to catch up, %u restarts (input to flip %.1f ms; last late frame %.1f ms)\n",
+                         ls.late, ls.skipped, ls.caught_up, ls.rebased, vlock.budget_ns() / 1e6, vlock.last_late_cost_ / 1e6);
+        }
         if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
                                        static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
       }

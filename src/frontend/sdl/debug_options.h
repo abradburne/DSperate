@@ -45,6 +45,12 @@ struct Options {
   // (GlHires::Stage bits); none given, nothing is left out.
   u32 hires_bench_at = 0;
   std::vector<u32> hires_bench_masks;
+  // latency=FILE: a line per frame from a button's press to the flip that
+  // shows it (latency_log.h; pocketOS's emu/latency analyses it).
+  std::string latency;
+  // vsync-commit-ms=MS: the vsync lock's commit time instead of its own
+  // estimate (vsync_lock.h).
+  double vsync_commit_ms = 0;
 };
 
 // The options, parsed from DS_DEBUG on the first call.

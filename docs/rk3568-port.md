@@ -182,9 +182,16 @@ The emulation thread runs real-time under DSlot. PipeWire sets RLIMIT_RTTIME (20
 in every process it joins; `RtBudget` naps briefly once a paced frame as a real-time
 thread, and drops the policy while unpaced (fast forward).
 
-Frame pacing locked to the panels' vblanks (`video.vsync_lock`, input read at VBlank,
-button-to-screen latency logging) is on the `pacing` branch, not merged: it measured
-lower latency on DS games but costs GBA mode a flip wait (`docs/rk3568/measurements.md`).
+Frame pacing is locked to the panels' vblanks in DS mode (`video.vsync_lock = auto`,
+`vsync_lock.h`): frame i flips on vblank base + i of one panel, the console runs at the panel's
+59.94 Hz with the sound resampled (+0.19%), and the pad is read again at line 192, just before
+the game's VBlank handler (`emu.input_at = vblank`). No frame is shown twice any more where
+the panel's rate is off the DS's; NSMB's button-to-screen time fell from 79.8 to 69.6 ms
+median. In GBA mode the lock stays off unless forced: there it cost a refresh (our part of
+Advance Wars' latency 25 -> 35 ms, median of 20 presses). The cause is the lock's budget,
+which counts the wait for the previous flip as present time and so sits at its cap (a period
++ 2 ms) in every game; DS games at 2x are GPU-bound enough not to show it. Measuring the
+present's own work instead is the follow-up (`docs/rk3568/measurements.md`, latency).
 
 ## DS_DEBUG
 

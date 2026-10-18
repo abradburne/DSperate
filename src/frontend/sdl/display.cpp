@@ -3,6 +3,7 @@
 #include "display.h"
 #include "display_wl.h"
 #include "present_thread.h"
+#include "latency_log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -483,7 +484,7 @@ void Display::draw(const u32* const fb[SCREENS]) {
     disp_->present(slots);
     return;
   }
-  if (glp_) { glp_->draw(views_, nviews_, fb); return; }
+  if (glp_) { glp_->draw(views_, nviews_, fb); latlog::swapped(only_screen_ > 0); return; }
   if (!ren_) return;   // renderer tier only; scanline tiers use begin_frame/end_frame
   SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
   SDL_RenderClear(ren_);
@@ -500,6 +501,7 @@ void Display::draw(const u32* const fb[SCREENS]) {
     if (translucent) { SDL_SetTextureAlphaMod(tex, 255); SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE); }
   }
   SDL_RenderPresent(ren_);
+  latlog::swapped(only_screen_ > 0);
 }
 
 void Display::set_page(bool on) {
