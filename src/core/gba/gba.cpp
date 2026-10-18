@@ -889,8 +889,15 @@ template <class S> void Gba::sync_state(S& s) {
   }
   s.blob(io.data(), IO_SIZE);
   s.fields(ie, if_, ime);
-  for (size_t k = 0; k <= static_cast<size_t>(Ev::Audio); ++k) s.put(ev_at_[k]);
+  // GBAM states from the first GBA build (package .47, before sound) list no
+  // Audio event: 223 bytes from here, where later GBAM states have 231.
+  constexpr size_t kFirstLightLeft = 223;
+  bool no_audio_event = false;
+  if constexpr (S::reading) no_audio_event = old && s.remaining() == kFirstLightLeft;
+  for (size_t k = 0; k <= static_cast<size_t>(Ev::Audio); ++k)
+    if (!(no_audio_event && k == static_cast<size_t>(Ev::Audio))) s.put(ev_at_[k]);
   s.fields(now_, vcount_, in_hblank_, keyinput_, bios_latch_, dma_latch_, frame_count);
+  if (no_audio_event) ev_at_[static_cast<size_t>(Ev::Audio)] = now_ + Audio::SAMPLE_CYCLES;
   for (Timer& t : timers_) s.fields(t.reload, t.control, t.counter, t.start);
   for (Dma& d : dma_) s.fields(d.sad, d.dad, d.count, d.control, d.src, d.dst, d.left);
   if constexpr (S::reading) ev_at_[static_cast<size_t>(Ev::Irq)] = ev_at_[static_cast<size_t>(Ev::Sio)] = ~u64{0};
@@ -899,7 +906,10 @@ template <class S> void Gba::sync_state(S& s) {
   s.end();
   cpu->sync_state(s);
   ppu.sync_state(s);
-  audio.sync_state(s);
+  // States from before GBA sound (GBAM, package .47) have no sound chunk: the
+  // sound starts from reset, and the game sets its registers again.
+  if (s.next_is("GAUD")) audio.sync_state(s);
+  else if constexpr (S::reading) audio.reset();
   if (s.next_is("GSAV")) save.sync_state(s);
   if (s.next_is("GRTC")) rtc.sync_state(s);
 }

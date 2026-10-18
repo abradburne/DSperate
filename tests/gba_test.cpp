@@ -181,6 +181,57 @@ void test_state_refused_intact() {
   CHECK(std::memcmp(a.gba->ewram.get(), b.gba->ewram.get(), EWRAM_SIZE) == 0);
 }
 
+// A state in the first GBA build's layout (package .47, before sound): the
+// machine in chunk GBAM with the SRAM inside, no Audio event in its list,
+// none of the IRQ/serial events after it, no sound, save or RTC chunks.
+// Made here from a current state of the same machine; it loads, and the
+// picture runs on as from the current one.
+void test_state_first_light() {
+  NDS a;
+  std::string err;
+  CHECK(a.load_gba(std::string(GBA_TEST_DATA) + "/hello.gba", "", &err));
+  for (int i = 0; i < 30; ++i) a.run_frame();
+  state::Writer w;
+  CHECK(a.save_state(w, err));
+  const std::vector<u8>& cur = w.data();
+  auto chunk = [&](size_t& at, char tag[5], const u8*& data, u32& n) {
+    std::memcpy(tag, &cur[at], 4); tag[4] = 0;
+    std::memcpy(&n, &cur[at + 4], 4);
+    data = &cur[at + 8];
+    at += 8 + n;
+  };
+  std::vector<u8> old(cur.begin(), cur.begin() + 8);   // magic and version
+  auto put_chunk = [&](const char* tag, const std::vector<u8>& body) {
+    old.insert(old.end(), tag, tag + 4);
+    const u32 n = static_cast<u32>(body.size());
+    old.insert(old.end(), reinterpret_cast<const u8*>(&n), reinterpret_cast<const u8*>(&n) + 4);
+    old.insert(old.end(), body.begin(), body.end());
+  };
+  for (size_t at = 8; at < cur.size();) {
+    char tag[5]; const u8* d; u32 n;
+    chunk(at, tag, d, n);
+    std::vector<u8> body(d, d + n);
+    if (!std::strcmp(tag, "GBA2")) {
+      const size_t mem = EWRAM_SIZE + IWRAM_SIZE + 2 * PALETTE_SIZE + VRAM_SIZE + 2 * OAM_SIZE;
+      body.insert(body.begin() + mem, 64 * 1024, 0xFF);   // the SRAM the first build kept here
+      const size_t audio_ev = mem + 64 * 1024 + IO_SIZE + 6 + 5 * 8;
+      body.erase(body.begin() + audio_ev, body.begin() + audio_ev + 8);
+      body.resize(body.size() - 16);                       // no IRQ / serial events
+      put_chunk("GBAM", body);
+    } else if (!std::strcmp(tag, "HEAD") || !std::strcmp(tag, "CPU7") || !std::strcmp(tag, "GPPU")) {
+      put_chunk(tag, body);
+    }
+  }
+  NDS b;
+  CHECK(b.load_gba(std::string(GBA_TEST_DATA) + "/hello.gba", "", &err));
+  b.run_frame();
+  state::Reader r(old.data(), old.size());
+  CHECK(b.load_state(r, err));
+  CHECK(b.gba->now() == a.gba->now());
+  for (int i = 0; i < 20; ++i) { a.run_frame(); b.run_frame(); }
+  CHECK(picture_hash(*a.gba) == picture_hash(*b.gba));
+}
+
 u32 GbPsg_clock_quarter() { return psg::GbPsg::CLOCK_HZ / 4; }
 
 // The Game Boy PSG on its own: a square's pitch, the length counter, an envelope.
@@ -444,6 +495,7 @@ int main() {
   test_suites();
   test_state_round_trip();
   test_state_refused_intact();
+  test_state_first_light();
   std::puts("gba: ok");
   return 0;
 }
