@@ -224,26 +224,27 @@ void main() {
 // (or the rear plane) is on top and whether it carries the fog bit, the depth
 // plane its DS depth. A translucent polygon leaves the id plane as it was, so
 // its pixels keep the fog bit of what is under them (the DS ANDs its own in).
-const char* kEdgeFS = R"(#version 310 es
-precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
-uniform highp sampler2D u_col, u_depth;
+// Done where the composite reads the 3D layer (layer3d), not as a pass of its own,
+// in a build of the composite of its own (EDGE_FOG): compiled in, the code
+// slowed the composite of frames without either by 0.6 ms (NSMB at 2x).
+#define LAYER_3D R"(
+precision highp usampler2D;
+uniform highp sampler2D u_3d, u_depth;
 uniform highp usampler2D u_id;
-uniform int u_scale;
 uniform uint u_edge[8];
 uniform int u_edge_on, u_fog_on, u_fog_alpha;   // DISP3DCNT bit 5; bit 7; bit 6 (fog the alpha only)
 uniform uint u_fog_color, u_fog_offset, u_fog_shift;
 uniform uint u_density[34];
-out vec4 o_col;
 uint c15_to_18(uint c, uint shift) { uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu); return v != 0u ? v + 1u : v; }
-void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  vec4 c = texelFetch(u_col, p, 0);
+vec4 layer3d(ivec2 p) {
+  vec4 c = texelFetch(u_3d, p, 0);
+#ifdef EDGE_FOG
   uint id = texelFetch(u_id, p, 0).r;
   float z = texelFetch(u_depth, p, 0).r;
   if (u_edge_on != 0 && (id & 0x80u) != 0u) {
-    ivec2 hi = textureSize(u_col, 0) - 1;
+    ivec2 hi = textureSize(u_3d, 0) - 1;
     bool edge = false;
-    for (int k = 1; k <= u_scale && !edge; ++k) {
+    for (int k = 1; k <= SCALE && !edge; ++k) {
       ivec2 o[4] = ivec2[4](ivec2(k, 0), ivec2(-k, 0), ivec2(0, k), ivec2(0, -k));
       for (int i = 0; i < 4; ++i) {
         ivec2 q = clamp(p + o[i], ivec2(0), hi);
@@ -281,9 +282,10 @@ void main() {
     ab = a == 0u ? 0u : min(255u, (a + 1u) * 8u);
     c = vec4(vec3(rgb), float(ab)) / 255.0;
   }
-  o_col = c;
+#endif
+  return c;
 }
-)";
+)"
 
 // Engine A's kept lines (Engine2D::HiresLine) in a buffer, copied as they lie
 // in memory, LINE_WORDS words a line: the out, under, top and second records
@@ -297,7 +299,6 @@ precision highp float; precision highp int; precision highp sampler2D;
 layout(std430, binding = 2) readonly buffer Lines { uint lw[]; };
 uint px(ivec2 d, int plane) { return lw[d.y * LINE_WORDS + plane * 256 + d.x]; }   // 0 out, 1 under, 2 top, 3 second
 uint byte_of(ivec2 d, int plane) { return (lw[d.y * LINE_WORDS + 1024 + plane * 64 + (d.x >> 2)] >> ((d.x & 3) * 8)) & 0xFFu; }   // 0 top id ... 5 class
-uniform highp sampler2D u_3d;
 uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness)
 out vec4 o_col;
 uint up(uint c, uint f, uint bias) { return c + ((((63u - c) * f) + bias) >> 4); }
@@ -321,7 +322,7 @@ vec4 finish(uint o, uint mb) {
 // reaches every pixel of a shown line, so there a class 1 pixel takes the
 // full composite too (a capture is taken before it). The full composite is
 // left (discarded) for pass 2.
-const char* kFastFS = LINE_PLANES R"(
+const char* kFastFS = LINE_PLANES LAYER_3D R"(
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy), d = p / SCALE;
   uint mb = u_mode == 1 ? 0u : lw[d.y * LINE_WORDS + 1408] >> 16;
@@ -329,7 +330,7 @@ void main() {
   uint cls = (lw[d.y * LINE_WORDS + 1409] & 0xFF000000u) != 0u ? byte_of(d, 5) : 0u;
   if (cls == 2u || (cls == 1u && bright)) discard;
   if (cls == 1u) {
-    vec4 h = texelFetch(u_3d, p, 0);
+    vec4 h = layer3d(p);
     if (h.a > 0.0) { uvec3 c6 = uvec3(round(h.rgb * 255.0)); o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0); return; }
     o_col = finish(px(d, 1), 0u);
     return;
@@ -341,7 +342,7 @@ void main() {
 // Engine A's colour effects and master brightness (kernels_ref.cpp
 // composite_line / output_line) per S x pixel, with the 3D layer's entries
 // taken from the hi-res frame.
-const char* kCompositeFS = LINE_PLANES R"(
+const char* kCompositeFS = LINE_PLANES LAYER_3D R"(
 uint blend(uint a, uint b, uint eva, uint evb) {
   uint r = min((((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
   uint g = min(((((a >> 8) & 0x3Fu) * eva) + (((b >> 8) & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
@@ -361,7 +362,7 @@ void main() {
   uint r0 = lw[d.y * LINE_WORDS + 1408], r1 = lw[d.y * LINE_WORDS + 1409];
   uint top = px(d, 2), second = px(d, 3);
   uint top_id = byte_of(d, 0), kind = byte_of(d, 1), talpha = byte_of(d, 2), second_id = byte_of(d, 3), win = byte_of(d, 4);
-  vec4 h = texelFetch(u_3d, p, 0);
+  vec4 h = layer3d(p);
   uint ha8 = uint(round(h.a * 255.0));
   uint ha = ha8 == 0u ? 0u : (ha8 >> 3) - 1u;
   uint hpx = uint(round(h.r * 255.0)) | (uint(round(h.g * 255.0)) << 8) | (uint(round(h.b * 255.0)) << 16) | (ha << 24);
@@ -419,7 +420,7 @@ GLuint tex2d(GLenum fmt, GLsizei w, GLsizei h) {
 
 struct GlHires::Impl {
   u32 S = 2;
-  GLuint raster = 0, comp = 0, fast = 0;
+  GLuint raster = 0, comp[2] = {}, fast[2] = {};   // [1]: with edge marking and fog (EDGE_FOG)
   // The opaque prefix as a visibility buffer: `pre` runs the DS depth test
   // (the depth from the shader, so nothing is rejected early) with a cheap
   // shader and keeps each pixel's winner, vertex colour and texel coordinate
@@ -430,7 +431,7 @@ struct GlHires::Impl {
   std::vector<u32> precs;
   GLuint dep_out = 0;
   GLint r_wbuf = -1;
-  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode = -1, f_mode = -1, r_split = -1, r_shadow = -1;
+  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode[2] = {-1, -1}, f_mode[2] = {-1, -1}, r_split = -1, r_shadow = -1;
   u32 nruns = 0;   // DS_HIRES_DEBUG: the last render's tail runs
   // glColorMaski (OES/EXT_draw_buffers_indexed): the id plane's writes switched
   // on and off without changing the draw buffers, which on a tiler ends the
@@ -441,9 +442,12 @@ struct GlHires::Impl {
   GLuint arena = 0;
   u32 arena_up = 0; u64 arena_epoch = ~0ull;   // words of the arena on the GPU, and of which generation
   GLuint fbo3d = 0, col3d = 0, dep3d = 0, id3d = 0;
-  GLuint edge = 0, fbo_edge = 0, col_edge = 0;   // edge marking's output
-  GLint g_scale = -1, g_edge = -1;
-  GLint g_edge_on = -1, g_fog_on = -1, g_fog_alpha = -1, g_fog_color = -1, g_fog_offset = -1, g_fog_shift = -1, g_density = -1;
+  // The composite programs' edge marking and fog (LAYER_3D), and what the
+  // last draw3d left for them.
+  struct LayerLocs { GLint edge = -1, edge_on = -1, fog_on = -1, fog_alpha = -1, fog_color = -1, fog_offset = -1, fog_shift = -1, density = -1; };
+  LayerLocs fast_l, comp_l;   // EDGE_FOG's
+  gpu::vk::GpuPost post{};
+  bool edge_on = false, fog_on = false, fog_alpha = false;
   static constexpr int kOut = 6;   // a ring: the last frames' results (shown, and captures shown a frame or two later) stay valid
   GLuint fbo_out[kOut] = {}, out[kOut] = {};
   int slot = 0;
@@ -509,15 +513,11 @@ struct GlHires::Impl {
     if (fbo_pre) glDeleteFramebuffers(1, &fbo_pre);
     if (dep3d) glDeleteTextures(1, &dep3d);
     if (id3d) glDeleteTextures(1, &id3d);
-    if (col_edge) glDeleteTextures(1, &col_edge);
-    if (fbo_edge) glDeleteFramebuffers(1, &fbo_edge);
-    if (edge) glDeleteProgram(edge);
     if (fbo3d) glDeleteFramebuffers(1, &fbo3d);
     glDeleteFramebuffers(kOut, fbo_out);
     if (vao_empty) glDeleteVertexArrays(1, &vao_empty);
     if (raster) glDeleteProgram(raster);
-    if (comp) glDeleteProgram(comp);
-    if (fast) glDeleteProgram(fast);
+    for (GLuint pr : {comp[0], comp[1], fast[0], fast[1]}) if (pr) glDeleteProgram(pr);
     if (dep_out) glDeleteRenderbuffers(1, &dep_out);
   }
 };
@@ -545,28 +545,27 @@ bool GlHires::init(u32 scale, std::string* why) {
   glGenBuffers(3, d.polys);
   for (GLuint b : d.polys) { glBindBuffer(GL_SHADER_STORAGE_BUFFER, b); glBufferData(GL_SHADER_STORAGE_BUFFER, DS_MAX_POLYS * 32, nullptr, GL_STREAM_DRAW); }
   const std::string scale_def = "#version 310 es\n#define SCALE " + std::to_string(d.S) + "\n#define LINE_WORDS " + std::to_string(sizeof(gpu::Engine2D::HiresLine) / 4) + "\n";
-  d.comp = program(kFullVS, (scale_def + kCompositeFS).c_str(), why);
-  d.fast = program(kFullVS, (scale_def + kFastFS).c_str(), why);
-  if (!d.fast) return false;
-  d.edge = program(kFullVS, kEdgeFS, why);
-  if (!d.edge) return false;
-  glUseProgram(d.edge);
-  glUniform1i(glGetUniformLocation(d.edge, "u_col"), 0);
-  glUniform1i(glGetUniformLocation(d.edge, "u_id"), 1);
-  glUniform1i(glGetUniformLocation(d.edge, "u_depth"), 2);
-  d.g_scale = glGetUniformLocation(d.edge, "u_scale"); d.g_edge = glGetUniformLocation(d.edge, "u_edge");
-  d.g_edge_on = glGetUniformLocation(d.edge, "u_edge_on"); d.g_fog_on = glGetUniformLocation(d.edge, "u_fog_on"); d.g_fog_alpha = glGetUniformLocation(d.edge, "u_fog_alpha");
-  d.g_fog_color = glGetUniformLocation(d.edge, "u_fog_color"); d.g_fog_offset = glGetUniformLocation(d.edge, "u_fog_offset");
-  d.g_fog_shift = glGetUniformLocation(d.edge, "u_fog_shift"); d.g_density = glGetUniformLocation(d.edge, "u_density");
-  glUniform1i(d.g_scale, static_cast<GLint>(d.S));
-  if (!d.raster || !d.comp) return false;
+  for (int v = 0; v < 2; ++v) {
+    const std::string defs = scale_def + (v ? "#define EDGE_FOG 1\n" : "");
+    d.comp[v] = program(kFullVS, (defs + kCompositeFS).c_str(), why);
+    d.fast[v] = program(kFullVS, (defs + kFastFS).c_str(), why);
+    if (!d.comp[v] || !d.fast[v]) return false;
+    d.f_mode[v] = glGetUniformLocation(d.fast[v], "u_mode");
+    d.u_mode[v] = glGetUniformLocation(d.comp[v], "u_mode");
+  }
+  if (!d.raster) return false;
   // The composite's two passes read the same planes, on the same units.
-  for (GLuint pr : {d.fast, d.comp}) {
+  for (GLuint pr : {d.fast[0], d.comp[0], d.fast[1], d.comp[1]}) {
     glUseProgram(pr);
     glUniform1i(glGetUniformLocation(pr, "u_3d"), 0);
+    glUniform1i(glGetUniformLocation(pr, "u_id"), 1);
+    glUniform1i(glGetUniformLocation(pr, "u_depth"), 2);
+    if (pr != d.fast[1] && pr != d.comp[1]) continue;
+    Impl::LayerLocs& l = pr == d.fast[1] ? d.fast_l : d.comp_l;
+    l.edge = glGetUniformLocation(pr, "u_edge"); l.edge_on = glGetUniformLocation(pr, "u_edge_on"); l.fog_on = glGetUniformLocation(pr, "u_fog_on");
+    l.fog_alpha = glGetUniformLocation(pr, "u_fog_alpha"); l.fog_color = glGetUniformLocation(pr, "u_fog_color"); l.fog_offset = glGetUniformLocation(pr, "u_fog_offset");
+    l.fog_shift = glGetUniformLocation(pr, "u_fog_shift"); l.density = glGetUniformLocation(pr, "u_density");
   }
-  d.f_mode = glGetUniformLocation(d.fast, "u_mode");
-  d.u_mode = glGetUniformLocation(d.comp, "u_mode");
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
   d.r_wbuf = glGetUniformLocation(d.raster, "u_wbuf");
   d.r_split = glGetUniformLocation(d.raster, "u_split");
@@ -605,10 +604,6 @@ bool GlHires::init(u32 scale, std::string* why) {
   { const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}; glDrawBuffers(2, bufs); }
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, d.dep3d, 0);
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "pre-pass framebuffer incomplete"; return false; }
-  d.col_edge = tex2d(GL_RGBA8, W, H);
-  glGenFramebuffers(1, &d.fbo_edge); glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.col_edge, 0);
-  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { if (why) *why = "edge framebuffer incomplete"; return false; }
   // The composite's depth: pass 1 marks what it drew, so pass 2 shades only the rest.
   glGenRenderbuffers(1, &d.dep_out); glBindRenderbuffer(GL_RENDERBUFFER, d.dep_out); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, W, H);
   for (int i = 0; i < Impl::kOut; ++i) {
@@ -1004,24 +999,10 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     const GLenum dead[2] = {GL_DEPTH_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1};
     glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, dead);
   }
-  // Edge marking and fog, into their own texture, which the composite reads instead.
+  // Edge marking and fog: in the composite, where it reads the layer.
   d.layer3d = d.col3d;
-  if (want_id && !(skip & 8)) {
-    glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
-    glViewport(0, 0, W, H);
-    glUseProgram(d.edge);
-    glUniform1uiv(d.g_edge, 8, dl.post.edge);
-    glUniform1i(d.g_edge_on, edge_on ? 1 : 0); glUniform1i(d.g_fog_on, fog_on ? 1 : 0); glUniform1i(d.g_fog_alpha, (f.dispcnt & 0x40u) ? 1 : 0);
-    glUniform1ui(d.g_fog_color, dl.post.fog_color); glUniform1ui(d.g_fog_offset, dl.post.fog_offset); glUniform1ui(d.g_fog_shift, dl.post.fog_shift);
-    glUniform1uiv(d.g_density, 34, dl.post.density);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.col3d);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d.id3d);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, d.dep3d);
-    glActiveTexture(GL_TEXTURE0);
-    glBindVertexArray(d.vao_empty);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    d.layer3d = d.col_edge;
-  }
+  d.edge_on = edge_on && !(skip & 8); d.fog_on = fog_on && !(skip & 8); d.fog_alpha = (f.dispcnt & 0x40u) != 0;
+  d.post = dl.post;
 
   stage(-1);
   const auto T4 = clk::now();
@@ -1077,15 +1058,27 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
   // is 0.5; ALWAYS writes it), cleared 1 where it discarded.
   glClearDepthf(1.f); glClear(GL_DEPTH_BUFFER_BIT);
   glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
+  glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, d.dep3d);
+  glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, d.id3d);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, layer3d);
-  glUseProgram(d.fast);
-  glUniform1i(d.f_mode, mode);
+  const int v = d.edge_on || d.fog_on ? 1 : 0;
+  auto layer_uniforms = [&](const Impl::LayerLocs& l) {
+    if (!v) return;
+    glUniform1i(l.edge_on, d.edge_on ? 1 : 0); glUniform1i(l.fog_on, d.fog_on ? 1 : 0);
+    glUniform1uiv(l.edge, 8, d.post.edge); glUniform1i(l.fog_alpha, d.fog_alpha ? 1 : 0);
+    glUniform1ui(l.fog_color, d.post.fog_color); glUniform1ui(l.fog_offset, d.post.fog_offset); glUniform1ui(l.fog_shift, d.post.fog_shift);
+    glUniform1uiv(l.density, 34, d.post.density);
+  };
+  glUseProgram(d.fast[v]);
+  glUniform1i(d.f_mode[v], mode);
+  layer_uniforms(d.fast_l);
   if (!(bench_skip_ & 16)) glDrawArrays(GL_TRIANGLES, 0, 3);
   // Pass 2: the full composite, only where depth is still 1 (LESS against 0.5 fails elsewhere: early-Z skips them).
   if (full) {
     glDepthFunc(GL_LESS); glDepthMask(GL_FALSE);
-    glUseProgram(d.comp);
-    glUniform1i(d.u_mode, mode);
+    glUseProgram(d.comp[v]);
+    glUniform1i(d.u_mode[v], mode);
+    layer_uniforms(d.comp_l);
     glDrawArrays(GL_TRIANGLES, 0, 3);
   }
   { const GLenum dead = GL_DEPTH_ATTACHMENT; glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &dead); }   // the composite's depth: only within it
