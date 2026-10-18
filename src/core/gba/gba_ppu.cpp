@@ -67,26 +67,36 @@ void Ppu::draw_text(int bg, u32 y) {
   const u32 screen = ((cnt >> 8) & 0x1F) * 0x800, chars = ((cnt >> 2) & 3) * 0x4000;
   const bool bpp8 = cnt & 0x80;
   u16* out = bg_[bg].data();
-  for (u32 x = 0; x < 240; ++x) {
+  // A tile at a time: its map entry and its row of pixels once, then the pixels of it on this line.
+  for (u32 x = 0; x < 240;) {
     const u32 sx = (x + hofs) & (w - 1);
     u32 block = sx >> 8;
     if (sy >= 256) block += (w == 512) ? 2 : 1;
     const u32 ea = (screen + block * 0x800 + ((sy & 255) >> 3) * 64 + ((sx & 255) >> 3) * 2) & 0xFFFF;
     const u16 e = static_cast<u16>(vram[ea] | (vram[ea + 1] << 8));
-    u32 px = sx & 7, py = sy & 7;
-    if (e & 0x400) px = 7 - px;
-    if (e & 0x800) py = 7 - py;
+    const u32 py = (e & 0x800) ? 7 - (sy & 7) : sy & 7;
     const u32 tile = e & 0x3FF;
-    u32 idx;
+    const u32 x0 = sx & 7, n = std::min<u32>(8 - x0, 240 - x);
+    const u32 flip = (e & 0x400) ? 7 : 0;   // px = (x0 + i) ^ 7 when flipped
     if (bpp8) {
-      const u32 a = chars + tile * 64 + py * 8 + px;
-      idx = a < 0x10000 ? vram[a] : 0;
-      out[x] = idx ? static_cast<u16>((pal[idx] & 0x7FFF) | OPAQUE) : 0;
+      const u32 a = chars + tile * 64 + py * 8;   // 8-aligned: all in or all out of BG VRAM
+      u64 row = 0;
+      if (a < 0x10000) std::memcpy(&row, vram + a, 8);
+      for (u32 i = 0; i < n; ++i) {
+        const u32 idx = static_cast<u32>(row >> (((x0 + i) ^ flip) * 8)) & 0xFF;
+        out[x + i] = idx ? static_cast<u16>((pal[idx] & 0x7FFF) | OPAQUE) : 0;
+      }
     } else {
-      const u32 a = chars + tile * 32 + py * 4 + (px >> 1);
-      idx = a < 0x10000 ? (vram[a] >> ((px & 1) * 4)) & 15 : 0;
-      out[x] = idx ? static_cast<u16>((pal[(e >> 12) * 16 + idx] & 0x7FFF) | OPAQUE) : 0;
+      const u32 a = chars + tile * 32 + py * 4;
+      u32 row = 0;
+      if (a < 0x10000) std::memcpy(&row, vram + a, 4);
+      const u16* bank = pal + (e >> 12) * 16;
+      for (u32 i = 0; i < n; ++i) {
+        const u32 idx = (row >> (((x0 + i) ^ flip) * 4)) & 15;
+        out[x + i] = idx ? static_cast<u16>((bank[idx] & 0x7FFF) | OPAQUE) : 0;
+      }
     }
+    x += n;
   }
 }
 
@@ -176,36 +186,39 @@ void Ppu::draw_sprites(u32 y) {
       pc = static_cast<s16>(oam[p + 11]); pd = static_cast<s16>(oam[p + 15]);
     }
     const s32 iy = ly - bh / 2;
-    for (s32 ix = 0; ix < bw; ++ix) {
-      const s32 X = ox + ix;
-      if (X < 0 || X >= 240) continue;
-      s32 tx, ty;
-      if (affine) {
-        const s32 dx = ix - bw / 2;
-        tx = ((pa * dx + pb * iy) >> 8) + w / 2;
-        ty = ((pc * dx + pd * iy) >> 8) + h / 2;
-        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-      } else {
-        tx = (a1 & 0x1000) ? w - 1 - ix : ix;
-        ty = (a1 & 0x2000) ? h - 1 - ly : ly;
-      }
-      const u32 t = tile + static_cast<u32>(ty >> 3) * row_tiles + static_cast<u32>(tx >> 3) * (bpp8 ? 2 : 1);
-      u32 idx;
-      u16 col;
-      if (bpp8) {
-        idx = vram[0x10000 + (t & 0x3FF) * 32 + (ty & 7) * 8 + (tx & 7)];
-        col = pal[idx];
-      } else {
-        idx = (vram[0x10000 + (t & 0x3FF) * 32 + (ty & 7) * 4 + ((tx & 7) >> 1)] >> ((tx & 1) * 4)) & 15;
-        col = pal[bank * 16 + idx];
-      }
-      if (!idx) continue;
-      if (mode == 2) { objwin_[X] = 1; continue; }
+    const s32 ix0 = std::max<s32>(0, -ox), ix1 = std::min<s32>(bw, 240 - ox);   // the on-screen columns
+    auto put = [&](s32 X, u32 idx, u16 col) {
+      if (!idx) return;
+      if (mode == 2) { objwin_[X] = 1; return; }
       if (prio < obj_prio_[X]) {
         obj_[X] = static_cast<u16>((col & 0x7FFF) | OPAQUE);
         obj_prio_[X] = static_cast<u8>(prio);
         obj_flags_[X] = flags;
       }
+    };
+    const u16* bank_pal = pal + bank * 16;
+    if (!affine) {
+      // One row of the sprite: its tiles' row bytes, read along x.
+      const s32 ty = (a1 & 0x2000) ? h - 1 - ly : ly;
+      const bool hflip = a1 & 0x1000;
+      const u32 trow = tile + static_cast<u32>(ty >> 3) * row_tiles;
+      const u8* rowp = vram + 0x10000 + (ty & 7) * (bpp8 ? 8 : 4);
+      for (s32 ix = ix0; ix < ix1; ++ix) {
+        const s32 tx = hflip ? w - 1 - ix : ix;
+        const u32 t = (trow + static_cast<u32>(tx >> 3) * (bpp8 ? 2 : 1)) & 0x3FF;
+        if (bpp8) { const u32 idx = rowp[t * 32 + (tx & 7)]; put(ox + ix, idx, pal[idx]); }
+        else { const u32 idx = (rowp[t * 32 + ((tx & 7) >> 1)] >> ((tx & 1) * 4)) & 15; put(ox + ix, idx, bank_pal[idx]); }
+      }
+      continue;
+    }
+    for (s32 ix = ix0; ix < ix1; ++ix) {
+      const s32 dx = ix - bw / 2;
+      const s32 tx = ((pa * dx + pb * iy) >> 8) + w / 2;
+      const s32 ty = ((pc * dx + pd * iy) >> 8) + h / 2;
+      if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+      const u32 t = tile + static_cast<u32>(ty >> 3) * row_tiles + static_cast<u32>(tx >> 3) * (bpp8 ? 2 : 1);
+      if (bpp8) { const u32 idx = vram[0x10000 + (t & 0x3FF) * 32 + (ty & 7) * 8 + (tx & 7)]; put(ox + ix, idx, pal[idx]); }
+      else { const u32 idx = (vram[0x10000 + (t & 0x3FF) * 32 + (ty & 7) * 4 + ((tx & 7) >> 1)] >> ((tx & 1) * 4)) & 15; put(ox + ix, idx, bank_pal[idx]); }
     }
   }
   if (any_mosaic && mos_h > 1) {
@@ -248,30 +261,33 @@ void Ppu::compose(u32 y) {
   const u32 eva = std::min<u32>(16, bldalpha & 0x1F), evb = std::min<u32>(16, (bldalpha >> 8) & 0x1F);
   const u32 evy = std::min<u32>(16, reg16(0x54) & 0x1F);
   const u32 bgs = MODE_BGS[dispcnt & 7] & ((dispcnt >> 8) & 0xF);
-  // BGs in drawing order: priority, then number.
-  int order[4], prios[4], n = 0;
-  for (u32 p = 0; p < 4; ++p)
-    for (int b = 0; b < 4; ++b)
-      if ((bgs & (1u << b)) && (reg16(0x08 + b * 2) & 3) == p) { order[n] = b; prios[n] = static_cast<int>(p); ++n; }
+  // The two frontmost pixels of each column, painted back to front: per
+  // priority from 3 to 0, the BGs from the highest number down, then the
+  // sprites (which win over a BG of the same priority). Each layer drawn
+  // pushes the one in front to second place; the backdrop (id 5) is behind all.
+  u16 top[240], sec[240];
+  u8 top_id[240], sec_id[240];
+  std::fill_n(top, 240, bd); std::fill_n(sec, 240, bd);
+  std::fill_n(top_id, 240, u8{5}); std::fill_n(sec_id, 240, u8{5});
+  auto paint = [&](u32 x, u16 c, u8 id) { sec[x] = top[x]; sec_id[x] = top_id[x]; top[x] = c; top_id[x] = id; };
+  for (int p = 3; p >= 0; --p) {
+    for (int b = 3; b >= 0; --b) {
+      if (!(bgs & (1u << b)) || (reg16(0x08 + b * 2) & 3) != static_cast<u32>(p)) continue;
+      const u16* l = bg_[b].data();
+      for (u32 x = 0; x < 240; ++x)
+        if ((win_[x] & (1u << b)) && (l[x] & OPAQUE)) paint(x, l[x] & 0x7FFF, static_cast<u8>(b));
+    }
+    for (u32 x = 0; x < 240; ++x)
+      if (obj_prio_[x] == p && (win_[x] & 0x10)) paint(x, obj_[x] & 0x7FFF, 4);
+  }
   const u32 first = bldcnt & 0x3F, second = (bldcnt >> 8) & 0x3F;
   u32* out = fb_.data() + y * 240;
   for (u32 x = 0; x < 240; ++x) {
     const u8 w = win_[x];
-    u16 c[2] = {bd, bd};
-    u32 id[2] = {5, 5};
-    bool semi = false;
-    int found = 0, k = 0;
-    for (u32 p = 0; p < 4 && found < 2; ++p) {
-      if (obj_prio_[x] == p && (w & 0x10)) {
-        if (found == 0) semi = obj_flags_[x] & 1;
-        c[found] = obj_[x] & 0x7FFF; id[found] = 4; ++found;
-      }
-      for (; k < n && prios[k] == static_cast<int>(p) && found < 2; ++k) {
-        const int b = order[k];
-        if ((w & (1u << b)) && (bg_[b][x] & OPAQUE)) { c[found] = bg_[b][x] & 0x7FFF; id[found] = static_cast<u32>(b); ++found; }
-      }
-      while (k < n && prios[k] == static_cast<int>(p)) ++k;
-    }
+    const u16 c[2] = {top[x], sec[x]};
+    const u32 id[2] = {top_id[x], sec_id[x]};
+    const bool semi = id[0] == 4 && (obj_flags_[x] & 1);
+    const int found = id[0] != 5;
     u16 col = c[0];
     if (w & 0x20) {
       const bool top1 = first & (1u << id[0]), bot2 = found >= 1 && (second & (1u << id[1]));
