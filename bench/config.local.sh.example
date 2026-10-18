@@ -1,0 +1,5 @@
+# Copy to bench/config.local.sh and edit. Use ": ${NAME:=value}" so the
+# environment still wins for a single run.
+: "${DEVICE:=alice@rgds.local}"
+: "${BUILD_HOST:=builder@orb}"
+: "${GBA_ROMS:=$HOME/roms/gba}"
