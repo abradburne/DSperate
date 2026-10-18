@@ -82,6 +82,8 @@ bool Gba::load_rom(std::vector<u8> image, std::string* err) {
   std::memcpy(rom.get(), image.data(), image.size());
   rom_id = hash_bytes(image.data(), image.size());
   save.set_type(Save::detect(rom.get(), rom_size));
+  rtc.present = false;
+  for (u32 i = 0; i + 8 <= rom_size && !rtc.present; i += 4) rtc.present = std::memcmp(rom.get() + i, "SIIRTC_V", 8) == 0;
   map_memory();
   return true;
 }
@@ -124,6 +126,15 @@ void Gba::map_memory() {
   if (save.eeprom()) {
     if (rom_size <= 16 * 1024 * 1024) pt.unmap(0x0D000000, 0x01000000);
     else pt.unmap(0x0DFFF800, PAGE_SIZE);
+  }
+}
+
+void Gba::map_gpio() {
+  // While the port reads back, its 2 KB page (and the mirrors') takes the slow path, where
+  // the ROM is read directly around the six bytes of the port.
+  for (u32 base : {0x08000000u, 0x0A000000u, 0x0C000000u}) {
+    if (rtc.readable()) cpu->page_table.unmap(base, mem::PAGE_SIZE);
+    else cpu->page_table.map(base, mem::PAGE_SIZE, rom.get(), mem::PAGE_READABLE);
   }
 }
 
@@ -190,6 +201,9 @@ u8 Gba::read8(u32 addr) {
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) return static_cast<u8>(io_read16(addr & 0x3FE) >> ((addr & 1) * 8));
     break;
+  case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
+    if (gpio_at(addr) && rtc.readable()) return static_cast<u8>(rtc.read((addr - 0x080000C4) & ~1u) >> ((addr & 1) * 8));
+    return rom[addr & (ROM_MAX - 1)];
   case 0x0D: return rom[addr & (ROM_MAX - 1)];   // the EEPROM is 16-bit only
   case 0x0E: case 0x0F: return save.read8(addr);
   default:
@@ -209,6 +223,9 @@ u16 Gba::read16(u32 addr) {
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FE);
     break;
+  case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
+    if (gpio_at(addr) && rtc.readable()) return rtc.read(addr - 0x080000C4);
+    return rd16(rom.get() + (addr & (ROM_MAX - 1)));
   case 0x0D: if (eeprom_at(addr)) return save.eeprom_read(); return rd16(rom.get() + (addr & (ROM_MAX - 1)));
   case 0x0E: case 0x0F: return static_cast<u16>(save.read8(raw) * 0x0101u);
   default:
@@ -228,6 +245,9 @@ u32 Gba::read32(u32 addr) {
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FC) | (u32{io_read16((addr & 0x3FC) + 2)} << 16);
     break;
+  case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
+    if (gpio_at(addr) && rtc.readable()) return rtc.read(addr - 0x080000C4) | (u32{rtc.read(addr - 0x080000C4 + 2)} << 16);
+    return rd32(rom.get() + (addr & (ROM_MAX - 1)));
   case 0x0D: if (eeprom_at(addr)) return save.eeprom_read(); return rd32(rom.get() + (addr & (ROM_MAX - 1)));
   case 0x0E: case 0x0F: return save.read8(raw) * 0x01010101u;
   default:
@@ -269,7 +289,14 @@ void Gba::write16(u32 addr, u16 v) {
   case 0x07: wr16(oam.get() + (addr & 0x3FF), v); wr16(oam.get() + 0x400 + (addr & 0x3FF), v); return;
   case 0x0D: if (eeprom_at(addr)) save.eeprom_write(v); return;
   case 0x0E: case 0x0F: save_write_any(save, raw, static_cast<u8>(v >> ((raw & 1) * 8))); return;   // the byte the rotated store puts there
-  default: return;   // ROM (GPIO and EEPROM are phase 3), unmapped
+  case 0x08:
+    if (gpio_at(addr)) {
+      const bool was = rtc.readable();
+      rtc.write(addr - 0x080000C4, v);
+      if (rtc.readable() != was) map_gpio();
+    }
+    return;
+  default: return;   // ROM, unmapped
   }
 }
 
@@ -581,6 +608,8 @@ void Gba::reset() {
   ppu.reset();
   audio.reset();
   save.reset();
+  rtc.reset();
+  map_gpio();
   schedule(Ev::Ppu, HDRAW_CYCLES);
   schedule(Ev::Audio, Audio::SAMPLE_CYCLES);
   if (skip_bios) {
@@ -643,6 +672,7 @@ template <class S> void Gba::sync_state(S& s) {
   cpu->sync_state(s);
   ppu.sync_state(s);
   save.sync_state(s);
+  rtc.sync_state(s);
   audio.sync_state(s);
 }
 template void Gba::sync_state<state::Writer>(state::Writer&);
@@ -650,6 +680,7 @@ template void Gba::sync_state<state::Reader>(state::Reader&);
 
 void Gba::after_load() {
   cpu->host = this;
+  map_gpio();
   pipe = {};
   rebuild_timing();
   rescan();

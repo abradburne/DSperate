@@ -23,6 +23,7 @@
 #include "core/gba/gba_ppu.h"
 #include "core/gba/gba_audio.h"
 #include "core/gba/gba_save.h"
+#include "core/gba/gba_rtc.h"
 
 #include <array>
 #include <memory>
@@ -70,6 +71,8 @@ struct Gba {
   u32 game_code() const;           // header 0xAC, as a little-endian u32
   // The cartridge's save chip (gba_save.h), its type found by load_rom().
   Save save;
+  // The cartridge's GPIO port and real-time clock (gba_rtc.h), if it has one.
+  Rtc rtc;
 
   // Before reset(): start at the cartridge's entry with the registers the
   // BIOS leaves (the default), or run the BIOS's boot screen first.
@@ -179,7 +182,9 @@ private:
   std::vector<std::array<u8, 4>> timing_;   // per 32 KB: N16 S16 N32 S32 (CpuContext::timing7)
   void rebuild_timing();
   void map_memory();
-  bool eeprom_at(u32 addr) const;   // the EEPROM answers here (0x0D, or its last 256 bytes behind a 32 MB ROM)
+  bool eeprom_at(u32 addr) const;
+  bool gpio_at(u32 addr) const { return rtc.present && addr >= 0x080000C4 && addr < 0x080000CA; }
+  void map_gpio();   // the ROM page holding the GPIO port off the direct path while it reads back   // the EEPROM answers here (0x0D, or its last 256 bytes behind a 32 MB ROM)
   void run_cpu_until(u64 until);
   friend class Ppu;
 };

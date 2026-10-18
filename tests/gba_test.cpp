@@ -8,6 +8,7 @@
 #include "core/psg/gb_psg.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -254,9 +255,51 @@ void test_eeprom() {
   CHECK(file.size() == 8192 && file[5 * 8] == 0x01 && file[5 * 8 + 7] == 0xEF);
 }
 
+// The cartridge RTC, driven pin by pin as Pokemon's code does it.
+void test_rtc() {
+  Gba g;
+  std::vector<u8> rom = loop_cart();
+  rom.resize(0x400);
+  std::memcpy(rom.data() + 0x300, "SIIRTC_V001", 11);
+  CHECK(g.load_rom(std::move(rom)));
+  g.reset();
+  CHECK(g.rtc.present);
+  std::tm when{};
+  when.tm_year = 126; when.tm_mon = 9; when.tm_mday = 17; when.tm_hour = 21; when.tm_min = 5; when.tm_sec = 30; when.tm_isdst = -1;
+  g.rtc.fixed_now = static_cast<s64>(std::mktime(&when));   // Sat 17 Oct 2026, 21:05:30
+  const u32 DATA = 0x080000C4, DIR = 0x080000C6, CTL = 0x080000C8;
+  g.write16(CTL, 1);                       // readable
+  CHECK(g.read16(CTL) == 1);
+  auto begin = [&] { g.write16(DIR, 7); g.write16(DATA, 1); g.write16(DATA, 5); };   // SCK high, then CS high
+  auto end = [&] { g.write16(DATA, 1); };
+  auto out_byte = [&](u8 b) {
+    for (int i = 0; i < 8; ++i) { const u16 sio = static_cast<u16>(((b >> i) & 1) << 1); g.write16(DATA, 4 | sio); g.write16(DATA, 5 | sio); }
+  };
+  auto in_byte = [&] {
+    g.write16(DIR, 5);                     // SIO from the chip
+    u8 b = 0;
+    for (int i = 0; i < 8; ++i) { g.write16(DATA, 4); g.write16(DATA, 5); b |= static_cast<u8>(((g.read16(DATA) >> 1) & 1) << i); }
+    return b;
+  };
+  auto read_datetime = [&](u8 out[7]) { begin(); out_byte(0xA6); for (int i = 0; i < 7; ++i) out[i] = in_byte(); end(); };
+  u8 t[7];
+  read_datetime(t);
+  CHECK(t[0] == 0x26 && t[1] == 0x10 && t[2] == 0x17 && t[3] == 6);   // 2026-10-17, Saturday
+  CHECK((t[4] & 0x3F) == 0x21 && t[5] == 0x05 && t[6] == 0x30);
+  // Set 2001-02-03 04:05:06 and read it back.
+  begin(); out_byte(0x26);
+  for (u8 b : {u8{0x01}, u8{0x02}, u8{0x03}, u8{0x06}, u8{0x04}, u8{0x05}, u8{0x06}}) out_byte(b);
+  end();
+  read_datetime(t);
+  CHECK(t[0] == 0x01 && t[1] == 0x02 && t[2] == 0x03 && (t[4] & 0x3F) == 0x04 && t[5] == 0x05 && t[6] == 0x06);
+  // The ROM around the port still reads as ROM.
+  CHECK(g.read32(0x08000000) == 0xEAFFFFFE);
+}
+
 } // namespace
 
 int main() {
+  test_rtc();
   test_eeprom();
   test_psg();
   test_direct_sound();
