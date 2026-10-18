@@ -22,7 +22,7 @@ if(DSPERATE_GLES_INCLUDE AND DSPERATE_GLES_LIB)
 else()
   target_compile_definitions(dsperate_gles PUBLIC DSPERATE_GLES=0)
 endif()
-target_sources(dsperate PRIVATE gl_present.cpp)
+target_sources(dsperate PRIVATE gl_present.cpp gl_frame_presenter.cpp)
 target_link_libraries(dsperate PRIVATE dsperate_gles)
 # GCC < 9 requires a separate library for C++17 std::filesystem.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
