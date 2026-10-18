@@ -290,12 +290,12 @@ void main() {
 // side (x, x + 256, x + 512, x + 768; 6-bit RGB), u_bytes its top id, top
 // kind, top alpha, second id and window byte (x, x + 256, ... x + 1024), u_cls
 // its pixel classes, u_regs its effect registers (x) and master brightness
-// with the line's valid bit (y, bit 31).
+// with the line's valid bit (y, bit 31). Compiled for one scale (SCALE): a
+// division by a uniform was half the composite's GPU time on the G52.
 #define LINE_PLANES R"(
 precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
 uniform highp usampler2D u_px, u_bytes, u_cls, u_regs;
 uniform highp sampler2D u_3d;
-uniform int u_scale;
 uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness)
 out vec4 o_col;
 uint up(uint c, uint f, uint bias) { return c + ((((63u - c) * f) + bias) >> 4); }
@@ -319,9 +319,9 @@ vec4 finish(uint o, uint mb) {
 // reaches every pixel of a shown line, so there a class 1 pixel takes the
 // full composite too (a capture is taken before it). The full composite is
 // left (discarded) for pass 2.
-const char* kFastFS = "#version 310 es\n" LINE_PLANES R"(
+const char* kFastFS = LINE_PLANES R"(
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy), d = p / u_scale;
+  ivec2 p = ivec2(gl_FragCoord.xy), d = p / SCALE;
   uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
   uint mb = u_mode == 1 ? 0u : regs.y & 0xFFFFu;
   bool bright = ((mb >> 14) == 1u || (mb >> 14) == 2u) && (mb & 0x1Fu) != 0u;
@@ -340,7 +340,7 @@ void main() {
 // Engine A's colour effects and master brightness (kernels_ref.cpp
 // composite_line / output_line) per S x pixel, with the 3D layer's entries
 // taken from the hi-res frame.
-const char* kCompositeFS = "#version 310 es\n" LINE_PLANES R"(
+const char* kCompositeFS = LINE_PLANES R"(
 uint blend(uint a, uint b, uint eva, uint evb) {
   uint r = min((((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
   uint g = min(((((a >> 8) & 0x3Fu) * eva) + (((b >> 8) & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
@@ -356,7 +356,7 @@ uint blend_3d(uint a, uint b) {
   return r | (g << 8) | (bl << 16);
 }
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy), d = p / u_scale;
+  ivec2 p = ivec2(gl_FragCoord.xy), d = p / SCALE;
   uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
   uint top = texelFetch(u_px, ivec2(d.x + 512, d.y), 0).r, second = texelFetch(u_px, ivec2(d.x + 768, d.y), 0).r;
   uint top_id = texelFetch(u_bytes, d, 0).r, kind = texelFetch(u_bytes, ivec2(d.x + 256, d.y), 0).r;
@@ -544,8 +544,9 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.w_dispcnt = glGetUniformLocation(d.resolve, "u_dispcnt"); d.w_toon = glGetUniformLocation(d.resolve, "u_toon");
   glGenBuffers(3, d.polys);
   for (GLuint b : d.polys) { glBindBuffer(GL_SHADER_STORAGE_BUFFER, b); glBufferData(GL_SHADER_STORAGE_BUFFER, DS_MAX_POLYS * 32, nullptr, GL_STREAM_DRAW); }
-  d.comp = program(kFullVS, kCompositeFS, why);
-  d.fast = program(kFullVS, kFastFS, why);
+  const std::string scale_def = "#version 310 es\n#define SCALE " + std::to_string(d.S) + "\n";
+  d.comp = program(kFullVS, (scale_def + kCompositeFS).c_str(), why);
+  d.fast = program(kFullVS, (scale_def + kFastFS).c_str(), why);
   if (!d.fast) return false;
   d.edge = program(kFullVS, kEdgeFS, why);
   if (!d.edge) return false;
@@ -564,7 +565,6 @@ bool GlHires::init(u32 scale, std::string* why) {
     glUseProgram(pr);
     const char* names[] = {"u_px", "u_bytes", "u_cls", "u_regs", "u_3d"};
     for (int i = 0; i < 5; ++i) glUniform1i(glGetUniformLocation(pr, names[i]), i);
-    glUniform1i(glGetUniformLocation(pr, "u_scale"), static_cast<GLint>(d.S));
   }
   d.f_mode = glGetUniformLocation(d.fast, "u_mode");
   d.u_mode = glGetUniformLocation(d.comp, "u_mode");
