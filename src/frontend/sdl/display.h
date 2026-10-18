@@ -49,8 +49,9 @@ public:
   void close();
 
   void draw(const u32* const fb[SCREENS]);
-  // video.hires3d: the renderer tier opens its own GLES context (GlPresent)
-  // instead of an SDL_Renderer. Set before open().
+  // The renderer tier through a GLES context of its own (GlPresent) instead
+  // of an SDL_Renderer: hi-res 3D, and 1x windows drawn on the present
+  // thread (gl_frame_presenter.h). Set before open().
   void set_gl(bool on) { gl_wanted_ = on; }
   GlPresent* gl() { return glp_.get(); }
   void draw_gl_now(const u32* const fb[SCREENS]) { if (glp_) glp_->draw_now(views_, nviews_, fb); }   // on the present thread

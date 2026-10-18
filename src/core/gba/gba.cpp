@@ -680,7 +680,7 @@ void Gba::dma_run(int i) {
   Dma& d = dma_[i];
   const u16 ctl = d.control;
   const u32 timing = (ctl >> 12) & 3;
-  if (timing == 3) return;   // sound FIFO (DMA1/2: dma_fifo) and video capture (DMA3, not yet)
+  if (timing == 3) return;   // sound FIFO (DMA1/2: dma_fifo); DMA3's video capture is not emulated
   const bool word = ctl & 0x400;
   const s32 step = word ? 4 : 2;
   const u32 dmode = (ctl >> 5) & 3, smode = (ctl >> 7) & 3;

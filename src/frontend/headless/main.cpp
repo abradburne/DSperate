@@ -302,8 +302,8 @@ int main(int argc, char** argv) {
   const char* gba_bios = nullptr;      // --gba-bios FILE: a GBA BIOS dump instead of the built-in Cult-of-GBA BIOS
   bool gba_boot_bios = false;          // --gba-boot-bios: run the BIOS's boot screen instead of starting at the cartridge
   const char* gba_trace = nullptr;
-  bool gba_debug_log = false;
-  const char* gba_save_out = nullptr;  // --gba-save-out FILE: the save chip's bytes at the end          // --gba-debug-log: mGBA's debug-print port answers, lines to stderr
+  bool gba_debug_log = false;          // --gba-debug-log: mGBA's debug-print port answers, lines to stderr
+  const char* gba_save_out = nullptr;  // --gba-save-out FILE: the save chip's bytes at the end
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };

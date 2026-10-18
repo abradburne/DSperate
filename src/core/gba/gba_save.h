@@ -7,8 +7,8 @@
 // (SRAM_V, FLASH_V/FLASH512_V, FLASH1M_V, EEPROM_V); an EEPROM's size from
 // the first DMA that addresses it (9/73 bits: 512 B, 17/81 bits: 8 KB).
 //
-// Save files are the chip's bytes, as mGBA (and so DSlot's earlier stand-in)
-// writes them: EEPROM blocks of 8 bytes, the first bit out the top of byte 0.
+// Save files are the chip's bytes in mGBA's layout (so mGBA's saves carry
+// over): EEPROM blocks of 8 bytes, the first bit out the top of byte 0.
 #pragma once
 #include "core/types.h"
 

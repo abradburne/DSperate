@@ -82,7 +82,7 @@ public:
   // in lines[line] -- the resolved top and second records, ids, kind, alpha,
   // window byte and the line's effect registers -- so the line can be
   // composited again with the 3D taken from a hi-res frame. The CPU
-  // composite still runs: output(), capture and the 1x picture are as before.
+  // composite runs as well: output(), capture and the 1x picture are its.
   struct HiresLine {
     alignas(16) Pixel out[256];   // engine A's composited line, before master brightness (every line; Gpu fills it)
     alignas(16) Pixel under[256]; // what the 3D layer covers: the line selected without it (where cls is 1)

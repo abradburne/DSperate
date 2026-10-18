@@ -266,7 +266,7 @@ private:
   };
   std::array<Dma, 4> dma_{};
   void dma_write_control(int i, u16 v);
-  void dma_trigger(u32 timing);     // 1 VBlank, 2 HBlank (3 special: sound FIFO / video capture, phase 3)
+  void dma_trigger(u32 timing);     // 1 VBlank, 2 HBlank; special timing (3) is the sound FIFOs' (dma_fifo)
   void dma_run(int i);
   u32 dma_latch_ = 0;               // last value a DMA moved (open bus for its reads)
 
@@ -293,9 +293,9 @@ private:
   bool timing_static_ = false;              // the regions WAITCNT leaves alone are filled in
   void rebuild_timing();                    // the cartridge's regions, from WAITCNT
   void map_memory();
-  bool eeprom_at(u32 addr) const;
+  bool eeprom_at(u32 addr) const;   // the EEPROM answers here (0x0D, or its last 256 bytes behind a 32 MB ROM)
   bool gpio_at(u32 addr) const { return rtc.present && addr >= 0x080000C4 && addr < 0x080000CA; }
-  void map_gpio();   // the ROM page holding the GPIO port off the direct path while it reads back   // the EEPROM answers here (0x0D, or its last 256 bytes behind a 32 MB ROM)
+  void map_gpio();   // the ROM page holding the GPIO port off the direct path while it reads back
   void run_cpu_until(u64 until);
   friend class Ppu;
 };
