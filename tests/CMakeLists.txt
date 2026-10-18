@@ -58,6 +58,15 @@ target_link_libraries(test_gba PRIVATE dsperate_core)
 target_compile_definitions(test_gba PRIVATE GBA_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data/gba")
 add_test(NAME gba COMMAND test_gba)
 
+# The hi-res 3D path on an offscreen GLES 3.1 context (skipped without one).
+if(DSPERATE_GLES)
+  add_executable(test_gl_hires gl_hires_test.cpp)
+  target_link_libraries(test_gl_hires PRIVATE dsperate_gles)
+  target_include_directories(test_gl_hires PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME gl_hires COMMAND test_gl_hires)
+  set_tests_properties(gl_hires PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 add_executable(test_spu spu_test.cpp)
 target_link_libraries(test_spu PRIVATE dsperate_core)
 add_test(NAME spu COMMAND test_spu)

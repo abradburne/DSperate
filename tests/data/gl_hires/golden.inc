@@ -1,0 +1,18 @@
+// test_gl_hires --print on each renderer (gl_hires_test.cpp): the whole hi-res
+// picture per scene and scale. Regenerate after a change meant to alter output.
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "opaque", 2, 0x19467e7b2103eae2ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "opaque", 4, 0xf308278bbc50f342ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "translucent", 2, 0x7e7787e80ddb1805ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "translucent", 4, 0x28d71a2fa47573a5ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "shadow", 2, 0xf1e4dcfafad7dd05ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "shadow", 4, 0xd52811041eef24a5ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "edge_fog", 2, 0xac962da102bf8325ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "edge_fog", 4, 0x51f6c7ba24b1f0a5ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "perspective_wbuffer", 2, 0x5a4b7687c61c2b4dull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "perspective_wbuffer", 4, 0x774cafc2f59d0ce7ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "composite_2d", 2, 0xdea22046bdcf2325ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "composite_2d", 4, 0x4f4f33371257fb25ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "translucent_over_clear", 2, 0xf3f80dd63d17f6e5ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "translucent_over_clear", 4, 0xf2cb849ceca1f125ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "capture", 2, 0xf29578dc7c04cca5ull},
+{"llvmpipe (LLVM 23.1.1, 128 bits)", "capture", 4, 0xb975c5607e0dae65ull},
