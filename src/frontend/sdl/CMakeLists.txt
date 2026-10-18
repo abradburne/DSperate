@@ -6,11 +6,12 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 target_link_libraries(dsperate PRIVATE dsperate_core dsperate_frontend_video ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
 # video.hires3d: the hi-res 3D (gl_hires.cpp, a library of its own so the
-# tests can drive it, with DS_DEBUG's options) and the GLES present
-# (gl_present.cpp). Without GLES headers both compile as stubs that decline.
+# tests can drive it, with the GL helpers and DS_DEBUG's options) and the
+# GLES present (gl_present.cpp). Without GLES headers both compile as stubs
+# that decline.
 find_path(DSPERATE_GLES_INCLUDE GLES3/gl31.h)
 find_library(DSPERATE_GLES_LIB GLESv2)
-add_library(dsperate_gles STATIC gl_hires.cpp debug_options.cpp)
+add_library(dsperate_gles STATIC gl_hires.cpp gl_util.cpp debug_options.cpp)
 target_link_libraries(dsperate_gles PUBLIC dsperate_core)
 target_include_directories(dsperate_gles PUBLIC ${SDL2_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 if(DSPERATE_GLES_INCLUDE AND DSPERATE_GLES_LIB)

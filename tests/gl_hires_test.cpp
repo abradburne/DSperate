@@ -151,7 +151,7 @@ struct Scene {
   const char* name;
   std::function<void(NDS&)> setup;   // registers and VRAM, once
   std::function<void(Geo&)> draw;    // the frame's geometry, every frame
-  int mode = 0;                      // GlHires::render mode: 0 shown, 1 captured
+  sdl::GlHires::Output output = sdl::GlHires::kShown;
   // Translucent polygons blend in GL's fixed function on 8-bit targets, which
   // rounds where the DS truncates: such pixels may be one step (of 64) off.
   // Two translucent layers over each other: two steps. kNotCompared: a
@@ -196,7 +196,7 @@ std::vector<Scene> scenes() {
                  // Alpha 31 with an A3I5 texture: drawn as opaque where the texel is, blended where it is partial.
                  g.attr(31, 13); g.tex(1, TEX_A3I5, 2, 2); g.pal(0); g.color(0x7FFF); g.quad(150, 120, 246, 184, 0x080);
                  g.swap();
-               }, 0, 2});
+               }, sdl::GlHires::kShown, 2});
   s.push_back({"shadow", [base](NDS& nds) { base(nds, 0x0009); },
                [](Geo& g) {
                  g.identity(); g.viewport();
@@ -205,7 +205,7 @@ std::vector<Scene> scenes() {
                  g.attr(20, 0, 3); g.color(0); g.quad(40, 40, 200, 150, 0x600);      // the mask: behind the floor, so marked where it fails
                  g.attr(20, 5, 3); g.color(0); g.quad(40, 40, 200, 150, 0x080);      // the shadow: in front, drawn only where marked
                  g.swap();
-               }, 0, 1});
+               }, sdl::GlHires::kShown, 1});
   s.push_back({"edge_fog",
                [base](NDS& nds) {
                  base(nds, 0x00A9 | (1u << 8));   // texture, blend, edge marking, fog (colour and alpha), shift 1
@@ -222,7 +222,7 @@ std::vector<Scene> scenes() {
                  g.attr(31, 32, 0, false); g.color(kGreen); g.quad(160, 10, 250, 60, 0x0600);   // no fog bit
                  g.attr(16, 40, 0, true); g.color(kGreen); g.quad(20, 140, 120, 190, 0x0200);   // translucent: keeps the fog bit under it
                  g.swap();
-               }, 0, 1});
+               }, sdl::GlHires::kShown, 1});
   // Perspective, W-buffered: a textured floor receding to the horizon, fogged
   // by distance, a box in front of it and a translucent pane between.
   s.push_back({"perspective_wbuffer",
@@ -253,7 +253,7 @@ std::vector<Scene> scenes() {
                  g.vtx3(-0.2, -0.35, -1.0); g.vtx3(0.35, -0.35, -1.0); g.vtx3(0.35, 0.1, -1.0); g.vtx3(-0.2, 0.1, -1.0);
                  g.cmd(0x41, 0);
                  g.swap(true);
-               }, 0, 1, 2});
+               }, sdl::GlHires::kShown, 1, 2});
   // 2D over and under the 3D: BG1 (right half) in front of it, blended with
   // it as the second target, the 3D in front of the backdrop elsewhere; a
   // window without effects; master brightness over all.
@@ -277,7 +277,7 @@ std::vector<Scene> scenes() {
                  g.attr(18, 2); g.color(kBlue); g.quad(100, 60, 190, 110, 0x200);   // translucent, over the red
                  g.attr(31, 3); g.color(kGreen); g.quad(30, 110, 240, 190, 0x100);
                  g.swap();
-               }, 0, 1});
+               }, sdl::GlHires::kShown, 1});
   // A known gap, kept out of the 1x comparison: a translucent polygon over a
   // transparent rear plane. The DS writes it unblended (the rear plane's
   // alpha is 0); GL blends it with the clear colour, and the 2D compositor
@@ -296,7 +296,7 @@ std::vector<Scene> scenes() {
                  g.identity(); g.viewport();
                  g.notex(); g.attr(18, 2); g.color(kBlue); g.quad(60, 40, 220, 160, 0x200);
                  g.swap();
-               }, 0, kNotCompared});
+               }, sdl::GlHires::kShown, kNotCompared});
   s.push_back({"capture",
                [base](NDS& nds) {
                  base(nds, 0x0001);
@@ -311,7 +311,7 @@ std::vector<Scene> scenes() {
                  g.attr(31, 2); g.tex(7, TEX_CHECKER, 2, 2); g.color(0x7FFF); g.quad(60, 40, 200, 150, 0x200);
                  g.swap();
                },
-               1});
+               sdl::GlHires::kCaptured});
   return s;
 }
 
@@ -355,14 +355,14 @@ Result run_scene(const Scene& sc, u32 scale, const char* dump) {
   const auto& ref = nds.gpu.frame_3d_shown();
   const gpu::Engine2D::HiresLine* lines = nds.gpu.hires_lines();
   CHECK(scr >= 0 && ref.dlist && lines);
-  if (sc.mode == 1) CHECK(gpu::Gpu::hires_capture(nds.gpu.captured_last()) == 1);
+  if (sc.output == sdl::GlHires::kCaptured) CHECK(gpu::Gpu::hires_capture(nds.gpu.captured_last()) == 1);
   u32 atop = 0; u64 aep = 0;
   const std::vector<u32>& arena = nds.gpu3d.renderer().display_arena(&atop, &aep);
 
   sdl::GlHires gh;
   std::string why;
   CHECK(gh.init(scale, &why));
-  const unsigned tex = gh.render(*ref.dlist, arena, atop, aep, lines, sc.mode);
+  const unsigned tex = gh.render(*ref.dlist, arena, atop, aep, lines, sc.output);
   CHECK(tex != 0);
   const u32 W = 256 * scale, H = 192 * scale;
   GLuint fbo = 0;
@@ -378,7 +378,7 @@ Result run_scene(const Scene& sc, u32 scale, const char* dump) {
   // The 1x reference: the screen as shown, or for a capture engine A's
   // lines before master brightness (the 6-bit records, expanded as shown).
   std::vector<u32> ref1x(256 * 192);
-  if (sc.mode == 0) std::memcpy(ref1x.data(), nds.gpu.framebuffer(scr), ref1x.size() * 4);
+  if (sc.output == sdl::GlHires::kShown) std::memcpy(ref1x.data(), nds.gpu.framebuffer(scr), ref1x.size() * 4);
   else for (u32 y = 0; y < 192; ++y) for (u32 x = 0; x < 256; ++x) {
     const u32 o = lines[y].out[x];
     auto e = [](u32 c6) { return (c6 << 2) | (c6 >> 4); };

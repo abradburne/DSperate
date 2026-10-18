@@ -16,8 +16,7 @@ void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
 } // namespace ds::sdl
 #else
 #include "frontend/sdl/debug_options.h"
-
-#include <GLES3/gl31.h>
+#include "frontend/sdl/gl_util.h"
 
 #include <cstdio>
 #include <cstring>
@@ -58,15 +57,9 @@ void main() { o_col = vec4(texture(u_tex, v_uv).rgb, 1.0); }
 )";
 
 GLuint prog(const char* fs) {
-  auto sh = [](GLenum t, const char* src) {
-    GLuint s = glCreateShader(t); glShaderSource(s, 1, &src, nullptr); glCompileShader(s);
-    GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) { char log[1024]; glGetShaderInfoLog(s, sizeof log, nullptr, log); std::fprintf(stderr, "gl present: %s\n", log); }
-    return s;
-  };
-  GLuint p = glCreateProgram();
-  GLuint v = sh(GL_VERTEX_SHADER, kVS), f = sh(GL_FRAGMENT_SHADER, fs);
-  glAttachShader(p, v); glAttachShader(p, f); glLinkProgram(p); glDeleteShader(v); glDeleteShader(f);
+  std::string why;
+  const GLuint p = gl::program(kVS, fs, &why);
+  if (!p) std::fprintf(stderr, "gl present: %s\n", why.c_str());
   return p;
 }
 

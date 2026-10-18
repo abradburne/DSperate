@@ -3996,7 +3996,7 @@ sdl_ready:
                     ds::gpu::kern::active::capture_a15(g.lines[y].out, 256, v15);
                     ds::gpu::kern::active::output_vram_line(v15, 0, &c.img[y * 256]);
                   }
-                  c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
+                  c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, ds::sdl::GlHires::kCaptured);
                 }
                 static const bool dbg = ds::sdl::debug::options().hires_stats;
                 static u32 n = 0, n_now = 0, n_cap = 0, n_both = 0, n_fromcap = 0;
