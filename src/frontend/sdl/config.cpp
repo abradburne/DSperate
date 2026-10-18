@@ -182,6 +182,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios9i = /path/to/biosdsi9.bin  # the DSi BIOS pair: DSiWare (a .nds/.dsi/.srl/.cia, loose or zipped,
 # bios7i = /path/to/biosdsi7.bin  # marked [DSi] in the game list or named on the command line) runs on
                                 # the DSi machine and needs both; without them it is refused
+# gba_bios = /path/to/gba_bios.bin  # GBA mode (--gba): a 16 KB dump of the GBA's BIOS; unset or
+                                # missing, the built-in Cult-of-GBA BIOS. States made with one are
+                                # refused under the other
 # dsi_nand = /path/to/nand.bin  # --dsi-mode's NAND (a dump with its nocash footer) when --dsi-nand
                                 # is not given. Only --dsi-mode uses it (or a game named
                                 # BootMenuDSi.nds, which is the same thing without a command line):
