@@ -965,7 +965,12 @@ bool sync_dual_modes(ds::sdl::Display& a, ds::sdl::Display& b) {
 // come back through here with new values.
 bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Display& display2) {
   display.set_gpu_present(vs.gpu_present, vs.gpu_mode); display2.set_gpu_present(vs.gpu_present, vs.gpu_mode);
-  display.set_gl(vs.hires3d > 1); display2.set_gl(vs.hires3d > 1);
+  // The GLES present (gl_present.h) for hi-res 3D, and at 1x on the renderer
+  // sink for a window a screen with nearest scaling: the GL work runs on the
+  // present thread, so the emulation thread no longer waits on each panel's
+  // flip in turn as it did through SDL_Renderer.
+  const bool gl = vs.hires3d > 1 || (vs.want_sink == ds::frontend::Sink::Renderer && vs.dual_window && !vs.linear);
+  display.set_gl(gl); display2.set_gl(gl);
   if (vs.dual_window) {
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
@@ -3920,12 +3925,14 @@ sdl_ready:
             // Sun's field takes ~21 ms of GPU a frame, and waiting ran the whole
             // game at 47 fps). Decided per display period, so a game that moves
             // engine A between the screens through captures keeps each pair whole.
-            // DS_PRESENT_WAIT=1: always wait, as before.
+            // DS_PRESENT_WAIT=1: always wait, as before. At 1x the GPU's share is
+            // small and what is left of the job is its swap waiting for a flip:
+            // waiting is vsync pacing there, skipping a needless repeat.
             static const bool gl_hold = std::getenv("DS_PRESENT_WAIT") != nullptr;
             static int gl_left = 0;
             static bool gl_skipping = false;
             if (gl_left <= 0) {
-              gl_skipping = !gl_hold && !pt.done(gl_job);
+              gl_skipping = !gl_hold && gl_hires && !pt.done(gl_job);
               gl_left = std::max<int>(1, nds.gpu.display_phase_period());
             }
             --gl_left;
@@ -3994,12 +4001,12 @@ sdl_ready:
                   c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
                 }
                 static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr, dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
-                static u32 n = 0, n_now = 0, n_cap = 0, n_fromcap = 0;
-                ++n; n_now += now; n_cap += g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
+                static u32 n = 0, n_now = 0, n_cap = 0, n_both = 0, n_fromcap = 0;
+                ++n; n_now += now; n_cap += g.cap_kind == 1; n_both += now && g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
                 if (tr) { const auto& L = g.lines[96]; int c0 = 0, c1 = 0, c2 = 0; for (int x = 0; x < 256; ++x) { c0 += L.cls[x] == 0; c1 += L.cls[x] == 1; c2 += L.cls[x] == 2; }
                   std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d (%08x) shows %d/%d | l96 bld %04x eva %u evb %u evy %u mb %04x full %d cls %d/%d/%d out %08x\n", n, g.scr, g.mode, now, g.cap_kind, g.cap_raw, show[0], show[1],
                                L.bldcnt, L.eva, L.evb, L.evy, L.mbright, L.full, c0, c1, c2, L.out[128]); }
-                if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u screens shown from a capture\n", n, n_now, n_cap, n_fromcap);
+                if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u both, %u screens shown from a capture\n", n, n_now, n_cap, n_both, n_fromcap);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
             });

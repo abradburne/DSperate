@@ -38,6 +38,8 @@ public:
 
   struct Impl;
 private:
+  bool draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch);
+  unsigned composite(const gpu::Engine2D::HiresLine* lines, int mode);
   std::unique_ptr<Impl> d_;
   u32 scale_ = 1;
   int bench_skip_ = 0;   // DS_HIRES_BENCH
