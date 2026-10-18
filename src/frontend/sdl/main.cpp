@@ -1186,7 +1186,7 @@ static int run(int argc, char** argv) {
     // Without a NAND the title goes in the slot (NDS::prepare_dsi_hle).
     if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
   }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.hires3d", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.gba_bios", "paths.saves", "paths.states", "video.scale", "video.hires3d", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
