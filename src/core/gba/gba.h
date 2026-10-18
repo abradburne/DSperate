@@ -120,6 +120,77 @@ struct Gba {
     pf.next = addr;
   }
 
+  // Idle iterations (gba_interp.cpp): a loop whose whole iteration leaves
+  // the machine as it found it -- the same CPU registers, pipeline and
+  // prefetch buffer, every store rewriting the value already there, reads
+  // only from memory and from I/O that nothing but an event changes -- does
+  // the same again until the next event, so whole iterations are charged
+  // without being run. Games that wait for VBlank by polling a flag in RAM
+  // instead of halting (Advance Wars 2) spend most of their frame there.
+  // The proof holds across events until one could change what the loop
+  // sees: memory (DMA), the IRQ lines, the serial port, the keys
+  // (ext_epoch), or -- for a loop that reads DISPSTAT/VCOUNT -- the line
+  // (video_epoch).
+  struct IdleSnap {
+    u32 regs[16], cpsr, spsr, code_cycles, code_region, data_region;
+    Pipeline pipe; Prefetch pf; bool skip_once;
+  };
+  struct Idle {
+    u32 head = ~0u;          // the loop head being watched (r15 | Thumb)
+    u32 phase = 0;           // 0 seen once, 1 registers taken, 2 an iteration being checked
+    u32 backoff = 0, fails = 0;
+    u32 others = 0;          // backward jumps elsewhere since the head last came round
+    bool verify = false;     // stores are compared against memory (phase 2)
+    bool dirty = false;      // the checked iteration changed or read something it may not
+    bool reads_video = false;   // ... and it read DISPSTAT or VCOUNT
+    s32 mark = 0;            // budget at the start of the checked (or first) iteration
+    u32 mark_slice = 0;      // ... in this slice
+    s32 cost = 0;            // cycles an iteration takes, once measured (0: not yet)
+    // What the checked iteration stored over: each place once, with the value it had before.
+    struct Store { u8* p; u32 old; u32 n; };
+    static constexpr u32 MAX_STORES = 16;
+    Store stores[MAX_STORES];
+    u32 nstores = 0;
+    u32 ext = 0, video = 0;  // the epochs the proof was made in
+    IdleSnap snap{};
+  } idle;
+  u32 ext_epoch_ = 0, video_epoch_ = 0, slice_no_ = 0;
+  void idle_take(IdleSnap& s) const;
+  bool idle_same(const IdleSnap& s) const;
+  // At a taken backward branch to `key`: the cycles of whole iterations that may be skipped (0: none).
+  u32 idle_visit(u32 key) {
+    Idle& d = idle;
+    if (key != d.head) { if (d.head != ~0u && ++d.others < 64) return 0; }
+    else if (d.backoff) { --d.backoff; d.others = 0; return 0; }
+    return idle_check(key);
+  }
+  u32 idle_check(u32 key);
+  static constexpr s32 IDLE_MAX_ITER = 2048;   // cycles: longer iterations are work, not a wait
+  void idle_store(u8* p, u32 n) {   // before a store of n bytes at p, while an iteration is checked
+    Idle& d = idle;
+    for (u32 i = 0; i < d.nstores; ++i) {
+      if (d.stores[i].p == p && d.stores[i].n == n) return;
+      if (p < d.stores[i].p + d.stores[i].n && d.stores[i].p < p + n) { idle_spoil(); return; }   // overlaps another width: not followed
+    }
+    if (d.nstores == Idle::MAX_STORES) { idle_spoil(); return; }
+    u32 v = 0; std::memcpy(&v, p, n);
+    d.stores[d.nstores++] = {p, v, n};
+  }
+  bool idle_stores_undone() const {
+    for (u32 i = 0; i < idle.nstores; ++i) if (std::memcmp(idle.stores[i].p, &idle.stores[i].old, idle.stores[i].n)) return false;
+    return true;
+  }
+  // The checked iteration cannot be proved any more: stop checking it.
+  void idle_spoil() { idle.dirty = true; idle.verify = false; }
+  void idle_reset() { idle.head = ~0u; idle.verify = false; ++ext_epoch_; }
+  // A slow-path read by the CPU: fine if what it reads changes only at events.
+  void idle_read(u32 addr) {
+    if (!idle.verify) return;
+    const u32 off = addr - 0x04000000;
+    if (off >= IO_SIZE || (off >= 0x60 && off < 0xB0) || (off >= 0x100 && off < 0x110)) idle_spoil();
+    else if (off < 0x08) idle.reads_video = true;
+  }
+
   // ---- bus (gba_cpu_mem.h's slow paths; DMA uses the *_raw forms) ----
   u8  read8(u32 addr);
   u16 read16(u32 addr);
