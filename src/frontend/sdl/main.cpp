@@ -41,6 +41,7 @@
 #endif
 #include "audio.h"
 #include "config.h"
+#include "debug_options.h"
 #include "display.h"
 #include "hires_governor.h"
 #include "input.h"
@@ -89,16 +90,7 @@ namespace {
 // Gates startup chatter and hotkey echoes; errors, refusals and disk-touching
 // confirmations are never gated. DS_VERBOSE=1 enables.
 bool verbose() { static const bool v = std::getenv("DS_VERBOSE") != nullptr; return v; }
-
-// DS_MARK=1: stages a launcher times (the first frame, leaving), against CLOCK_BOOTTIME, the clock
-// a frontend that started us can log against too.
-void mark(const char* stage) {
-  static const bool on = std::getenv("DS_MARK") != nullptr;
-  if (!on) return;
-  timespec t{};
-  clock_gettime(CLOCK_BOOTTIME, &t);
-  std::fprintf(stderr, "dsperate: %.3f s %s\n", static_cast<double>(t.tv_sec) + t.tv_nsec / 1e9, stage);
-}
+using ds::sdl::debug::mark;   // DS_DEBUG=marks: launch stages for DSlot's log
 #define VLOG(...) do { if (verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
 
 
@@ -863,7 +855,7 @@ struct VideoSetup {
   ds::frontend::Sink panel_sink = ds::frontend::Sink::Count;   // Disp/Fbdev when one owns the panel (frontend/video/select.h)
   ds::frontend::Sink want_sink = ds::frontend::Sink::Count;    // explicit video.sink among the window sinks
   bool   gpu_present = false;
-  u32    hires3d = 1;   // video.hires3d (DS_HIRES3D): the 3D at this resolution on the display, 1-4 (GLES, renderer sink)
+  u32    hires3d = 1;   // video.hires3d: the 3D at this resolution on the display, 1-4 (GLES, renderer sink)
   ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: RGA, else Vulkan) | rga | vulkan
   int    upper_display = 0, lower_display = 1;   // dual-window: SDL display per physical panel
 };
@@ -1522,7 +1514,7 @@ static int run(int argc, char** argv) {
     for (const std::string& n : plan.notes) std::fprintf(stderr, "%s\n", n.c_str());
     vs.panel_sink = plan.panel;
     vs.want_sink = plan.want;
-    { const char* h = std::getenv("DS_HIRES3D"); vs.hires3d = static_cast<u32>(std::clamp(h ? std::atoi(h) : cfg.num("video.hires3d", 1), 1, 4)); }
+    vs.hires3d = static_cast<u32>(std::clamp(cfg.num("video.hires3d", 1), 1, 4));
     if (plan.unset_videodriver) unsetenv("SDL_VIDEODRIVER");
     if (plan.headless_driver) go_headless(plan.panel == ds::frontend::Sink::Disp ? "video.sink disp" : "video.sink fbdev");
   }
@@ -3917,7 +3909,7 @@ sdl_ready:
               ds::gpu::Renderer3D::DisplayList dl;
               std::vector<u32> arena; u32 arena_top = 0; u64 arena_epoch = ~0ull;
               const ds::gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for that frame (two alternate)
-              int scr = -1; u32 mode = 0; int cap_kind = 0; bool has_dl = false; u32 cap_raw = 0;
+              int scr = -1; u32 mode = 0; int cap_kind = 0; bool has_dl = false;
               struct Cap { std::vector<u32> img; unsigned tex = 0; };   // present thread: the last captures, 1x and hi-res
               Cap caps[3]; int cap_next = 0;
             };
@@ -3929,10 +3921,10 @@ sdl_ready:
             // Sun's field takes ~21 ms of GPU a frame, and waiting ran the whole
             // game at 47 fps). Decided per display period, so a game that moves
             // engine A between the screens through captures keeps each pair whole.
-            // DS_PRESENT_WAIT=1: always wait, as before. At 1x the GPU's share is
+            // DS_DEBUG=present-wait: always wait. At 1x the GPU's share is
             // small and what is left of the job is its swap waiting for a flip:
             // waiting is vsync pacing there, skipping a needless repeat.
-            static const bool gl_hold = std::getenv("DS_PRESENT_WAIT") != nullptr;
+            static const bool gl_hold = ds::sdl::debug::options().present_wait;
             static int gl_left = 0;
             static bool gl_skipping = false, gl_hi = true;
             if (gl_left <= 0) {   // resolution too changes only between display periods
@@ -3954,7 +3946,6 @@ sdl_ready:
                 gf.scr = scr;
                 gf.mode = nds.gpu.display_mode_a();
                 gf.cap_kind = ds::gpu::Gpu::hires_capture(nds.gpu.captured_last());
-                gf.cap_raw = nds.gpu.captured_last();
                 if (gf.mode == 1 || gf.cap_kind == 1) {
                   const auto& src = *ref.dlist;
                   gf.dl.polys.assign(src.polys.begin(), src.polys.begin() + src.npoly);
@@ -4007,12 +3998,9 @@ sdl_ready:
                   }
                   c.tex = gh->render(g.dl, g.arena, g.arena_top, g.arena_epoch, g.lines, 1);
                 }
-                static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr, dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
+                static const bool dbg = ds::sdl::debug::options().hires_stats;
                 static u32 n = 0, n_now = 0, n_cap = 0, n_both = 0, n_fromcap = 0;
                 ++n; n_now += now; n_cap += g.cap_kind == 1; n_both += now && g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
-                if (tr) { const auto& L = g.lines[96]; int c0 = 0, c1 = 0, c2 = 0; for (int x = 0; x < 256; ++x) { c0 += L.cls[x] == 0; c1 += L.cls[x] == 1; c2 += L.cls[x] == 2; }
-                  std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d (%08x) shows %d/%d | l96 bld %04x eva %u evb %u evy %u mb %04x full %d cls %d/%d/%d out %08x\n", n, g.scr, g.mode, now, g.cap_kind, g.cap_raw, show[0], show[1],
-                               L.bldcnt, L.eva, L.evb, L.evy, L.mbright, L.full, c0, c1, c2, L.out[128]); }
                 if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u both, %u screens shown from a capture\n", n, n_now, n_cap, n_both, n_fromcap);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);

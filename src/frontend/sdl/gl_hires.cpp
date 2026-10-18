@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/gl_hires.h"
-#include "core/gpu/kernels.h"
 
 #if !DSPERATE_GLES
 namespace ds::sdl {
@@ -12,6 +11,8 @@ bool GlHires::init(u32, std::string* why) { if (why) *why = "built without GLES"
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, int) { return 0; }
 } // namespace ds::sdl
 #else
+#include "frontend/sdl/debug_options.h"
+
 #include <GLES3/gl31.h>
 #include <SDL2/SDL.h>
 
@@ -19,7 +20,6 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -27,8 +27,6 @@ unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<
 namespace ds::sdl {
 
 namespace {
-
-bool g_ab_no_shadow = false;   // DS_HIRES_AB's second render
 
 using clk = std::chrono::steady_clock;
 double ms(clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); }
@@ -430,7 +428,7 @@ struct GlHires::Impl {
   GLuint dep_out = 0;
   GLint r_wbuf = -1;
   GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode[2] = {-1, -1}, f_mode[2] = {-1, -1}, r_split = -1, r_shadow = -1;
-  u32 nruns = 0;   // DS_HIRES_DEBUG: the last render's tail runs
+  u32 nruns = 0;   // hires-stats: the last render's tail runs
   // glColorMaski (OES/EXT_draw_buffers_indexed): the id plane's writes switched
   // on and off without changing the draw buffers, which on a tiler ends the
   // batch (a store and a reload of every attachment).
@@ -461,12 +459,12 @@ struct GlHires::Impl {
   Set sets[kSets];
   int set_k = 0, vb_k = 0;   // the planes' set (a composite's), the vertices' (a 3D draw's)
   GLuint layer3d = 0;        // the last draw3d's 3D layer for the composite, 0 when none
-  // DS_HIRES_DEBUG: CPU time per section (arena, fans, vbo, raster calls, planes, composite calls).
-  const bool timing = std::getenv("DS_HIRES_DEBUG") != nullptr;
+  // hires-stats: CPU time per section (arena, fans, vbo, raster calls, planes, composite calls).
+  const bool timing = debug::options().hires_stats;
   double t[6] = {}; u32 tn = 0;
-  // DS_HIRES_STAGES: GPU time per section (EXT_disjoint_timer_query) -- pre, winners, tail,
+  // hires-stages: GPU time per section (EXT_disjoint_timer_query) -- pre, winners, tail,
   // edge, composite, planes upload -- in a ring of four renders, read three renders late.
-  const bool stg = std::getenv("DS_HIRES_STAGES") != nullptr;
+  const bool stg = debug::options().hires_stages;
   GLuint tq[4][6] = {}; u32 tq_n = 0; double sg[6] = {}; u32 sgn = 0; int cur_q = -1;
   void stages_next() {   // a new render: collect the one three back
     if (!stg) return;
@@ -634,94 +632,32 @@ bool GlHires::init(u32 scale, std::string* why) {
 
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                          const gpu::Engine2D::HiresLine* lines, int mode) {
-  // DS_HIRES_BENCH=N[:skip,skip,...]: at render N, draw that frame again 60 times
-  // for each skip mask (DS_HIRES_SKIP bits), glFinish'd, and print the cost (debug).
-  if (static const char* b = std::getenv("DS_HIRES_BENCH"); b && d_) {
+  // hires-bench (debug_options.h): at render N, that frame drawn again 60
+  // times for each stage mask, glFinish'd, and the cost printed.
+  if (const debug::Options& o = debug::options(); o.hires_bench_at && d_) {
     static u32 n = 0; static bool in = false;
-    if (!in && ++n == static_cast<u32>(std::atoi(b))) {
+    if (!in && ++n == o.hires_bench_at) {
       in = true;
-      const char* l = std::strchr(b, ':');
-      std::vector<int> masks{0};
-      if (l) { masks.clear(); for (const char* q = l + 1; *q; ) { masks.push_back(std::atoi(q)); while (*q && *q != ',') ++q; if (*q) ++q; } }
-      for (int m : masks) {
-        bench_skip_ = m;
+      for (u32 m : o.hires_bench_masks) {
+        bench_skip_ = static_cast<int>(m);
         render(dl, arena, arena_top, arena_epoch, lines, mode); glFinish();
         const auto t0 = std::chrono::steady_clock::now();
         for (int k = 0; k < 60; ++k) render(dl, arena, arena_top, arena_epoch, lines, mode);
         glFinish();
-        std::fprintf(stderr, "bench skip %d: %.2f ms a render\n", m, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 60);
+        std::fprintf(stderr, "bench skip %u: %.2f ms a render\n", m, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 60);
       }
       bench_skip_ = 0; in = false;
     }
   }
   if (!d_ || !dl.valid || dl.epoch != arena_epoch || !lines) {
-    if (std::getenv("DS_HIRES_DEBUG")) {
+    if (debug::options().hires_stats) {
       static u32 nv = 0, ne = 0; nv += !dl.valid; ne += dl.valid && dl.epoch != arena_epoch;
       std::fprintf(stderr, "hires3d: frame drawn at 1x (%u without a list, %u stale arena)\n", nv, ne);
     }
     return 0;
   }
   if (!draw3d(dl, arena, arena_top, arena_epoch)) return 0;
-  const unsigned tex = composite(lines, mode);
-  Impl& d = *d_;
-  const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
-  glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
-  // DS_HIRES_PPM=<n>:<path>: the n-th composited frame, read back once (debug).
-  static u32 renders = 0;
-  ++renders;
-  // DS_HIRES_PPM=<n>[+<count>]:<path>: frames n..n+count-1, the path suffixed .<frame> after the first.
-  static const char* dump = std::getenv("DS_HIRES_PPM");
-  static const u32 dump_n = dump ? static_cast<u32>(std::atoi(dump)) : 0, dump_k = dump && std::strchr(dump, '+') && std::strchr(dump, '+') < std::strchr(dump, ':') ? static_cast<u32>(std::atoi(std::strchr(dump, '+') + 1)) : 1;
-  if (dump && std::strchr(dump, ':') && renders >= dump_n && renders < dump_n + dump_k) {
-    std::vector<u8> px(static_cast<size_t>(W) * H * 4);
-    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    const std::string path = std::string(std::strchr(dump, ':') + 1) + (renders == dump_n ? "" : "." + std::to_string(renders));
-    if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
-      std::fprintf(o, "P6\n%d %d\n255\n", W, H);
-      for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
-      std::fclose(o);
-      std::fprintf(stderr, "hires3d: frame %u written to %s\n", renders, path.c_str());
-    }
-  }
-  // DS_HIRES_AB=<n>:<prefix> (debug): render n three ways, for one frame side
-  // by side: <prefix>.hi.ppm as drawn, <prefix>.noshadow.ppm the same list
-  // drawn again without shadow volumes, <prefix>.1x.ppm the CPU's own 1x
-  // engine A line output (the reference: its raster has fog and shadows).
-  static const char* ab = std::getenv("DS_HIRES_AB");
-  static bool in_ab = false;
-  if (ab && !in_ab && lines && std::strchr(ab, ':') && renders == static_cast<u32>(std::atoi(ab))) {
-    const std::string pre = std::strchr(ab, ':') + 1;
-    auto save = [&](const std::string& path) {
-      std::vector<u8> px(static_cast<size_t>(W) * H * 4);
-      glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-      if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
-        std::fprintf(o, "P6\n%d %d\n255\n", W, H);
-        for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) std::fwrite(&px[i * 4], 1, 3, o);
-        std::fclose(o);
-      }
-    };
-    save(pre + ".hi.ppm");
-    if (std::FILE* o = std::fopen((pre + ".1x.ppm").c_str(), "wb")) {
-      std::fprintf(o, "P6\n256 192\n255\n");
-      u16 v15[256]; u32 rgb[256];
-      for (u32 y = 0; y < 192; ++y) {
-        gpu::kern::active::capture_a15(lines[y].out, 256, v15);
-        gpu::kern::active::output_vram_line(v15, 0, rgb);
-        for (u32 x = 0; x < 256; ++x) { const u8 c[3] = {static_cast<u8>(rgb[x] >> 16), static_cast<u8>(rgb[x] >> 8), static_cast<u8>(rgb[x])}; std::fwrite(c, 1, 3, o); }
-      }
-      std::fclose(o);
-    }
-    const int slot = d.slot;
-    in_ab = true; g_ab_no_shadow = true;
-    render(dl, arena, arena_top, arena_epoch, lines, mode);
-    glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_out[d.slot]);
-    save(pre + ".noshadow.ppm");
-    in_ab = false; g_ab_no_shadow = false;
-    d.slot = slot;
-    std::fprintf(stderr, "hires3d: render %u written to %s.{hi,noshadow,1x}.ppm\n", renders - 1, pre.c_str());
-  }
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  return tex;
+  return composite(lines, mode);
 }
 
 bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch) {
@@ -787,7 +723,6 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   }
   const u32 opaque_end = static_cast<u32>(d.vb.size());
   bool last_mask = false;
-  const bool no_shadow = g_ab_no_shadow;
   // A run of alpha-31 translucent polygons is drawn twice: their alpha-31
   // pixels as opaque ones, then the rest blended. Each part takes only the
   // polygons that can have such pixels (by their texture's alpha classes),
@@ -799,7 +734,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   };
   for (u32 k = prefix; k < dl.npoly; ++k) {
     const GpuPoly& p = dl.polys[k];
-    if (p.nverts < 3 || (no_shadow && (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW)))) continue;
+    if (p.nverts < 3) continue;
     // Shadow volumes: a mask (shadow, id 0) marks where its depth test fails;
     // a shadow (id > 0) draws only there. Consecutive masks add up; the first
     // mask after anything else starts the marks again (bit 13).
@@ -835,23 +770,6 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   new_run(~0u);
   const u32 total = static_cast<u32>(d.vb.size());
   d.nruns = static_cast<u32>(runs.size());
-  // DS_HIRES_POLYS=x0,y0,x1,y1 (DS pixels): the polygons over that box, once, at render 60 (debug).
-  if (static const char* pd = std::getenv("DS_HIRES_POLYS"); pd) {
-    static u32 n = 0;
-    static const u32 at = std::getenv("DS_HIRES_POLYS_AT") ? static_cast<u32>(std::atoi(std::getenv("DS_HIRES_POLYS_AT"))) : 60;
-    if (++n == at) {
-      int x0 = 0, y0 = 0, x1 = 0, y1 = 0; std::sscanf(pd, "%d,%d,%d,%d", &x0, &y0, &x1, &y1);
-      std::fprintf(stderr, "polys over %d,%d-%d,%d (first_ordered %u, %s):\n", x0, y0, x1, y1, f.first_ordered, wbuf ? "W" : "Z");
-      for (u32 k = 0; k < dl.npoly; ++k) {
-        const GpuPoly& p = dl.polys[k];
-        if (p.xmax < x0 || p.xmin > x1 || p.ybot < y0 || p.ytop > y1) continue;
-        s32 zl = 0x7FFFFFFF, zh = -0x7FFFFFFF;
-        for (u32 v = 0; v < p.nverts; ++v) { zl = std::min(zl, dl.verts[p.first_vert + v].z); zh = std::max(zh, dl.verts[p.first_vert + v].z); }
-        std::fprintf(stderr, "  #%u attr %08x flags %02x id %u alpha %u eq %d dw %d n %u x %d-%d y %d-%d z %d-%d\n", k, p.attr, p.flags, (p.attr >> 24) & 63, (p.attr >> 16) & 31,
-                     (p.attr >> 14) & 1, (p.attr >> 11) & 1, p.nverts, p.xmin, p.xmax, p.ytop, p.ybot, zl, zh);
-      }
-    }
-  }
 
   const auto T2 = clk::now();
   glBindVertexArray(d.vao);

@@ -42,7 +42,7 @@ private:
   unsigned composite(const gpu::Engine2D::HiresLine* lines, int mode);
   std::unique_ptr<Impl> d_;
   u32 scale_ = 1;
-  int bench_skip_ = 0;   // DS_HIRES_BENCH
+  int bench_skip_ = 0;   // hires-bench
 };
 
 } // namespace ds::sdl

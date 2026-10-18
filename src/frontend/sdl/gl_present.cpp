@@ -15,11 +15,12 @@ void GlPresent::draw(const frontend::View*, int, const u32* const[2]) {}
 void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
 } // namespace ds::sdl
 #else
+#include "frontend/sdl/debug_options.h"
+
 #include <GLES3/gl31.h>
 
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,47 @@ GLuint prog(const char* fs) {
   glAttachShader(p, v); glAttachShader(p, f); glLinkProgram(p); glDeleteShader(v); glDeleteShader(f);
   return p;
 }
+
+// present-hash (debug_options.h): a line per present of a window -- the
+// window, its present count, an FNV-1a hash of the picture (a word a pixel,
+// as glReadPixels gives it) and, for a window one 1x screen fills exactly,
+// the hash of that screen scaled up by nearest neighbour, which the picture
+// must equal (0 otherwise). Compares two builds' output frame by frame.
+void hash_present(int window, int ww, int wh, const u32* filled_by) {
+  static std::FILE* const out = [] { const std::string& p = debug::options().present_hash; return p.empty() ? nullptr : std::fopen(p.c_str(), "w"); }();
+  if (!out) return;
+  static std::vector<unsigned char> px;
+  static u32 presents[8] = {};
+  px.resize(static_cast<size_t>(ww) * wh * 4);
+  glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+  u64 h = 0xcbf29ce484222325ull;
+  for (size_t i = 0; i < px.size(); i += 4) { u32 w; std::memcpy(&w, &px[i], 4); h = (h ^ w) * 0x100000001b3ull; }
+  u64 e = 0;
+  if (filled_by) {
+    e = 0xcbf29ce484222325ull;
+    for (int y = wh - 1; y >= 0; --y) for (int x = 0; x < ww; ++x) {   // glReadPixels' order: bottom row first
+      const u32 c = filled_by[(y * 192 / wh) * 256 + x * 256 / ww];
+      e = (e ^ (((c >> 16) & 0xFF) | (c & 0xFF00) | ((c & 0xFF) << 16) | 0xFF000000u)) * 0x100000001b3ull;
+    }
+  }
+  std::fprintf(out, "%d %u %016llx %016llx\n", window, ++presents[window & 7], static_cast<unsigned long long>(h), static_cast<unsigned long long>(e));
+  std::fflush(out);
+}
+
+// present-ppm: what a window shows at its presents N..N+COUNT-1, as
+// <prefix>.<window>.<present>.ppm (the back buffer, before the swap).
+void dump_present(int window, u32 present, int ww, int wh) {
+  const debug::Options& o = debug::options();
+  if (o.present_ppm_prefix.empty() || present < o.present_ppm_from || present >= o.present_ppm_from + o.present_ppm_count) return;
+  std::vector<unsigned char> px(static_cast<size_t>(ww) * wh * 4);
+  glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+  const std::string path = o.present_ppm_prefix + "." + std::to_string(window) + "." + std::to_string(present) + ".ppm";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return;
+  std::fprintf(f, "P6\n%d %d\n255\n", ww, wh);
+  for (int y = wh - 1; y >= 0; --y) for (int x = 0; x < ww; ++x) std::fwrite(&px[(static_cast<size_t>(y) * ww + x) * 4], 1, 3, f);
+  std::fclose(f);
+}
 } // namespace
 
 struct GlPresent::Impl {
@@ -77,7 +119,7 @@ struct GlPresent::Impl {
   GLuint p_fb = 0, p_tex = 0, vao = 0, fbtex[2][3] = {};
   int fb_k[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
-  u32 frames = 0;           // DS_PRESENT_PPM
+  u32 presents = 0;         // present-ppm
   int index = 0;            // the window's order of opening
   int shown_screen = -1;
 };
@@ -177,46 +219,11 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
   glBindVertexArray(0);
   const int hires_shown = hires_tex_ ? hires_screen_ : -1;
   hires_tex_ = 0;
-  // DS_PRESENT_HASH=<file> (debug): a line per present of this window -- the
-  // window, its present count, an FNV-1a hash of the picture -- to compare two
-  // builds' output frame by frame (with DS_PRESENT_WAIT=1 every frame is shown).
-  if (static std::FILE* hf = [] { const char* p = std::getenv("DS_PRESENT_HASH"); return p ? std::fopen(p, "w") : nullptr; }(); hf) {
-    static std::vector<unsigned char> px;
-    static u32 presents[8] = {};
-    px.resize(static_cast<size_t>(ww) * wh * 4);
-    glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    u64 h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < px.size(); i += 4) { u32 w; std::memcpy(&w, &px[i], 4); h = (h ^ w) * 0x100000001b3ull; }   // a word a pixel: R, G, B, A (255)
-    // A window filled by one 1x screen: also the hash of that screen scaled
-    // up by nearest neighbour, which the picture must equal.
-    u64 e = 0;
-    if (nviews == 1 && views[0].shown && hires_shown != views[0].screen && views[0].rect.x == 0 && views[0].rect.y == 0 && views[0].rect.w == ww && views[0].rect.h == wh) {
-      const u32* src = fb[views[0].screen];
-      e = 0xcbf29ce484222325ull;
-      for (int y = wh - 1; y >= 0; --y) for (int x = 0; x < ww; ++x) {   // glReadPixels' order: bottom row first
-        const u32 c = src[(y * 192 / wh) * 256 + x * 256 / ww];
-        e = (e ^ (((c >> 16) & 0xFF) | (c & 0xFF00) | ((c & 0xFF) << 16) | 0xFF000000u)) * 0x100000001b3ull;
-      }
-    }
-    std::fprintf(hf, "%d %u %016llx %016llx\n", d.index, ++presents[d.index & 7], static_cast<unsigned long long>(h), static_cast<unsigned long long>(e));
-    std::fflush(hf);
-  }
-  // DS_PRESENT_PPM=<n>+<count>:<prefix>: what this window shows, frames n..n+count-1,
-  // as <prefix>.<window>.<frame>.ppm (debug; reads the back buffer before the swap).
-  if (static const char* dump = std::getenv("DS_PRESENT_PPM"); dump && std::strchr(dump, ':')) {
-    static const u32 n0 = static_cast<u32>(std::atoi(dump)), cnt = std::strchr(dump, '+') ? static_cast<u32>(std::atoi(std::strchr(dump, '+') + 1)) : 1;
-    ++d.frames;
-    if (d.frames >= n0 && d.frames < n0 + cnt) {
-      std::vector<unsigned char> px(static_cast<size_t>(ww) * wh * 4);
-      glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-      const std::string path = std::string(std::strchr(dump, ':') + 1) + "." + std::to_string(d.index) + "." + std::to_string(d.frames) + ".ppm";
-      if (std::FILE* o = std::fopen(path.c_str(), "wb")) {
-        std::fprintf(o, "P6\n%d %d\n255\n", ww, wh);
-        for (int y = wh - 1; y >= 0; --y) for (int x = 0; x < ww; ++x) std::fwrite(&px[(static_cast<size_t>(y) * ww + x) * 4], 1, 3, o);
-        std::fclose(o);
-      }
-    }
-  }
+  // A window one 1x screen fills exactly must show it scaled by nearest neighbour.
+  const bool filled = nviews == 1 && views[0].shown && hires_shown != views[0].screen && views[0].rect.x == 0 && views[0].rect.y == 0 &&
+                      views[0].rect.w == ww && views[0].rect.h == wh;
+  hash_present(d.index, ww, wh, filled ? fb[views[0].screen] : nullptr);
+  dump_present(d.index, ++d.presents, ww, wh);
   SDL_GL_SwapWindow(d.win);
 }
 

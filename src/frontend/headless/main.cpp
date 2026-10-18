@@ -932,14 +932,6 @@ int main(int argc, char** argv) {
     const ds::CpuContext& c = *nds.gba->cpu;
     std::fprintf(stderr, "gba: end pc %08x cpsr %08x r0 %08x r12 %08x, save %s written %u times\n", c.hot.regs[15] - (c.thumb() ? 4 : 8), c.hot.cpsr, c.hot.regs[0], c.hot.regs[12],
                  ds::gba::Save::name(nds.gba->save.type()), nds.gba->save.writes);
-    if (std::getenv("DS_GBA_DEBUG")) {
-      int nz = 0; for (ds::u32 k = 0; k < ds::gba::VRAM_SIZE; ++k) nz += nds.gba->vram[k] != 0;
-      std::fprintf(stderr, "gba: ie %04x if %04x ime %u dispstat %04x halted %d irq_pending %u biosif %04x handler %08x now %llu irq_at %llu ppu_at %llu\n", nds.gba->ie, nds.gba->if_, nds.gba->ime,
-                   nds.gba->io_read16(4), nds.gba->cpu->halted, nds.gba->cpu->hot.irq_pending, nds.gba->read16(0x03007FF8), nds.gba->read32(0x03007FFC),
-                   (unsigned long long)nds.gba->now(), (unsigned long long)nds.gba->event_at(ds::gba::Ev::Irq), (unsigned long long)nds.gba->event_at(ds::gba::Ev::Ppu));
-      std::fprintf(stderr, "gba: dispcnt %04x vram nonzero %d pal0 %04x pal1 %04x bg2pa %04x\n", nds.gba->io_read16(0), nz,
-                   nds.gba->palette[0] | (nds.gba->palette[1] << 8), nds.gba->palette[2] | (nds.gba->palette[3] << 8), nds.gba->io[0x20] | (nds.gba->io[0x21] << 8));
-    }
     if (gba_trace) std::fclose(static_cast<FILE*>(nds.gba->trace_user));
     if (gba_save_out) { const std::vector<ds::u8> d = nds.gba->save.data(); write_blob(gba_save_out, d.data(), d.size()); }
   }
