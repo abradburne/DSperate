@@ -484,8 +484,9 @@ void Gpu::on_scanline_start() {
     { prof::Scope j(prof::JOIN0); join_worker(JoinSite::Line0); }
     if (probe_enabled_) async_probe_check(true);
     { prof::Scope b(prof::BEGIN_FRAME); begin_frame(); }
-    nds_.frame_ready = true;
+    if (!end_at_vblank_) nds_.frame_ready = true;
   } else if (line_ == 192) {
+    if (nds_.vblank_input) nds_.vblank_input(nds_.vblank_input_ctx);
     if (probe_enabled_) async_probe_check(false);
     nds_.io.set_vblank(true);
     fifo_rd_ = fifo_wr_ = 0;
@@ -495,6 +496,10 @@ void Gpu::on_scanline_start() {
     { prof::Scope v(prof::GX_VBLANK); nds_.gpu3d.vblank(); }
     cap_prev_ = cap_last_; cap_last_ = capture_on_ ? (capcnt_ | (1u << 31)) : 0;   // hi-res 3D: what this frame captured
     if (capture_on_) { capcnt_ &= ~(1u << 31); capture_on_ = false; }
+    if (end_at_vblank_ && frame_begun_) {   // the frame ends here: every display line drawn first
+      { prof::Scope j(prof::JOIN0); join_worker(JoinSite::Line0); }
+      nds_.frame_ready = true;
+    }
   } else if (line_ == 262) nds_.io.set_vblank(false);
   if (line_ >= 2 && line_ < 194) nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_START);
   else if (line_ == 194) nds_.dma.stop(Cpu::ARM9, dma::MODE9_DISPLAY_START);

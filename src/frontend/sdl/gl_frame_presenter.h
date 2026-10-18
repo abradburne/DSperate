@@ -31,6 +31,7 @@
 #include "frontend/sdl/gl_hires.h"
 #include "frontend/sdl/hires_governor.h"
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -54,9 +55,13 @@ public:
   bool hires() const { return gl_ != nullptr; }
   void set_verbose(bool on) { verbose_ = on; }
 
+  // Optional callbacks: `handed_over` on the emulation thread once the frame
+  // is the present thread's (after the wait for the one before), `swapped`
+  // on the present thread once its windows have swapped (the vsync lock's).
+  struct Hooks { std::function<void()> handed_over, swapped; };
   // The frame just run, on `top` (and `second`, a window for the other
   // panel, or null); `fb` the screens' 1x pictures.
-  void present(NDS& nds, const u32* const fb[2], Display& top, Display* second);
+  void present(NDS& nds, const u32* const fb[2], Display& top, Display* second, const Hooks& hooks = {});
 
   // Frames left out so far, the GPU still drawing the one before.
   u64 late() const { return late_; }

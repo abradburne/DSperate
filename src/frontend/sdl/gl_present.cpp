@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/gl_present.h"
 #include "frontend/sdl/present_thread.h"
+#include "frontend/sdl/latency_log.h"
 
 #if !DSPERATE_GLES
 namespace ds::sdl {
@@ -113,6 +114,9 @@ struct GlPresent::Impl {
   int fb_k[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
   u32 presents = 0;         // present-ppm
+  // DS_DEBUG=latency: GL_TIMESTAMP_EXT queries placed before each swap, read
+  // back a few swaps later and turned into CLOCK_MONOTONIC (latency_log.h).
+  GLuint tsq[4] = {}; u64 tsq_post[4] = {}; u32 tsq_n = 0;
   int index = 0;            // the window's order of opening
   int shown_screen = -1;
 };
@@ -217,7 +221,37 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
                       views[0].rect.w == ww && views[0].rect.h == wh;
   hash_present(d.index, ww, wh, filled ? fb[views[0].screen] : nullptr);
   dump_present(d.index, ++d.presents, ww, wh);
+  if (latlog::on()) gpu_stamp(d);
   SDL_GL_SwapWindow(d.win);
+}
+
+void GlPresent::gpu_stamp(Impl& d) {
+  constexpr GLenum TIMESTAMP = 0x8E28, RESULT = 0x8866, AVAILABLE = 0x8867;
+  using Counter = void (*)(GLuint, GLenum);
+  using Get = void (*)(GLuint, GLenum, GLuint64*);
+  using GetI = void (*)(GLenum, GLint64*);
+  static const Counter counter = reinterpret_cast<Counter>(SDL_GL_GetProcAddress("glQueryCounterEXT"));
+  static const Get get = reinterpret_cast<Get>(SDL_GL_GetProcAddress("glGetQueryObjectui64vEXT"));
+  static const GetI geti = reinterpret_cast<GetI>(SDL_GL_GetProcAddress("glGetInteger64vEXT"));
+  if (!counter || !get || !geti) return;
+  if (!d.tsq[0]) glGenQueries(4, d.tsq);
+  // The oldest still out, once the GPU has it; its GPU time against the GPU's clock now.
+  if (d.tsq_n >= 3) {
+    const u32 k = (d.tsq_n - 3) % 4;
+    GLuint64 avail = 0, t = 0;
+    get(d.tsq[k], AVAILABLE, &avail);
+    if (avail) {
+      get(d.tsq[k], RESULT, &t);
+      GLint64 gnow = 0;
+      geti(TIMESTAMP, &gnow);
+      const u64 cnow = latlog::now_ns();
+      latlog::gpu_done(d.tsq_post[k], lat_screen_, cnow - static_cast<u64>(gnow - static_cast<GLint64>(t)));
+    }
+  }
+  const u32 k = d.tsq_n % 4;
+  counter(d.tsq[k], TIMESTAMP);
+  d.tsq_post[k] = latlog::current();
+  ++d.tsq_n;
 }
 
 } // namespace ds::sdl

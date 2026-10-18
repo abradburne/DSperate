@@ -20,6 +20,8 @@ constexpr Key kKeys[] = {
     {"hires-stats", nullptr, "hi-res 3D: CPU ms per stage, frames drawn / captured"},
     {"hires-stages", nullptr, "hi-res 3D: GPU ms per stage (timer queries)"},
     {"hires-bench", "N[:MASK/MASK/...]", "hi-res 3D: render N drawn 60 times per stage mask, timed"},
+    {"latency", "FILE", "button-to-flip latency, a line a frame"},
+    {"vsync-commit-ms", "MS", "the vsync lock's commit time, instead of its estimate"},
 };
 
 void usage() {
@@ -74,6 +76,8 @@ Options parse(const char* env) {
     else if (key == "hires-stats") o.hires_stats = true;
     else if (key == "hires-stages") o.hires_stages = true;
     else if (key == "hires-bench" && !value.empty()) parse_bench(value, o);
+    else if (key == "latency" && !value.empty()) o.latency = value;
+    else if (key == "vsync-commit-ms" && !value.empty()) o.vsync_commit_ms = std::strtod(value.c_str(), nullptr);
     else std::fprintf(stderr, "DS_DEBUG: '%s' not understood (DS_DEBUG=help lists the keys)\n", item.c_str());
   }
   return o;

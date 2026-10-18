@@ -84,6 +84,15 @@ public:
   bool vram_remap_begin(u32 moved_2d, const VramMap* next = nullptr);  // before a VRAMCNT remap: catch up, lift the trap; returns whether it was set (`next`: the map being switched to)
   void vram_remap_end(bool trapped);  // after: re-arm it
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
+  // Where a frame ends (run_frame returns): at line 0, as the next frame
+  // begins (false, the default), or at line 192 once the display lines are
+  // drawn (true). At 192 the input given for the next frame is there for the
+  // game's VBlank handler, which reads it at once, and the lines it then sets
+  // up are the next frame's: a press reaches the screen a frame sooner. The
+  // emulation is the same either way; the 2D worker's last lines are joined
+  // at 192 instead of overlapping the VBlank lines.
+  void set_end_at_vblank(bool on) { end_at_vblank_ = on; }
+  bool end_at_vblank() const { return end_at_vblank_; }
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
   // GBA mode (NDS::gba): the GBA's 240x160 picture centred on the top screen
@@ -99,11 +108,12 @@ public:
   // after the next frame's begin_frame(), so the set it does not write now. Two
   // sets, alternating per frame: a reader of this frame's (the present thread)
   // is not overwritten until the frame after next.
-  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data() + (hl_cur_ ^ SCREEN_H); }
+  // Ending at VBlank, the frame just run is the one begun, its set the one written.
+  const Engine2D::HiresLine* hires_lines() const { return hires_lines_.empty() ? nullptr : hires_lines_.data() + (end_at_vblank_ ? hl_cur_ : hl_cur_ ^ SCREEN_H); }
   // The 3D frame the display lines read: frame_3d() for the frame begun,
   // frame_3d_shown() for the frame just run (with hires_lines()).
   const Renderer3D::FrameRef& frame_3d() const { return ref3d_; }
-  const Renderer3D::FrameRef& frame_3d_shown() const { return ref3d_shown_; }
+  const Renderer3D::FrameRef& frame_3d_shown() const { return end_at_vblank_ ? ref3d_ : ref3d_shown_; }
   // Display capture, for hi-res 3D shown through VRAM (display mode 2): the
   // DISPCAPCNT of the frame just run and of the one before (bit 31 set when
   // it captured; 0 when it did not). hires_capture(cap) says whether such a
@@ -273,6 +283,7 @@ private:
 
   // Lazy-2D state for the frame in progress.
   bool lazy_enabled_ = true;
+  bool end_at_vblank_ = false;
   bool lazy_frame_ = false;       // this frame may batch
   // Per engine: a trapped store takes only the engine its address reaches out
   // of batched mode (a store into one engine's BG/OBJ VRAM cannot change what

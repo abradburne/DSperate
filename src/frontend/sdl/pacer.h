@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/types.h"
+#include "vsync_lock.h"
 
 #include <SDL2/SDL.h>
 
@@ -62,13 +63,24 @@ public:
 
   // Reset deadline to one period from now; call after unpause/load/speed change
   // so the gap isn't repaid as a burst.
-  void reset() { next_ = SDL_GetPerformanceCounter(); }
+  void reset() { next_ = SDL_GetPerformanceCounter(); if (lock_) lock_->reset(); }
+
+  // Deadlines from the panel's vblanks instead of the period (vsync_lock.h),
+  // while `engaged`: the console's own rate, no fast forward. The lock's
+  // count starts over whenever it engages.
+  void set_lock(VsyncLock* lock) { lock_ = lock; }
+  void set_lock_engaged(bool on) {
+    if (on && !engaged_ && lock_) lock_->reset();
+    engaged_ = on && lock_;
+  }
+  bool lock_engaged() const { return engaged_; }
 
   // This frame's deadline, in SDL performance-counter ticks (used by LAN slicing).
   Uint64 next() const { return next_; }
 
   // Advance to the next deadline and sleep until it. `scale`: 2.0 = double speed, 0.5 = half.
   void wait(double scale = 1.0) {
+    if (engaged_) { wait_lock(); return; }
     next_ += static_cast<Uint64>(scale > 0.0 ? period_ / scale : period_);
     Uint64 now = SDL_GetPerformanceCounter();
     if (relief_) now = relieve(now);
@@ -89,6 +101,18 @@ public:
   }
 
 private:
+  void wait_lock() {
+    const u64 start = lock_->next_start();
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (relief_) now = relieve(now);
+    if (start) {
+      const s64 left = static_cast<s64>(start) - static_cast<s64>(VblankClock::now_ns());   // CLOCK_MONOTONIC to the counter's clock
+      if (left > 0) { next_ = now + static_cast<Uint64>(static_cast<double>(left) * ticks_per_ns()); sleep_until(next_, now); }
+      else next_ = now;
+    } else next_ = now;
+    if (relief_) frame_start_ = SDL_GetPerformanceCounter();
+  }
+
   // Sleep wakeups run late by a variable amount, so the spin margin is learned
   // per-thread: jumps to any new lateness seen, decays slowly (1/512/frame,
   // ~2s to halve) otherwise. Asymmetric because being early costs microseconds
@@ -173,6 +197,8 @@ private:
     while (SDL_GetPerformanceCounter() < deadline) {}
   }
 
+  VsyncLock* lock_ = nullptr;
+  bool engaged_ = false;
   bool busy_ = false;        // spin the wait instead of sleeping it
   bool relief_ = false;      // keep this thread under the kernel's RT bandwidth cap
   double allowed_ = 0.0;     // fraction of wall time we may spend running at RT

@@ -254,6 +254,7 @@ int main(int argc, char** argv) {
   ds::mem::fmc::init();   // before any Bus exists: counts page-table churn from reset on
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
+  bool frame_end_vblank = false;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
@@ -378,6 +379,7 @@ int main(int argc, char** argv) {
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, vk_lean.h); declines to the CPU without Vulkan
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
+    else if (arg("--frame-end")) frame_end_vblank = std::strcmp(argv[++i], "vblank") == 0;   // line0 (default) | vblank: where a frame ends (Gpu::set_end_at_vblank)
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
     else if (flag("--frameskip-capture")) frameskip_capture = true;          // INEXACT: skip frames that display-capture too
     else if (arg("--hide-screen")) hide_screen = argv[++i];                 // top | bottom: the engine on it skips its drawing (Gpu::set_screen_visible); its half of the dump goes stale
@@ -701,6 +703,7 @@ int main(int argc, char** argv) {
       }
     });
   }
+  nds.gpu.set_end_at_vblank(frame_end_vblank);
   std::vector<double> frame_ms;
   frame_ms.reserve(static_cast<size_t>(frames));
   if (load_state) {

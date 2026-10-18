@@ -33,7 +33,7 @@ bool GlFramePresenter::open_hires(NDS& nds, Display& top, u32 scale, bool fallba
   return true;
 }
 
-void GlFramePresenter::present(NDS& nds, const u32* const fb[2], Display& top, Display* second) {
+void GlFramePresenter::present(NDS& nds, const u32* const fb[2], Display& top, Display* second, const Hooks& hooks) {
   PresentThread& pt = PresentThread::get();
   if (period_left_ <= 0) {   // the resolution too changes only between display periods
     hi_now_ = gl_ && governor_.hires();
@@ -46,9 +46,10 @@ void GlFramePresenter::present(NDS& nds, const u32* const fb[2], Display& top, D
                  governor_.drops(), governor_.wait_frames());
   if (skipping_) { ++late_; return; }
   pt.wait(job_);
+  if (hooks.handed_over) hooks.handed_over();
   snapshot(nds, fb);
   Display* const wins[2] = {&top, second};
-  job_ = pt.post([this, wins] { draw(wins); });
+  job_ = pt.post([this, wins, swapped = hooks.swapped] { draw(wins); if (swapped) swapped(); });
 }
 
 // What the job reads, copied while the emulation waits: the screens, and
