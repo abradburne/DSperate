@@ -219,7 +219,8 @@ private:
   u16  debug_read16(u32 addr) const { return addr == 0x04FFF780 && debug_on_ ? 0x1DEA : 0; }
   void debug_write(u32 addr, u32 v, u32 width);
   std::vector<std::array<u8, 4>> timing_;   // per 32 KB: N16 S16 N32 S32 (CpuContext::timing7)
-  void rebuild_timing();
+  bool timing_static_ = false;              // the regions WAITCNT leaves alone are filled in
+  void rebuild_timing();                    // the cartridge's regions, from WAITCNT
   void map_memory();
   bool eeprom_at(u32 addr) const;
   bool gpio_at(u32 addr) const { return rtc.present && addr >= 0x080000C4 && addr < 0x080000CA; }

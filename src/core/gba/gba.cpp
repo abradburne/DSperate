@@ -144,10 +144,13 @@ void Gba::rebuild_timing() {
   auto fill = [&](u32 region, u8 n16, u8 s16, u8 n32, u8 s32) {
     for (u32 i = region << 9; i < (region + 1) << 9; ++i) timing_[i] = {n16, s16, n32, s32};
   };
-  for (u32 r = 0; r < 256; ++r) fill(r, 1, 1, 1, 1);
-  fill(0x02, 3, 3, 6, 6);
-  fill(0x05, 1, 1, 2, 2);
-  fill(0x06, 1, 1, 2, 2);
+  if (!timing_static_) {   // everything but the cartridge's regions is fixed: once
+    for (u32 r = 0; r < 256; ++r) fill(r, 1, 1, 1, 1);
+    fill(0x02, 3, 3, 6, 6);
+    fill(0x05, 1, 1, 2, 2);
+    fill(0x06, 1, 1, 2, 2);
+    timing_static_ = true;
+  }
   auto rom = [&](u32 region, u32 n, u32 s) {
     const u8 N = static_cast<u8>(1 + n), S = static_cast<u8>(1 + s);
     fill(region, N, S, static_cast<u8>(N + S), static_cast<u8>(2 * S));
