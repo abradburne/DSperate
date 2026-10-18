@@ -47,11 +47,10 @@ Gba::Gba()
     : cpu(new CpuContext),
       bios(mem::alloc_page_buf(BIOS_SIZE)), ewram(mem::alloc_page_buf(EWRAM_SIZE)), iwram(mem::alloc_page_buf(IWRAM_SIZE)),
       palette(mem::alloc_page_buf(2 * PALETTE_SIZE)), vram(mem::alloc_page_buf(VRAM_SIZE)), oam(mem::alloc_page_buf(2 * OAM_SIZE)),
-      rom(mem::alloc_page_buf(ROM_MAX)), sram(mem::alloc_page_buf(SRAM_SIZE)),
+      rom(mem::alloc_page_buf(ROM_MAX)),
       ppu(*this), audio(*this), timing_(size_t{1} << 17) {
   std::memcpy(bios.get(), kCultBios, BIOS_SIZE);
   bios_id = hash_bytes(bios.get(), BIOS_SIZE);
-  std::memset(sram.get(), 0xFF, SRAM_SIZE);
   for (u32 a = 0; a < ROM_MAX; a += 2) wr16(rom.get() + a, static_cast<u16>(a >> 1));   // open bus past the end of a cart
   map_memory();
   reset();
@@ -82,6 +81,8 @@ bool Gba::load_rom(std::vector<u8> image, std::string* err) {
   for (u32 a = 0; a < ROM_MAX; a += 2) wr16(rom.get() + a, static_cast<u16>(a >> 1));
   std::memcpy(rom.get(), image.data(), image.size());
   rom_id = hash_bytes(image.data(), image.size());
+  save.set_type(Save::detect(rom.get(), rom_size));
+  map_memory();
   return true;
 }
 
@@ -92,11 +93,14 @@ std::string Gba::title() const {
 }
 u32 Gba::game_code() const { return rd32(rom.get() + 0xAC); }
 
-std::vector<u8> Gba::save_data() const { return std::vector<u8>(sram.get(), sram.get() + 0x8000); }
-bool Gba::load_save(const u8* data, size_t n) {
-  if (!n || n > SRAM_SIZE) return false;
-  std::memcpy(sram.get(), data, n);
-  return true;
+// A game with no save string that writes to 0x0E anyway gets SRAM.
+static void save_write_any(Save& s, u32 addr, u8 v) {
+  if (s.type() == Save::Type::None) s.set_type(Save::Type::Sram);
+  s.write8(addr, v);
+}
+
+bool Gba::eeprom_at(u32 addr) const {
+  return save.eeprom() && (addr >> 24) == 0x0D && (rom_size <= 16 * 1024 * 1024 || addr >= 0x0DFFFF00);
 }
 
 // ---- memory map --------------------------------------------------------------
@@ -115,6 +119,12 @@ void Gba::map_memory() {
   // take the slow path (byte stores widen to halfwords or vanish).
   for (u32 a = 0x06000000; a < 0x07000000; a += PAGE_SIZE) pt.map(a, PAGE_SIZE, vram.get() + vram_off(a), PAGE_READABLE);
   for (u32 a = 0x08000000; a < 0x0E000000; a += ROM_MAX) pt.map(a, ROM_MAX, rom.get(), PAGE_READABLE);
+  // An EEPROM takes the 0x0D region (all of it, or the last page behind a
+  // 32 MB ROM) off the direct path.
+  if (save.eeprom()) {
+    if (rom_size <= 16 * 1024 * 1024) pt.unmap(0x0D000000, 0x01000000);
+    else pt.unmap(0x0DFFF800, PAGE_SIZE);
+  }
 }
 
 void Gba::rebuild_timing() {
@@ -180,7 +190,8 @@ u8 Gba::read8(u32 addr) {
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) return static_cast<u8>(io_read16(addr & 0x3FE) >> ((addr & 1) * 8));
     break;
-  case 0x0E: case 0x0F: return sram[addr & 0x7FFF];
+  case 0x0D: return rom[addr & (ROM_MAX - 1)];   // the EEPROM is 16-bit only
+  case 0x0E: case 0x0F: return save.read8(addr);
   default:
     if (u8* p = cpu->page_table.read_ptr(addr)) return *p;
     break;
@@ -189,6 +200,7 @@ u8 Gba::read8(u32 addr) {
 }
 
 u16 Gba::read16(u32 addr) {
+  const u32 raw = addr;   // SRAM/Flash: an 8-bit bus, the address as given
   addr &= ~1u;
   switch (addr >> 24) {
   case 0x00:
@@ -197,7 +209,8 @@ u16 Gba::read16(u32 addr) {
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FE);
     break;
-  case 0x0E: case 0x0F: return static_cast<u16>(sram[addr & 0x7FFF] * 0x0101u);
+  case 0x0D: if (eeprom_at(addr)) return save.eeprom_read(); return rd16(rom.get() + (addr & (ROM_MAX - 1)));
+  case 0x0E: case 0x0F: return static_cast<u16>(save.read8(raw) * 0x0101u);
   default:
     if (u8* p = cpu->page_table.read_ptr(addr)) return rd16(p);
     break;
@@ -206,6 +219,7 @@ u16 Gba::read16(u32 addr) {
 }
 
 u32 Gba::read32(u32 addr) {
+  const u32 raw = addr;
   addr &= ~3u;
   switch (addr >> 24) {
   case 0x00:
@@ -214,7 +228,8 @@ u32 Gba::read32(u32 addr) {
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FC) | (u32{io_read16((addr & 0x3FC) + 2)} << 16);
     break;
-  case 0x0E: case 0x0F: return sram[addr & 0x7FFF] * 0x01010101u;
+  case 0x0D: if (eeprom_at(addr)) return save.eeprom_read(); return rd32(rom.get() + (addr & (ROM_MAX - 1)));
+  case 0x0E: case 0x0F: return save.read8(raw) * 0x01010101u;
   default:
     if (u8* p = cpu->page_table.read_ptr(addr)) return rd32(p);
     break;
@@ -237,12 +252,13 @@ void Gba::write8(u32 addr, u8 v) {
     return;
   }
   case 0x07: return;                                                 // OAM ignores byte stores
-  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = v; save_dirty = true; ++save_writes; return;
+  case 0x0E: case 0x0F: save_write_any(save, addr, v); return;
   default: return;
   }
 }
 
 void Gba::write16(u32 addr, u16 v) {
+  const u32 raw = addr;
   addr &= ~1u;
   switch (addr >> 24) {
   case 0x02: wr16(ewram.get() + (addr & (EWRAM_SIZE - 1)), v); return;
@@ -251,14 +267,15 @@ void Gba::write16(u32 addr, u16 v) {
   case 0x05: wr16(palette.get() + (addr & 0x3FF), v); wr16(palette.get() + 0x400 + (addr & 0x3FF), v); return;
   case 0x06: wr16(vram.get() + vram_off(addr), v); return;
   case 0x07: wr16(oam.get() + (addr & 0x3FF), v); wr16(oam.get() + 0x400 + (addr & 0x3FF), v); return;
-  case 0x0E: case 0x0F: sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 1) * 8)); save_dirty = true; ++save_writes; return;
+  case 0x0D: if (eeprom_at(addr)) save.eeprom_write(v); return;
+  case 0x0E: case 0x0F: save_write_any(save, raw, static_cast<u8>(v >> ((raw & 1) * 8))); return;   // the byte the rotated store puts there
   default: return;   // ROM (GPIO and EEPROM are phase 3), unmapped
   }
 }
 
 void Gba::write32(u32 addr, u32 v) {
+  if ((addr >> 24) == 0x0E || (addr >> 24) == 0x0F) { save_write_any(save, addr, static_cast<u8>(v >> ((addr & 3) * 8))); return; }
   addr &= ~3u;
-  if ((addr >> 24) == 0x0E || (addr >> 24) == 0x0F) { sram[addr & 0x7FFF] = static_cast<u8>(v >> ((addr & 3) * 8)); save_dirty = true; ++save_writes; return; }
   write16(addr, static_cast<u16>(v));
   write16(addr + 2, static_cast<u16>(v >> 16));
 }
@@ -478,6 +495,7 @@ void Gba::dma_run(int i) {
   if (d.src >= 0x08000000 && d.src < 0x0E000000) sinc = step;   // cartridge reads always increment
   const u32 n = d.left;
   u32 src = d.src, dst = d.dst;
+  if ((dst >> 24) == 0x0D) save.eeprom_dma(n);   // an EEPROM's size, from its first command
   const u8* ts = timing_[src >> 15].data();
   const u8* td = timing_[dst >> 15].data();
   u64 cycles = 2;
@@ -562,6 +580,7 @@ void Gba::reset() {
   rebuild_timing();
   ppu.reset();
   audio.reset();
+  save.reset();
   schedule(Ev::Ppu, HDRAW_CYCLES);
   schedule(Ev::Audio, Audio::SAMPLE_CYCLES);
   if (skip_bios) {
@@ -616,7 +635,6 @@ template <class S> void Gba::sync_state(S& s) {
   s.blob(palette.get(), 2 * PALETTE_SIZE);
   s.blob(vram.get(), VRAM_SIZE);
   s.blob(oam.get(), 2 * OAM_SIZE);
-  s.blob(sram.get(), SRAM_SIZE);
   s.blob(io.data(), IO_SIZE);
   s.fields(ie, if_, ime, ev_at_, now_, vcount_, in_hblank_, keyinput_, bios_latch_, dma_latch_, frame_count);
   for (Timer& t : timers_) s.fields(t.reload, t.control, t.counter, t.start);
@@ -624,6 +642,7 @@ template <class S> void Gba::sync_state(S& s) {
   s.end();
   cpu->sync_state(s);
   ppu.sync_state(s);
+  save.sync_state(s);
   audio.sync_state(s);
 }
 template void Gba::sync_state<state::Writer>(state::Writer&);

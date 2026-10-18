@@ -511,8 +511,8 @@ int main(int argc, char** argv) {
     nds.gba->skip_bios = !gba_boot_bios;
     nds.gba->reset();
     const ds::u32 code = nds.gba->game_code();
-    std::fprintf(stderr, "gba: \"%s\" %.4s, %u KB, BIOS %s\n", nds.gba->title().c_str(), reinterpret_cast<const char*>(&code),
-                 nds.gba->rom_size >> 10, nds.gba->bios_native ? "dump" : "Cult-of-GBA (built in)");
+    std::fprintf(stderr, "gba: \"%s\" %.4s, %u KB, BIOS %s, save %s\n", nds.gba->title().c_str(), reinterpret_cast<const char*>(&code),
+                 nds.gba->rom_size >> 10, nds.gba->bios_native ? "dump" : "Cult-of-GBA (built in)", ds::gba::Save::name(nds.gba->save.type()));
     if (gba_trace) {
       FILE* f = std::fopen(gba_trace, "w");
       if (!f) { std::fprintf(stderr, "could not open %s\n", gba_trace); return 1; }

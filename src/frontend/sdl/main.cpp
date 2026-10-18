@@ -119,7 +119,7 @@ const char* kUsage =
     "  --gba           a Game Boy Advance cartridge (implied by .gba; a .zip that holds no DS ROM\n"
     "                  is tried as one): the DS in GBA mode, the picture on the top screen at its own\n"
     "                  size. Its BIOS is paths.gba_bios / --gba-bios F (a 16 KB dump), else the\n"
-    "                  built-in Cult-of-GBA BIOS. Battery saves are plain SRAM for now; no sound yet.\n"
+    "                  built-in Cult-of-GBA BIOS. Saves: SRAM, Flash or EEPROM, as the ROM says.\n"
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
     "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
     "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
@@ -334,13 +334,14 @@ bool aa_on(const std::string& v) {
 void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
 
 void load_save(NDS& nds, const std::string& path) {
-  if (nds.gba) {   // GBA mode: plain SRAM (Flash and EEPROM are to come)
+  if (nds.gba) {   // GBA mode: SRAM, Flash or EEPROM, as the ROM says
+    VLOG("save: %s\n", ds::gba::Save::name(nds.gba->save.type()));
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return;
-    std::vector<u8> data(ds::gba::SRAM_SIZE);
+    std::vector<u8> data(ds::gba::SAVE_MAX);
     const size_t got = std::fread(data.data(), 1, data.size(), f);
     std::fclose(f);
-    if (got && nds.gba->load_save(data.data(), got)) VLOG("save: loaded %zu bytes from %s\n", got, path.c_str());
+    if (got && nds.gba->save.load(data.data(), got)) VLOG("save: loaded %zu bytes from %s\n", got, path.c_str());
     return;
   }
   if (!nds.cart) return;
@@ -369,14 +370,15 @@ void load_save(NDS& nds, const std::string& path) {
 
 void write_save(NDS& nds, const std::string& path) {
   if (nds.gba) {
-    const std::vector<u8> data = nds.gba->save_data();
+    const std::vector<u8> data = nds.gba->save.data();
+    if (data.empty()) return;
     const std::string tmp = path + ".tmp";
     FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) { std::fprintf(stderr, "save: cannot write %s\n", tmp.c_str()); return; }
     const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
     std::fclose(f);
     if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "save: cannot write %s\n", path.c_str()); return; }
-    nds.gba->save_dirty = false;
+    nds.gba->save.dirty = false;
     return;
   }
   if (!nds.cart || nds.cart->sram().empty()) return;
@@ -2174,7 +2176,7 @@ sdl_ready:
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
   };
   auto flush_save = [&] {
-    if (!save_readonly && ((nds.cart && nds.cart->sram_dirty()) || (nds.gba && nds.gba->save_dirty))) write_save(nds, session.sav);
+    if (!save_readonly && ((nds.cart && nds.cart->sram_dirty()) || (nds.gba && nds.gba->save.dirty))) write_save(nds, session.sav);
     flush_dsi(); flush_sd();
   };
   // Whether fb_ holds the last run frame's picture (true after an unscaled
@@ -4154,8 +4156,8 @@ sdl_ready:
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
     }
-    if (nds.gba && nds.gba->save_dirty) {   // the same quiet second before a GBA save goes to disk
-      if (nds.gba->save_writes != sram_writes_seen) { sram_writes_seen = nds.gba->save_writes; sram_quiet_since = frames; }
+    if (nds.gba && nds.gba->save.dirty) {   // the same quiet second before a GBA save goes to disk
+      if (nds.gba->save.writes != sram_writes_seen) { sram_writes_seen = nds.gba->save.writes; sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
     }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {

@@ -38,16 +38,18 @@ inline u8 mem_read8(CpuContext& cpu, u32 addr, bool seq = false) {
   return gba::bus_read8(cpu, addr);
 }
 inline u16 mem_read16(CpuContext& cpu, u32 addr, bool seq = false) {
+  const u32 raw = addr;   // the 8-bit save bus sees the address unaligned
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
-  return gba::bus_read16(cpu, addr);
+  return gba::bus_read16(cpu, raw);
 }
 inline u32 mem_read32(CpuContext& cpu, u32 addr, bool seq = false) {
+  const u32 raw = addr;   // the 8-bit save bus sees the address unaligned
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
-  return gba::bus_read32(cpu, addr);
+  return gba::bus_read32(cpu, raw);
 }
 
 inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
@@ -57,18 +59,20 @@ inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
   gba::bus_write8(cpu, addr, v);
 }
 inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
+  const u32 raw = addr;
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 2); return; }
-  gba::bus_write16(cpu, addr, v);
+  gba::bus_write16(cpu, raw, v);
 }
 inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
+  const u32 raw = addr;
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); return; }
-  gba::bus_write32(cpu, addr, v);
+  gba::bus_write32(cpu, raw, v);
 }
 
 inline u32 fetch32(CpuContext& cpu, u32 addr) {

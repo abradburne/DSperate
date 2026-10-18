@@ -62,6 +62,7 @@ add_library(dsperate_core STATIC
   gba/gba.cpp
   gba/gba_ppu.cpp
   gba/gba_audio.cpp
+  gba/gba_save.cpp
   psg/gb_psg.cpp
   gba/gba_interp.cpp
   gba/gba_interp_arm.cpp

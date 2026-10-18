@@ -49,11 +49,13 @@ void run_rom(Gba& g, const char* name, int frames) {
 
 void test_suites() {
   // r12 holds the first failing test's number (0: all passed).
-  for (const char* t : {"arm.gba", "thumb.gba", "memory.gba", "bios.gba", "nes.gba"}) {
+  for (const char* t : {"arm.gba", "thumb.gba", "memory.gba", "bios.gba", "nes.gba",
+                        "save_sram.gba", "save_flash64.gba", "save_flash128.gba", "save_none.gba"}) {
     Gba g;
-    run_rom(g, t, 60);
+    run_rom(g, t, 120);   // the Flash tests wait out erase times
     if (g.cpu->hot.regs[12] != 0) std::fprintf(stderr, "%s: failed test %u\n", t, g.cpu->hot.regs[12]);
     CHECK(g.cpu->hot.regs[12] == 0);
+    if (picture_hash(g) != kAllTestsPassed) std::fprintf(stderr, "%s: picture %016llx\n", t, (unsigned long long)picture_hash(g));
     CHECK(picture_hash(g) == kAllTestsPassed);
   }
   for (const Demo& d : kDemos) {
@@ -97,7 +99,7 @@ void test_bus() {
   CHECK(g.read16(0x07000000) == 0);
   // SRAM: an 8-bit bus.
   g.write8(0x0E000004, 0xAB);
-  CHECK(g.read8(0x0E008004) == 0xAB && g.read16(0x0E000004) == 0xABAB && g.read32(0x0E000004) == 0xABABABAB && g.save_dirty);
+  CHECK(g.read8(0x0E008004) == 0xAB && g.read16(0x0E000004) == 0xABAB && g.read32(0x0E000004) == 0xABABABAB && g.save.dirty && g.save.type() == Save::Type::Sram);
   // I/O: IF clears by writing ones, VCOUNT is read-only, KEYINPUT follows set_keys.
   g.if_ = 0x0005;
   g.write16(0x04000202, 0x0001);
@@ -211,9 +213,51 @@ void test_direct_sound() {
   CHECK(hi > 12000 && lo < -12000);    // a full-scale square at 16 kHz
 }
 
+// EEPROM through DMA 3, as games drive it: an 8 KB chip (17/81-bit commands),
+// a block written and read back, and the bytes in mGBA's file order.
+void test_eeprom() {
+  Gba g;
+  std::vector<u8> rom = loop_cart();
+  const char tag[] = "EEPROM_V124";
+  rom.resize(0x400);
+  std::memcpy(rom.data() + 0x200, tag, sizeof tag);
+  CHECK(g.load_rom(std::move(rom)));
+  g.reset();
+  CHECK(g.save.type() == Save::Type::EepromUnsized);
+  auto dma3 = [&](u32 src, u32 dst, u32 n) {
+    g.write32(0x040000D4, src); g.write32(0x040000D8, dst);
+    g.write32(0x040000DC, 0x80000000u | n);   // enable, 16-bit, immediate, both increment
+  };
+  // Write: 1 0, block 5 (14 bits), 64 data bits, 0.
+  const u64 data = 0x0123456789ABCDEFull;
+  std::vector<u16> bits = {1, 0};
+  for (int i = 13; i >= 0; --i) bits.push_back((5 >> i) & 1);
+  for (int i = 63; i >= 0; --i) bits.push_back(static_cast<u16>((data >> i) & 1));
+  bits.push_back(0);
+  CHECK(bits.size() == 81);
+  for (size_t i = 0; i < bits.size(); ++i) g.write16(0x02000000 + static_cast<u32>(i) * 2, bits[i]);
+  dma3(0x02000000, 0x0D000000, 81);
+  CHECK(g.save.type() == Save::Type::Eeprom8k && g.save.dirty);
+  CHECK(g.read16(0x0D000000) == 1);   // ready
+  // Read: 1 1, block 5, 0; then 68 bits back.
+  bits = {1, 1};
+  for (int i = 13; i >= 0; --i) bits.push_back((5 >> i) & 1);
+  bits.push_back(0);
+  for (size_t i = 0; i < bits.size(); ++i) g.write16(0x02000000 + static_cast<u32>(i) * 2, bits[i]);
+  dma3(0x02000000, 0x0D000000, 17);
+  dma3(0x0D000000, 0x02001000, 68);
+  u64 got = 0;
+  for (u32 i = 0; i < 4; ++i) CHECK((g.read16(0x02001000 + i * 2) & 1) == 0);
+  for (u32 i = 4; i < 68; ++i) got = (got << 1) | (g.read16(0x02001000 + i * 2) & 1);
+  CHECK(got == data);
+  const std::vector<u8> file = g.save.data();
+  CHECK(file.size() == 8192 && file[5 * 8] == 0x01 && file[5 * 8 + 7] == 0xEF);
+}
+
 } // namespace
 
 int main() {
+  test_eeprom();
   test_psg();
   test_direct_sound();
   test_bus();

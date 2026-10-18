@@ -22,6 +22,7 @@
 #include "core/mem/page_table.h"
 #include "core/gba/gba_ppu.h"
 #include "core/gba/gba_audio.h"
+#include "core/gba/gba_save.h"
 
 #include <array>
 #include <memory>
@@ -39,7 +40,8 @@ constexpr u32 CYCLES_PER_FRAME = CYCLES_PER_LINE * LINES;   // 280896: 59.73 Hz
 
 constexpr u32 BIOS_SIZE = 16 * 1024, EWRAM_SIZE = 256 * 1024, IWRAM_SIZE = 32 * 1024;
 constexpr u32 IO_SIZE = 0x400, PALETTE_SIZE = 1024, VRAM_SIZE = 96 * 1024, OAM_SIZE = 1024;
-constexpr u32 ROM_MAX = 32 * 1024 * 1024, SRAM_SIZE = 64 * 1024;
+constexpr u32 ROM_MAX = 32 * 1024 * 1024;
+constexpr u32 SAVE_MAX = 128 * 1024;          // the largest save chip (Flash 128 KB)
 
 // IF/IE bits.
 enum Irq : u16 {
@@ -66,11 +68,8 @@ struct Gba {
   u32  rom_size = 0;
   std::string title() const;       // header 0xA0, 12 characters, trailing NULs cut
   u32 game_code() const;           // header 0xAC, as a little-endian u32
-  // Plain SRAM (32 KB, mirrored to 64 KB). Flash/EEPROM are phase 3.
-  std::vector<u8> save_data() const;
-  bool load_save(const u8* data, size_t n);
-  bool save_dirty = false;         // SRAM written since the frontend last wrote it out (it clears this)
-  u32 save_writes = 0;             // SRAM stores so far, for "has the game stopped saving"
+  // The cartridge's save chip (gba_save.h), its type found by load_rom().
+  Save save;
 
   // Before reset(): start at the cartridge's entry with the registers the
   // BIOS leaves (the default), or run the BIOS's boot screen first.
@@ -112,7 +111,7 @@ struct Gba {
   u64 now() const { return in_cpu_ ? now_ + static_cast<u64>(slice_budget_ - cpu->hot.cycle_budget) : now_; }
 
   std::unique_ptr<CpuContext> cpu;
-  mem::PageBuf bios, ewram, iwram, palette, vram, oam, rom, sram;
+  mem::PageBuf bios, ewram, iwram, palette, vram, oam, rom;
   std::array<u8, IO_SIZE> io{};     // register backing (what reads see, where nothing computes it)
   Ppu ppu;
   Audio audio;
@@ -180,6 +179,7 @@ private:
   std::vector<std::array<u8, 4>> timing_;   // per 32 KB: N16 S16 N32 S32 (CpuContext::timing7)
   void rebuild_timing();
   void map_memory();
+  bool eeprom_at(u32 addr) const;   // the EEPROM answers here (0x0D, or its last 256 bytes behind a 32 MB ROM)
   void run_cpu_until(u64 until);
   friend class Ppu;
 };
