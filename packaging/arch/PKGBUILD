@@ -1,0 +1,55 @@
+# dsperate for Arch Linux ARM on RK3568 handhelds (built for the Anbernic RG DS+ under
+# nibOS, formerly pocketOS). Build with makepkg on an aarch64 machine.
+#
+# Source: this fork's `pocketos` branch at _commit (upstream beebono/DSperate 7c1fb67
+# plus the fork's commits). pkgver: upstream base, commits on top (so pacman orders
+# them), head. To build a local checkout instead: _src=/path/to/DSperate makepkg.
+#
+# PGO: when the fork carries a profile for the compiler doing the build
+# (pgo/aarch64-gcc<version>/, trained on the handheld by bench/core/pgo-train.sh),
+# the build uses it; otherwise it builds without. See docs/rk3568-port.md.
+pkgname=dsperate
+pkgver=0.r7c1fb67.0.0000000
+pkgrel=1
+pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
+arch=(aarch64)
+url="https://github.com/abradburne/DSperate"
+license=(GPL-3.0-or-later)
+depends=(sdl2-compat libdrm libglvnd)   # libglvnd: GLESv2 for the GLES present and hi-res 3D
+makedepends=(git cmake ninja vulkan-headers)
+optdepends=('vulkan-driver: video.gpu3d (on the Mali-G52 ~5x slower than the GLES path)')
+# DSperate's own flags only: makepkg's would change the build that was measured.
+options=(!buildflags !debug)
+_commit=0000000000000000000000000000000000000000
+source=("DSperate::git+${_src:+file://}${_src:-https://github.com/abradburne/DSperate.git}#commit=$_commit")
+sha256sums=(SKIP)
+
+pkgver() {
+    cd DSperate
+    printf "0.r7c1fb67.%s.%s" "$(git rev-list --count 7c1fb67..HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+    # Wi-Fi and RetroAchievements off: nothing on the handheld uses them yet.
+    local pgo=(-DDSPERATE_PGO=OFF)
+    if [ -f "DSperate/pgo/aarch64-gcc$(g++ -dumpfullversion)/MANIFEST" ]; then
+        pgo=(-DDSPERATE_PGO=use)
+    fi
+    cmake -S DSperate -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDSPERATE_TUNE=-mcpu=cortex-a55 \
+        -DDSPERATE_NET=OFF \
+        -DDSPERATE_CHEEVOS=OFF \
+        -DDSPERATE_TESTS=OFF \
+        "${pgo[@]}"
+    cmake --build build
+}
+
+package() {
+    install -Dm755 build/src/frontend/sdl/dsperate "$pkgdir/usr/bin/dsperate"
+    install -Dm755 build/src/frontend/headless/dsperate-headless "$pkgdir/usr/bin/dsperate-headless"
+    install -Dm644 DSperate/configs/default.ini "$pkgdir/usr/share/dsperate/default.ini"
+    install -Dm644 DSperate/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 DSperate/src/core/bios/LICENSE.freebios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.freebios"
+    install -Dm644 DSperate/src/core/gba/bios/LICENSE.cult-bios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.cult-bios"
+}
