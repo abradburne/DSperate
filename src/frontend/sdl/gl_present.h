@@ -32,9 +32,13 @@ public:
   // A window that may skip a frame identical to the one it shows (no upload,
   // draw or swap): never the one whose swap paces the frame loop.
   void set_may_skip(bool on) { may_skip_ = on; }
+  // DS_LATENCY: the screen this window shows, for the GPU-done stamps (latency_log.h).
+  void set_lat_screen(int screen) { lat_screen_ = screen; }
 
   struct Impl;
 private:
+  int lat_screen_ = 0;
+  void gpu_stamp(Impl& d);
   std::unique_ptr<Impl> d_;
   int hires_screen_ = -1;
   bool may_skip_ = false;
