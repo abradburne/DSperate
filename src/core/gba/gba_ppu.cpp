@@ -21,6 +21,17 @@ constexpr u8 OBJ_H[3][4] = {{8, 16, 32, 64}, {8, 8, 16, 32}, {16, 32, 32, 64}};
 
 // BGs each mode draws.
 constexpr u8 MODE_BGS[8] = {0xF, 0x7, 0xC, 0x4, 0x4, 0x4, 0, 0};
+
+// compose's step: where m is set, the layer's colour c and id go on top and
+// what was on top goes second. Separate arrays, a mask a pixel: it vectorises.
+void paint(u16* __restrict top, u16* __restrict sec, u16* __restrict top_id, u16* __restrict sec_id,
+           const u16* __restrict m, const u16* __restrict c, u16 id) {
+  for (u32 x = 0; x < 240; ++x) {
+    const u16 k = m[x];
+    sec[x] = static_cast<u16>((sec[x] & ~k) | (top[x] & k)); sec_id[x] = static_cast<u16>((sec_id[x] & ~k) | (top_id[x] & k));
+    top[x] = static_cast<u16>((top[x] & ~k) | (c[x] & k)); top_id[x] = static_cast<u16>((top_id[x] & ~k) | (id & k));
+  }
+}
 } // namespace
 
 u16 Ppu::reg16(u32 off) const { return static_cast<u16>(g_.io[off] | (g_.io[off + 1] << 8)); }
@@ -145,6 +156,7 @@ void Ppu::draw_bitmap(u32 mode) {
 
 void Ppu::draw_sprites(u32 y) {
   obj_.fill(0); obj_prio_.fill(4); obj_flags_.fill(0); objwin_.fill(0);
+  obj_prios_ = 0;
   const u16 dispcnt = reg16(0);
   if (!(dispcnt & 0x1000)) return;
   const u8* vram = g_.vram.get();
@@ -191,8 +203,9 @@ void Ppu::draw_sprites(u32 y) {
       if (!idx) return;
       if (mode == 2) { objwin_[X] = 1; return; }
       if (prio < obj_prio_[X]) {
+        obj_prios_ |= static_cast<u8>(1u << prio);
         obj_[X] = static_cast<u16>((col & 0x7FFF) | OPAQUE);
-        obj_prio_[X] = static_cast<u8>(prio);
+        obj_prio_[X] = static_cast<u16>(prio);
         obj_flags_[X] = flags;
       }
     };
@@ -264,54 +277,57 @@ void Ppu::compose(u32 y) {
   // The two frontmost pixels of each column, painted back to front: per
   // priority from 3 to 0, the BGs from the highest number down, then the
   // sprites (which win over a BG of the same priority). Each layer drawn
-  // pushes the one in front to second place; the backdrop (id 5) is behind all.
-  u16 top[240], sec[240];
-  u8 top_id[240], sec_id[240];
+  // pushes the one in front to second place; the backdrop (id 5) is behind
+  // all. Branch-free (a mask a pixel), so the loops vectorise.
+  alignas(16) u16 top[240], sec[240], top_id[240], sec_id[240];
   std::fill_n(top, 240, bd); std::fill_n(sec, 240, bd);
-  std::fill_n(top_id, 240, u8{5}); std::fill_n(sec_id, 240, u8{5});
-  auto paint = [&](u32 x, u16 c, u8 id) { sec[x] = top[x]; sec_id[x] = top_id[x]; top[x] = c; top_id[x] = id; };
+  std::fill_n(top_id, 240, u16{5}); std::fill_n(sec_id, 240, u16{5});
+  alignas(16) u16 m[240], c[240];
   for (int p = 3; p >= 0; --p) {
     for (int b = 3; b >= 0; --b) {
       if (!(bgs & (1u << b)) || (reg16(0x08 + b * 2) & 3) != static_cast<u32>(p)) continue;
       const u16* l = bg_[b].data();
-      for (u32 x = 0; x < 240; ++x)
-        if ((win_[x] & (1u << b)) && (l[x] & OPAQUE)) paint(x, l[x] & 0x7FFF, static_cast<u8>(b));
+      for (u32 x = 0; x < 240; ++x) { m[x] = static_cast<u16>(0u - ((win_[x] >> b) & (l[x] >> 15) & 1u)); c[x] = static_cast<u16>(l[x] & 0x7FFF); }
+      paint(top, sec, top_id, sec_id, m, c, static_cast<u16>(b));
     }
-    for (u32 x = 0; x < 240; ++x)
-      if (obj_prio_[x] == p && (win_[x] & 0x10)) paint(x, obj_[x] & 0x7FFF, 4);
+    if (!(obj_prios_ & (1u << p))) continue;   // no sprite pixel at this priority on the line
+    const u16 pp = static_cast<u16>(p);
+    for (u32 x = 0; x < 240; ++x) { m[x] = static_cast<u16>((obj_prio_[x] == pp ? 0xFFFFu : 0u) & (0u - ((win_[x] >> 4) & 1u))); c[x] = static_cast<u16>(obj_[x] & 0x7FFF); }
+    paint(top, sec, top_id, sec_id, m, c, 4);
   }
   const u32 first = bldcnt & 0x3F, second = (bldcnt >> 8) & 0x3F;
   u32* out = fb_.data() + y * 240;
+  // No colour effect can reach a pixel without the effects window bit, or
+  // with no effect selected and no semi-transparent sprite on top: then the
+  // pixel is the top colour.
+  u32 any_fx = 0;
+  if (eff) for (u32 x = 0; x < 240; ++x) any_fx |= win_[x] & 0x20u;
+  else for (u32 x = 0; x < 240; ++x) any_fx |= win_[x] & 0x20u & (0u - static_cast<u32>((top_id[x] == 4) & obj_flags_[x] & 1));
+  if (!any_fx) {
+    for (u32 x = 0; x < 240; ++x) out[x] = expand(top[x]);
+    return;
+  }
+  // Each pixel's effect, branch-free: alpha blending with the second layer
+  // (a semi-transparent sprite on top, or effect 1 with the top a first
+  // target), else brightness up (2) or down (3) where the top is a first
+  // target; only inside the effects window. All three are worked out and the
+  // one that applies is selected.
+  const u32 e1 = eff == 1, e2 = eff == 2, e3 = eff == 3;
   for (u32 x = 0; x < 240; ++x) {
-    const u8 w = win_[x];
-    const u16 c[2] = {top[x], sec[x]};
-    const u32 id[2] = {top_id[x], sec_id[x]};
-    const bool semi = id[0] == 4 && (obj_flags_[x] & 1);
-    const int found = id[0] != 5;
-    u16 col = c[0];
-    if (w & 0x20) {
-      const bool top1 = first & (1u << id[0]), bot2 = found >= 1 && (second & (1u << id[1]));
-      u32 mode = 0;
-      if (semi && bot2) mode = 1;
-      else if (eff == 1 && top1 && bot2) mode = 1;
-      else if ((eff == 2 || eff == 3) && top1) mode = eff;
-      if (mode == 1) {
-        const u32 a = c[0], b = c[1];
-        const u32 r = std::min<u32>(31, ((a & 31) * eva + (b & 31) * evb) >> 4);
-        const u32 g = std::min<u32>(31, (((a >> 5) & 31) * eva + ((b >> 5) & 31) * evb) >> 4);
-        const u32 bl = std::min<u32>(31, (((a >> 10) & 31) * eva + ((b >> 10) & 31) * evb) >> 4);
-        col = static_cast<u16>(r | g << 5 | bl << 10);
-      } else if (mode == 2) {
-        u32 r = col & 31, g = (col >> 5) & 31, b = (col >> 10) & 31;
-        r += ((31 - r) * evy) >> 4; g += ((31 - g) * evy) >> 4; b += ((31 - b) * evy) >> 4;
-        col = static_cast<u16>(r | g << 5 | b << 10);
-      } else if (mode == 3) {
-        u32 r = col & 31, g = (col >> 5) & 31, b = (col >> 10) & 31;
-        r -= (r * evy) >> 4; g -= (g * evy) >> 4; b -= (b * evy) >> 4;
-        col = static_cast<u16>(r | g << 5 | b << 10);
-      }
-    }
-    out[x] = expand(col);
+    const u32 a = top[x], b = sec[x], ti = top_id[x], si = sec_id[x];
+    const u32 fx = (win_[x] >> 5) & 1;
+    const u32 semi = (ti == 4) & obj_flags_[x] & 1;
+    const u32 top1 = (first >> ti) & 1, bot2 = (ti != 5) & (second >> si) & 1;
+    const u32 blend = fx & bot2 & (semi | (e1 & top1));
+    const u32 up = fx & (blend ^ 1) & top1 & e2, down = fx & (blend ^ 1) & top1 & e3;
+    const u32 ar = a & 31, ag = (a >> 5) & 31, ab = (a >> 10) & 31;
+    const u32 br = b & 31, bg = (b >> 5) & 31, bb = (b >> 10) & 31;
+    const u32 mr = std::min<u32>(31, (ar * eva + br * evb) >> 4), mg = std::min<u32>(31, (ag * eva + bg * evb) >> 4), mb = std::min<u32>(31, (ab * eva + bb * evb) >> 4);
+    const u32 ur = ar + (((31 - ar) * evy) >> 4), ug = ag + (((31 - ag) * evy) >> 4), ub = ab + (((31 - ab) * evy) >> 4);
+    const u32 dr = ar - ((ar * evy) >> 4), dg = ag - ((ag * evy) >> 4), db = ab - ((ab * evy) >> 4);
+    const u32 m_blend = 0u - blend, m_up = 0u - up, m_down = 0u - down, m_none = ~(m_blend | m_up | m_down);
+    const u32 col = ((mr | mg << 5 | mb << 10) & m_blend) | ((ur | ug << 5 | ub << 10) & m_up) | ((dr | dg << 5 | db << 10) & m_down) | (a & m_none);
+    out[x] = expand(static_cast<u16>(col));
   }
 }
 

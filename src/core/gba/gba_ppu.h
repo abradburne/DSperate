@@ -45,7 +45,8 @@ private:
   static constexpr u16 OPAQUE = 0x8000;
   std::array<std::array<u16, 240>, 4> bg_{};
   std::array<u16, 240> obj_{};
-  std::array<u8, 240> obj_prio_{};       // 0-3; 4 = no sprite pixel
+  std::array<u16, 240> obj_prio_{};      // 0-3; 4 = no sprite pixel (16 bits, as the colours: compose vectorises)
+  u8 obj_prios_ = 0;                     // the priorities sprite pixels were drawn at on the line (a superset)
   std::array<u8, 240> obj_flags_{};      // bit 0 semi-transparent, bit 1 mosaic
   std::array<u8, 240> objwin_{};         // in the OBJ window
   std::array<u8, 240> win_{};            // per pixel: bits 0-3 BG, 4 OBJ, 5 colour effects
