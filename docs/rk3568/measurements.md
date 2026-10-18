@@ -403,9 +403,15 @@ Keeping the present real-time (`DS_PRESENT_RT=1`) made it worse (27).
 | Advance Wars (GBA) | 60.5 (97.8) | 71.1 (113.4): worse |
 
 **Not done / why:**
-- GBA mode is slower with the lock: its present now waits ~8 ms for a flip (`present` 2.3 ->
-  10.5 ms). Probably the GBA picture is on the panel the lock does not follow; the lock should
-  follow the panel showing the game, or stay off in GBA mode, before this is packaged.
+- GBA mode was slower with the lock (its present waited ~8 ms for a flip). Not the panel: the
+  lock follows the right one (pipe 1, the top). The lock's budget counts each frame's wait for
+  the previous flip as present time, so it sits at its cap (a period + 2 ms) in every game:
+  input is taken ~1.8 ms before a vblank and the frame flips a refresh later. DS games at 2x
+  are GPU-bound enough not to show it; GBA frames (~8 ms) lose a refresh. Fixed for now by
+  leaving the lock off in GBA mode (`vsync_lock = auto`), re-measured 2026-10-18 on Advance
+  Wars, 20 presses, our part (wait + present + scanout): lock off 25.0 ms median, auto 26.9,
+  forced on 35.0. The real fix is a budget from the present's own work (the GPU's done stamp,
+  not the swap's return); then GBA mode can have the lock too.
 - Golden Sun's latency is unchanged within noise. Each latency run lasts ~3.5 s, so the press
   lands while the adaptive budget is still at its start-up value (a period + 2 ms); the
   pacing runs show the settled lock. A longer run per press would measure it fairly.
