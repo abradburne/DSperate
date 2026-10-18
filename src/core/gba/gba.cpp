@@ -231,6 +231,12 @@ u32 Gba::fetch(u32 addr, u32 width) {
       // Nintendo's at 0x134.
       if (addr == 0x178) bios_latch_ = 0xE3A02004;
       else if (addr == 0x12C) bios_latch_ = 0xE55EC002;
+      // RegisterRamReset's "all other registers" (cultbios 0xD78-0xDBC,
+      // back at 0xCC4) leaves DISPCNT 0, Nintendo's leaves forced blank
+      // (0x0080), which games read to decide whether to write video
+      // registers now or queue them for VBlank (Drill Dozer).
+      else if (addr == 0xD80) rrr_io_ = true;
+      else if (addr == 0xCC4 && rrr_io_) { rrr_io_ = false; io_write16(0x000, 0x0080); }
     }
     return v;
   }
@@ -417,6 +423,12 @@ void Gba::io_write16(u32 off, u16 v, u16 mask) {
     if (mask & 0xFF) timer_write_control(i, static_cast<u16>((timers_[i].control & ~mask) | (v & mask)));
     return;
   }
+  case 0x128: {   // SIOCNT; bit 7 is busy, which only a transfer's end clears
+    const u16 c = static_cast<u16>((nv & ~0x0080) | ((old | nv) & 0x0080 & (nv | 0xFF7F)));
+    wr16(&io[off], c);
+    if (!(old & 0x80) && (nv & 0x80) && !(rd16(&io[0x134]) & 0x8000)) sio_start(c);
+    return;
+  }
   case 0x130: return;
   case 0x132: wr16(&io[off], nv & 0xC3FF); check_keypad_irq(); return;
   case 0x200: ie = nv & 0x3FFF; update_irq(); return;
@@ -497,6 +509,7 @@ void Gba::fire(Ev e, u64 at) {
   case Ev::Timer0: case Ev::Timer1: case Ev::Timer2: case Ev::Timer3:
     timer_overflow(static_cast<int>(e) - static_cast<int>(Ev::Timer0), at); break;
   case Ev::Audio: audio.sample(at); schedule(Ev::Audio, at + Audio::SAMPLE_CYCLES); break;
+  case Ev::Sio: sio_done(); break;
   case Ev::Irq:
     cpu->hot.irq_pending = ((ie & if_ & 0x3FFF) && (ime & 1)) ? 1u : 0u;
     if (cpu->hot.irq_pending) cpu->halted = false;
@@ -659,6 +672,34 @@ void Gba::dma_fifo(int fifo, u64 at) {
   }
 }
 
+// ---- serial -----------------------------------------------------------------
+
+void Gba::sio_start(u16 cnt) {
+  const u32 mode = (cnt >> 12) & 3;
+  u64 cycles;
+  if (mode <= 1) {                         // normal, 8 or 32 bits
+    if (!(cnt & 1)) return;                // external clock: no partner to clock it
+    cycles = (mode ? 32u : 8u) * ((cnt & 2) ? 8u : 64u);   // 2 MHz or 256 kHz
+  } else if (mode == 2) {                  // multiplayer, as the parent
+    static const u32 baud[4] = {9600, 38400, 57600, 115200};
+    cycles = u64{CLOCK_HZ} * 18 * 4 / baud[cnt & 3];       // four units of start, 16 bits, stop
+  } else return;                           // UART: nothing to talk to
+  schedule(Ev::Sio, now() + cycles);
+}
+
+void Gba::sio_done() {
+  const u16 cnt = rd16(&io[0x128]);
+  const u32 mode = (cnt >> 12) & 3;
+  if (mode == 1) { wr16(&io[0x120], 0xFFFF); wr16(&io[0x122], 0xFFFF); }
+  else if (mode == 0) io[0x12A] = 0xFF;
+  else if (mode == 2) {
+    wr16(&io[0x120], rd16(&io[0x12A]));    // its own word, then nobody
+    wr16(&io[0x122], 0xFFFF); wr16(&io[0x124], 0xFFFF); wr16(&io[0x126], 0xFFFF);
+  }
+  wr16(&io[0x128], static_cast<u16>(cnt & ~0x0080));
+  if (cnt & 0x4000) raise_irq(IRQ_SERIAL);
+}
+
 // ---- running ----------------------------------------------------------------
 
 void Gba::reset() {
@@ -706,6 +747,14 @@ void Gba::reset() {
     cpu->code_cycles = 0x08000000 >> 15; cpu->code_region = 0x08;
     bios_latch_ = 0xE129F000;
     io[0x300] = 1;                            // POSTFLG
+    // The I/O the BIOS leaves (as it and mGBA do): forced blank -- games that
+    // queue register writes for their VBlank handler write directly while it
+    // is set (Drill Dozer, Sonic Advance 2) -- the sound mixer's defaults, and
+    // the serial port in general-purpose mode.
+    io_write16(0x000, 0x0080);
+    audio.write16(0x82, 0x880E, 0xFFFF);
+    audio.write16(0x88, 0x0200, 0xFFFF);
+    io_write16(0x134, 0x8000);
   }
 }
 
@@ -769,8 +818,9 @@ template <class S> void Gba::sync_state(S& s) {
   s.fields(now_, vcount_, in_hblank_, keyinput_, bios_latch_, dma_latch_, frame_count);
   for (Timer& t : timers_) s.fields(t.reload, t.control, t.counter, t.start);
   for (Dma& d : dma_) s.fields(d.sad, d.dad, d.count, d.control, d.src, d.dst, d.left);
-  if constexpr (S::reading) ev_at_[static_cast<size_t>(Ev::Irq)] = ~u64{0};
+  if constexpr (S::reading) ev_at_[static_cast<size_t>(Ev::Irq)] = ev_at_[static_cast<size_t>(Ev::Sio)] = ~u64{0};
   s.put(ev_at_[static_cast<size_t>(Ev::Irq)]);
+  s.put(ev_at_[static_cast<size_t>(Ev::Sio)]);
   s.end();
   cpu->sync_state(s);
   ppu.sync_state(s);

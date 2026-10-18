@@ -51,7 +51,7 @@ enum Irq : u16 {
   IRQ_TIMER0 = 1 << 3, IRQ_SERIAL = 1 << 7, IRQ_DMA0 = 1 << 8, IRQ_KEYPAD = 1 << 12, IRQ_GAMEPAK = 1 << 13,
 };
 
-enum class Ev : u8 { Ppu, Timer0, Timer1, Timer2, Timer3, Audio, Irq, Count };
+enum class Ev : u8 { Ppu, Timer0, Timer1, Timer2, Timer3, Audio, Irq, Sio, Count };
 // Cycles from an interrupt being raised (IE & IF with IME) to the CPU seeing it.
 constexpr u32 IRQ_DELAY = 7;
 
@@ -150,6 +150,7 @@ struct Gba {
   // at it in sound timing (1 or 2, mode 3) moves four words.
   void dma_fifo(int fifo, u64 at);
   void update_irq();
+  u64 event_at(Ev e) const { return ev_at_[static_cast<size_t>(e)]; }   // diagnostics
 
 private:
   // ---- events ----
@@ -198,10 +199,18 @@ private:
   void dma_run(int i);
   u32 dma_latch_ = 0;               // last value a DMA moved (open bus for its reads)
 
+  // ---- serial port, nothing plugged in ----
+  // A transfer on the internal clock (normal mode) or as the multiplayer
+  // parent finishes when its bits would have, receiving all ones from no one;
+  // on an external clock it waits for a partner that never comes.
+  void sio_start(u16 cnt);
+  void sio_done();
+
   // ---- misc ----
   u16 keyinput_ = 0x3FF;
   void check_keypad_irq();
   u32 bios_latch_ = 0;              // last BIOS opcode fetched: what a BIOS read outside the BIOS sees
+  bool rrr_io_ = false;             // the built-in BIOS is resetting the video registers (Gba::fetch)
   u32 open_bus();
   // mGBA's debug port (debug_out).
   bool debug_on_ = false;
