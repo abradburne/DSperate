@@ -162,6 +162,20 @@ void Gba::rebuild_timing() {
   cpu->timing7 = reinterpret_cast<const u8 (*)[4]>(timing_.data());
 }
 
+void Gba::debug_write(u32 addr, u32 v, u32 width) {
+  if (addr >= 0x04FFF780) { if (width >= 16 && (v & 0xFFFF) == 0xC0DE) debug_on_ = true; return; }
+  if (!debug_on_) return;
+  if (addr < 0x04FFF700) {
+    for (u32 i = 0; i < width / 8; ++i) debug_str_[(addr - 0x04FFF600 + i) & 0xFF] = static_cast<char>(v >> (8 * i));
+    return;
+  }
+  if ((addr & ~1u) == 0x04FFF700 && (v & 0x100)) {   // flush, at level v & 7
+    std::fprintf(debug_out, "%s\n", debug_str_);
+    std::fflush(debug_out);
+    std::fill(std::begin(debug_str_), std::end(debug_str_), '\0');
+  }
+}
+
 u32 Gba::open_bus() {
   const u32 pc = cpu->hot.regs[15];
   auto raw32 = [&](u32 a) -> u32 { if (u8* p = cpu->page_table.read_ptr(a & ~3u)) return rd32(p); if (a < BIOS_SIZE) return rd32(bios.get() + (a & ~3u)); return 0; };
@@ -199,7 +213,7 @@ u8 Gba::read8(u32 addr) {
     if (addr < BIOS_SIZE) return static_cast<u8>((cpu->hot.regs[15] < BIOS_SIZE + 8 ? rd32(bios.get() + (addr & ~3u)) : bios_latch_) >> ((addr & 3) * 8));
     break;
   case 0x04:
-    if ((addr & 0xFFFFFF) < IO_SIZE) return static_cast<u8>(io_read16(addr & 0x3FE) >> ((addr & 1) * 8));
+    if ((addr & 0xFFFFFF) < IO_SIZE && !io_open(addr & 0x3FE)) return static_cast<u8>(io_read16(addr & 0x3FE) >> ((addr & 1) * 8));
     break;
   case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
     if (gpio_at(addr) && rtc.readable()) return static_cast<u8>(rtc.read((addr - 0x080000C4) & ~1u) >> ((addr & 1) * 8));
@@ -221,7 +235,8 @@ u16 Gba::read16(u32 addr) {
     if (addr < BIOS_SIZE) return static_cast<u16>((cpu->hot.regs[15] < BIOS_SIZE + 8 ? rd32(bios.get() + (addr & ~3u)) : bios_latch_) >> ((addr & 2) * 8));
     break;
   case 0x04:
-    if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FE);
+    if ((addr & 0xFFFFFF) < IO_SIZE && !io_open(addr & 0x3FE)) return io_read16(addr & 0x3FE);
+    if (debug_at(addr)) return debug_read16(addr);
     break;
   case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
     if (gpio_at(addr) && rtc.readable()) return rtc.read(addr - 0x080000C4);
@@ -243,7 +258,12 @@ u32 Gba::read32(u32 addr) {
     if (addr < BIOS_SIZE) return cpu->hot.regs[15] < BIOS_SIZE + 8 ? rd32(bios.get() + addr) : bios_latch_;
     break;
   case 0x04:
-    if ((addr & 0xFFFFFF) < IO_SIZE) return io_read16(addr & 0x3FC) | (u32{io_read16((addr & 0x3FC) + 2)} << 16);
+    if ((addr & 0xFFFFFF) < IO_SIZE) {
+      const u32 ob = (io_open(addr & 0x3FC) || io_open((addr & 0x3FC) + 2)) ? open_bus() : 0;
+      const u32 lo = io_open(addr & 0x3FC) ? ob & 0xFFFF : io_read16(addr & 0x3FC);
+      const u32 hi = io_open((addr & 0x3FC) + 2) ? ob >> 16 : io_read16((addr & 0x3FC) + 2);
+      return lo | (hi << 16);
+    }
     break;
   case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:
     if (gpio_at(addr) && rtc.readable()) return rtc.read(addr - 0x080000C4) | (u32{rtc.read(addr - 0x080000C4 + 2)} << 16);
@@ -263,6 +283,7 @@ void Gba::write8(u32 addr, u8 v) {
   case 0x03: iwram[addr & (IWRAM_SIZE - 1)] = v; return;
   case 0x04:
     if ((addr & 0xFFFFFF) < IO_SIZE) io_write16(addr & 0x3FE, static_cast<u16>(v * 0x0101u), (addr & 1) ? 0xFF00 : 0x00FF);
+    else if (debug_at(addr)) debug_write(addr, v, 8);
     return;
   case 0x05: write16(addr, static_cast<u16>(v * 0x0101u)); return;   // a byte lands in both halves
   case 0x06: {
@@ -283,7 +304,10 @@ void Gba::write16(u32 addr, u16 v) {
   switch (addr >> 24) {
   case 0x02: wr16(ewram.get() + (addr & (EWRAM_SIZE - 1)), v); return;
   case 0x03: wr16(iwram.get() + (addr & (IWRAM_SIZE - 1)), v); return;
-  case 0x04: if ((addr & 0xFFFFFF) < IO_SIZE) io_write16(addr & 0x3FE, v); return;
+  case 0x04:
+    if ((addr & 0xFFFFFF) < IO_SIZE) io_write16(addr & 0x3FE, v);
+    else if (debug_at(addr)) debug_write(addr, v, 16);
+    return;
   case 0x05: wr16(palette.get() + (addr & 0x3FF), v); wr16(palette.get() + 0x400 + (addr & 0x3FF), v); return;
   case 0x06: wr16(vram.get() + vram_off(addr), v); return;
   case 0x07: wr16(oam.get() + (addr & 0x3FF), v); wr16(oam.get() + 0x400 + (addr & 0x3FF), v); return;
@@ -309,8 +333,25 @@ void Gba::write32(u32 addr, u32 v) {
 
 // ---- I/O ---------------------------------------------------------------------
 
+bool Gba::io_open(u32 off) {
+  if (off >= 0x10 && off < 0x48) return true;                    // BG scroll/affine, window rectangles
+  if (off == 0x4C || off == 0x4E || (off >= 0x54 && off < 0x60)) return true;   // MOSAIC, BLDY, unused
+  if (off == 0x8C || off == 0x8E || (off >= 0xA0 && off < 0xB0)) return true;  // the FIFOs, unused
+  if (off >= 0xB0 && off < 0xE0) return (off - 0xB0) % 12 < 8;   // DMA addresses
+  return off >= 0xE0 && off < 0x100;
+}
+
 u16 Gba::io_read16(u32 off) {
   switch (off) {
+  case 0x000: case 0x002: case 0x00C: case 0x00E: return rd16(&io[off]);
+  case 0x008: case 0x00A: return rd16(&io[off]) & 0xDFFF;
+  case 0x048: case 0x04A: return rd16(&io[off]) & 0x3F3F;
+  case 0x050: return rd16(&io[off]) & 0x3FFF;
+  case 0x052: return rd16(&io[off]) & 0x1F1F;
+  case 0x120: case 0x122: case 0x124: case 0x126: case 0x128: case 0x12A:   // serial: kept as written
+  case 0x132: case 0x134: case 0x140: case 0x150: case 0x152: case 0x154: case 0x156: case 0x158:
+  case 0x204: case 0x300:
+    return rd16(&io[off]);
   case 0x004: return static_cast<u16>((rd16(&io[4]) & 0xFF38) | (vcount_ >= 160 && vcount_ < 227 ? 1 : 0) | (in_hblank_ ? 2 : 0) |
                                       (vcount_ == (rd16(&io[4]) >> 8) ? 4 : 0));
   case 0x006: return static_cast<u16>(vcount_);
@@ -323,13 +364,11 @@ u16 Gba::io_read16(u32 off) {
   default: break;
   }
   if (off >= 0x60 && off < 0xB0) return audio.read16(off);
-  if (off >= 0xB0 && off < 0xE0) {   // DMA: only CNT_H reads back
+  if (off >= 0xB0 && off < 0xE0) {   // DMA: the count reads 0, the control back
     const u32 i = (off - 0xB0) / 12, r = (off - 0xB0) % 12;
     return r == 10 ? dma_[i].control : 0;
   }
-  // Write-only: BG offsets and affine, window rectangles, MOSAIC, BLDY, the FIFOs.
-  if ((off >= 0x10 && off < 0x48) || off == 0x4C || off == 0x4E || (off >= 0x54 && off < 0x60) || (off >= 0xA0 && off < 0xB0)) return 0;
-  return rd16(&io[off]);
+  return 0;   // unused, readable as 0
 }
 
 void Gba::io_write16(u32 off, u16 v, u16 mask) {
@@ -526,15 +565,15 @@ void Gba::dma_run(int i) {
   const u8* ts = timing_[src >> 15].data();
   const u8* td = timing_[dst >> 15].data();
   u64 cycles = 2;
+  // A DMA's addresses are aligned to its width, even on the 8-bit save bus.
+  // Below 0x02000000 (the BIOS, nothing) it reads what it last moved.
   for (u32 k = 0; k < n; ++k) {
     if (word) {
-      const u32 v = src >= 0x02000000 ? read32(src) : dma_latch_;
-      write32(dst, v);
-      dma_latch_ = v;
+      if (src >= 0x02000000) dma_latch_ = read32(src & ~3u);
+      write32(dst & ~3u, dma_latch_);
     } else {
-      const u16 v = src >= 0x02000000 ? read16(src) : static_cast<u16>(dma_latch_ >> ((dst & 2) * 8));
-      write16(dst, v);
-      dma_latch_ = v * 0x10001u;
+      if (src >= 0x02000000) { const u16 v = read16(src & ~1u); dma_latch_ = v * 0x10001u; }
+      write16(dst & ~1u, static_cast<u16>(dma_latch_ >> ((dst & 2) * 8)));
     }
     src += static_cast<u32>(sinc); dst += static_cast<u32>(dinc);
   }

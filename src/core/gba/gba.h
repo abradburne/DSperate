@@ -26,6 +26,7 @@
 #include "core/gba/gba_rtc.h"
 
 #include <array>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -94,6 +95,10 @@ struct Gba {
 
   TraceFn trace = nullptr;
   void* trace_user = nullptr;
+  // Headless/tests: mGBA's debug-print port (0x04FFF600 string, 0x04FFF700
+  // flags, 0x04FFF780 enable), which homebrew and mGBA's test suite log
+  // through. Lines go here; null leaves the port unanswered, as on hardware.
+  FILE* debug_out = nullptr;
 
   // The CPU's prefetched instructions (gba_interp.cpp): addresses | Thumb bit.
   struct Pipeline { u32 addr[2] = {}, val[2] = {}, n = 0; } pipe;
@@ -108,6 +113,8 @@ struct Gba {
   u32 fetch(u32 addr, u32 width);
 
   // I/O registers, 16 bits at a time (8- and 32-bit accesses are split).
+  // io_open: nothing answers there (write-only or unused), the read is open bus.
+  static bool io_open(u32 off);
   u16  io_read16(u32 off);
   void io_write16(u32 off, u16 v, u16 mask = 0xFFFF);   // mask: the bytes written
 
@@ -179,6 +186,12 @@ private:
   void check_keypad_irq();
   u32 bios_latch_ = 0;              // last BIOS opcode fetched: what a BIOS read outside the BIOS sees
   u32 open_bus();
+  // mGBA's debug port (debug_out).
+  bool debug_on_ = false;
+  char debug_str_[0x101] = {};
+  bool debug_at(u32 addr) const { return debug_out && addr >= 0x04FFF600 && addr < 0x04FFF800; }
+  u16  debug_read16(u32 addr) const { return addr == 0x04FFF780 && debug_on_ ? 0x1DEA : 0; }
+  void debug_write(u32 addr, u32 v, u32 width);
   std::vector<std::array<u8, 4>> timing_;   // per 32 KB: N16 S16 N32 S32 (CpuContext::timing7)
   void rebuild_timing();
   void map_memory();

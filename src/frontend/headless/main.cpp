@@ -301,6 +301,8 @@ int main(int argc, char** argv) {
   const char* gba_bios = nullptr;      // --gba-bios FILE: a GBA BIOS dump instead of the built-in Cult-of-GBA BIOS
   bool gba_boot_bios = false;          // --gba-boot-bios: run the BIOS's boot screen instead of starting at the cartridge
   const char* gba_trace = nullptr;
+  bool gba_debug_log = false;
+  const char* gba_save_out = nullptr;  // --gba-save-out FILE: the save chip's bytes at the end          // --gba-debug-log: mGBA's debug-print port answers, lines to stderr
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
@@ -386,6 +388,8 @@ int main(int argc, char** argv) {
     else if (arg("--gba-bios")) gba_bios = argv[++i];
     else if (flag("--gba-boot-bios")) gba_boot_bios = true;
     else if (arg("--gba-trace")) gba_trace = argv[++i];
+    else if (flag("--gba-debug-log")) gba_debug_log = true;
+    else if (arg("--gba-save-out")) gba_save_out = argv[++i];
     else rom = argv[i];
   }
   // Without --direct, replay inputs land in the firmware setup wizard instead.
@@ -513,6 +517,7 @@ int main(int argc, char** argv) {
     const ds::u32 code = nds.gba->game_code();
     std::fprintf(stderr, "gba: \"%s\" %.4s, %u KB, BIOS %s, save %s\n", nds.gba->title().c_str(), reinterpret_cast<const char*>(&code),
                  nds.gba->rom_size >> 10, nds.gba->bios_native ? "dump" : "Cult-of-GBA (built in)", ds::gba::Save::name(nds.gba->save.type()));
+    if (gba_debug_log) nds.gba->debug_out = stderr;
     if (gba_trace) {
       FILE* f = std::fopen(gba_trace, "w");
       if (!f) { std::fprintf(stderr, "could not open %s\n", gba_trace); return 1; }
@@ -930,6 +935,7 @@ int main(int argc, char** argv) {
                    nds.gba->palette[0] | (nds.gba->palette[1] << 8), nds.gba->palette[2] | (nds.gba->palette[3] << 8), nds.gba->io[0x20] | (nds.gba->io[0x21] << 8));
     }
     if (gba_trace) std::fclose(static_cast<FILE*>(nds.gba->trace_user));
+    if (gba_save_out) { const std::vector<ds::u8> d = nds.gba->save.data(); write_blob(gba_save_out, d.data(), d.size()); }
   }
   if (pc_profile && !ds::pcsample::write(pc_profile)) std::fprintf(stderr, "--pc-profile: cannot write %s\n", pc_profile);
   if (fw_override && nds.firmware_override_dirty()) {

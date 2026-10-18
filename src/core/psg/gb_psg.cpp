@@ -13,6 +13,9 @@ constexpr u32 NOISE_DIV[8] = {8, 16, 32, 48, 64, 80, 96, 112};
 // Bits that read back as 1 on a DMG/CGB (write-only or unused); 0 on the AGB.
 constexpr u8 READ_OR[0x17] = {0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF, 0xBF,
                               0xFF, 0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70};
+// What the AGB reads back (GBATEK): the rest reads 0.
+constexpr u8 AGB_READ[0x16] = {0x7F, 0xC0, 0xFF, 0x00, 0x40, 0x00, 0xC0, 0xFF, 0x00, 0x40, 0xE0,
+                               0x00, 0xE0, 0x00, 0x40, 0x00, 0x00, 0xFF, 0xFF, 0x40, 0x77, 0xFF};
 // Each channel's registers: length/duty, envelope, frequency low, frequency high/control.
 constexpr u8 NRX1[4] = {0x11, 0x16, 0x1B, 0x20}, NRX2[4] = {0x12, 0x17, 0x1C, 0x21},
              NRX3[4] = {0x13, 0x18, 0x1D, 0x22}, NRX4[4] = {0x14, 0x19, 0x1E, 0x23};
@@ -200,8 +203,8 @@ u8 GbPsg::read(u8 r) const {
     for (int c = 0; c < 4; ++c) if (ch_[c].on) v |= static_cast<u8>(1u << c);
     return model_ == Model::Agb ? v : static_cast<u8>(v | 0x70);
   }
-  const u8 m = READ_OR[r - 0x10];
-  return model_ == Model::Agb ? static_cast<u8>(reg(r) & ~m) : static_cast<u8>(reg(r) | m);
+  if (model_ == Model::Agb) return static_cast<u8>(reg(r) & AGB_READ[r - 0x10]);
+  return static_cast<u8>(reg(r) | READ_OR[r - 0x10]);
 }
 
 u8 GbPsg::wave_read(u32 i) const {
