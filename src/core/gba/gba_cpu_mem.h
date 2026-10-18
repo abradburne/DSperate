@@ -9,6 +9,7 @@
 #pragma once
 #include "core/cpu/cpu.h"
 #include "core/cpu/cpu_mem.h"   // rotr32; its accessors are compiled out here
+#include "core/gba/gba.h"
 
 #include <cstring>
 
@@ -23,6 +24,12 @@ u32  bus_fetch(CpuContext& cpu, u32 addr, u32 width);
 } // namespace ds::gba
 
 namespace ds::gba_interp {
+
+// Idle-iteration bookkeeping (Gba::Idle): only while an iteration is checked.
+inline gba::Gba& idle_host(CpuContext& cpu) { return *static_cast<gba::Gba*>(cpu.host); }
+inline void idle_read(CpuContext& cpu, u32 addr) { idle_host(cpu).idle_read(addr); }
+inline void idle_write(CpuContext& cpu) { gba::Gba& g = idle_host(cpu); if (g.idle.verify) g.idle_spoil(); }
+inline void idle_store(CpuContext& cpu, u8* p, u32 n) { gba::Gba& g = idle_host(cpu); if (g.idle.verify) g.idle_store(p, n); }
 
 // width: 0 = 8/16-bit, 1 = 32-bit.
 // data_region keeps the region (low byte) above 0xFF, so it never reads as the
@@ -41,6 +48,7 @@ inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq, bool) {
 inline u8 mem_read8(CpuContext& cpu, u32 addr, bool seq = false) {
   data_cost(cpu, addr, 0, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) return *p;
+  idle_read(cpu, addr);
   return gba::bus_read8(cpu, addr);
 }
 inline u16 mem_read16(CpuContext& cpu, u32 addr, bool seq = false) {
@@ -48,6 +56,7 @@ inline u16 mem_read16(CpuContext& cpu, u32 addr, bool seq = false) {
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
+  idle_read(cpu, raw);
   return gba::bus_read16(cpu, raw);
 }
 inline u32 mem_read32(CpuContext& cpu, u32 addr, bool seq = false) {
@@ -55,13 +64,15 @@ inline u32 mem_read32(CpuContext& cpu, u32 addr, bool seq = false) {
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
+  idle_read(cpu, raw);
   return gba::bus_read32(cpu, raw);
 }
 
 inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
   data_cost(cpu, addr, 0, seq, true);
   bool code = false;
-  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { *p = v; return; }
+  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { idle_store(cpu, p, 1); *p = v; return; }
+  idle_write(cpu);
   gba::bus_write8(cpu, addr, v);
 }
 inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
@@ -69,7 +80,8 @@ inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq, true);
   bool code = false;
-  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 2); return; }
+  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { idle_store(cpu, p, 2); std::memcpy(p, &v, 2); return; }
+  idle_write(cpu);
   gba::bus_write16(cpu, raw, v);
 }
 inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
@@ -77,16 +89,19 @@ inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq, true);
   bool code = false;
-  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); return; }
+  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { idle_store(cpu, p, 4); std::memcpy(p, &v, 4); return; }
+  idle_write(cpu);
   gba::bus_write32(cpu, raw, v);
 }
 
 inline u32 fetch32(CpuContext& cpu, u32 addr) {
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
+  idle_write(cpu);   // the BIOS (its latch) or open bus: not provably the same next time
   return gba::bus_fetch(cpu, addr, 32);
 }
 inline u16 fetch16(CpuContext& cpu, u32 addr) {
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
+  idle_write(cpu);
   return static_cast<u16>(gba::bus_fetch(cpu, addr, 16));
 }
 

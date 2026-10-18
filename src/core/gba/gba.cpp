@@ -195,6 +195,68 @@ u32 Gba::pf_fetch(u32 a, u32 halfwords, bool seq) {
   return cost;
 }
 
+// ---- idle iterations (Gba::Idle) --------------------------------------------
+
+void Gba::idle_take(IdleSnap& s) const {
+  std::memcpy(s.regs, cpu->hot.regs, sizeof s.regs);
+  s.cpsr = cpu->hot.cpsr; s.spsr = cpu->hot.spsr;
+  s.code_cycles = cpu->code_cycles; s.code_region = cpu->code_region; s.data_region = cpu->data_region;
+  s.pipe = pipe; s.pf = pf; s.skip_once = cpu->irq_skip_once;
+}
+
+bool Gba::idle_same(const IdleSnap& s) const {
+  return !std::memcmp(s.regs, cpu->hot.regs, sizeof s.regs) && s.cpsr == cpu->hot.cpsr && s.spsr == cpu->hot.spsr &&
+         s.code_cycles == cpu->code_cycles && s.code_region == cpu->code_region && s.data_region == cpu->data_region &&
+         s.pipe.n == pipe.n && s.pipe.addr[0] == pipe.addr[0] && s.pipe.addr[1] == pipe.addr[1] &&
+         s.pipe.val[0] == pipe.val[0] && s.pipe.val[1] == pipe.val[1] &&
+         s.pf.on == pf.on && s.pf.active == pf.active && s.pf.next == pf.next && s.pf.count == pf.count &&
+         s.pf.progress == pf.progress && s.skip_once == cpu->irq_skip_once;
+}
+
+u32 Gba::idle_check(u32 key) {
+  Idle& d = idle;
+  // An iteration may branch back elsewhere too (an inner loop, a retry):
+  // the head stays until it has not come round for a while (idle_visit).
+  if (key != d.head) {
+    d.head = key; d.others = 0; d.phase = 0; d.fails = 0; d.backoff = 0; d.verify = false;
+    return 0;
+  }
+  d.others = 0;
+  const s32 budget = cpu->hot.cycle_budget;
+  auto fail = [&] {
+    d.verify = false; d.phase = 0;
+    d.backoff = (1u << std::min<u32>(++d.fails, 8)) - 1;   // a loop that keeps changing is looked at less and less
+  };
+  auto start_check = [&] {
+    d.phase = 2; d.verify = true; d.dirty = false; d.reads_video = false; d.nstores = 0;
+    d.mark = budget; d.mark_slice = slice_no_; d.cost = 0; d.ext = ext_epoch_; d.video = video_epoch_;
+  };
+  switch (d.phase) {
+  case 0: idle_take(d.snap); d.phase = 1; d.mark = budget; d.mark_slice = slice_no_; return 0;
+  case 1:
+    if (!idle_same(d.snap) || (d.mark_slice == slice_no_ && d.mark - budget > IDLE_MAX_ITER)) { fail(); return 0; }
+    start_check();
+    return 0;
+  default: {
+    if (d.dirty || !idle_same(d.snap) || !idle_stores_undone() || d.ext != ext_epoch_ || (d.reads_video && d.video != video_epoch_)) { fail(); return 0; }
+    // The checked iteration changed nothing and nothing else did: every one
+    // after it is the same, up to an event that could change what it sees.
+    // Skip the whole ones that fit before this slice ends, leaving the CPU as
+    // many cycles short as running them would.
+    if (!d.cost) {
+      if (d.mark_slice != slice_no_) { start_check(); return 0; }   // measured across an event: again
+      // (the first checked iteration is proved; its cost only is unknown)
+      d.cost = d.mark - budget;
+      if (d.cost <= 0) { fail(); return 0; }
+    }
+    s32 skip = 0;
+    if (budget > 0) skip = ((budget - 1) / d.cost) * d.cost;
+    d.fails = 0; d.dirty = false; d.reads_video = false; d.video = video_epoch_; d.nstores = 0;
+    return static_cast<u32>(skip);
+  }
+  }
+}
+
 void Gba::debug_write(u32 addr, u32 v, u32 width) {
   if (addr >= 0x04FFF780) { if (width >= 16 && (v & 0xFFFF) == 0xC0DE) debug_on_ = true; return; }
   if (!debug_on_) return;
@@ -465,6 +527,7 @@ void Gba::io_write16(u32 off, u16 v, u16 mask) {
 // suite: a timer IRQ lets three or four more instructions run); it goes away
 // at once when IE, IF or IME drop it. A halted CPU wakes as soon as IE & IF.
 void Gba::update_irq() {
+  ++ext_epoch_;
   const bool any = (ie & if_ & 0x3FFF) != 0;
   if (any && (ime & 1)) {
     if (!cpu->hot.irq_pending && ev_at_[static_cast<size_t>(Ev::Irq)] == ~u64{0}) schedule(Ev::Irq, now() + IRQ_DELAY);
@@ -476,6 +539,7 @@ void Gba::update_irq() {
 }
 
 void Gba::set_keys(u16 keyinput) {
+  ++ext_epoch_;
   keyinput_ = keyinput & 0x3FF;
   check_keypad_irq();
 }
@@ -514,6 +578,7 @@ void Gba::fire(Ev e, u64 at) {
   case Ev::Audio: audio.sample(at); schedule(Ev::Audio, at + Audio::SAMPLE_CYCLES); break;
   case Ev::Sio: sio_done(); break;
   case Ev::Irq:
+    ++ext_epoch_;
     cpu->hot.irq_pending = ((ie & if_ & 0x3FFF) && (ime & 1)) ? 1u : 0u;
     if (cpu->hot.irq_pending) cpu->halted = false;
     break;
@@ -522,6 +587,7 @@ void Gba::fire(Ev e, u64 at) {
 }
 
 void Gba::line_start(u64 at) {
+  ++video_epoch_;
   vcount_ = (vcount_ + 1) % LINES;
   in_hblank_ = false;
   const u16 stat = rd16(&io[4]);
@@ -536,6 +602,7 @@ void Gba::line_start(u64 at) {
 }
 
 void Gba::hblank_start(u64 at) {
+  ++video_epoch_;
   in_hblank_ = true;
   if (vcount_ < GBA_H) { ppu.render_line(vcount_); ppu.line_done(); }
   if (rd16(&io[4]) & 0x10) raise_irq(IRQ_HBLANK);
@@ -609,6 +676,7 @@ void Gba::dma_trigger(u32 timing) {
 }
 
 void Gba::dma_run(int i) {
+  ++ext_epoch_;
   Dma& d = dma_[i];
   const u16 ctl = d.control;
   const u32 timing = (ctl >> 12) & 3;
@@ -652,6 +720,7 @@ void Gba::dma_run(int i) {
 }
 
 void Gba::dma_fifo(int fifo, u64 at) {
+  ++ext_epoch_;
   const u32 target = 0x040000A0u + 4u * static_cast<u32>(fifo);
   for (int i = 1; i <= 2; ++i) {
     Dma& d = dma_[i];
@@ -691,6 +760,7 @@ void Gba::sio_start(u16 cnt) {
 }
 
 void Gba::sio_done() {
+  ++ext_epoch_;
   const u16 cnt = rd16(&io[0x128]);
   const u32 mode = (cnt >> 12) & 3;
   if (mode == 1) { wr16(&io[0x120], 0xFFFF); wr16(&io[0x122], 0xFFFF); }
@@ -731,6 +801,7 @@ void Gba::reset() {
   bios_latch_ = 0;
   pipe = {};
   pf = {};
+  idle_reset();
   frame_count = 0;
   rebuild_timing();
   ppu.reset();
@@ -771,6 +842,7 @@ void Gba::run_cpu_until(u64 until) {
   cpu->hot.cycle_budget = slice_budget_;
   slice_end_ = now_ + static_cast<u64>(slice);
   in_cpu_ = true;
+  ++slice_no_;
   gba_interp::run(*cpu);
   in_cpu_ = false;
   now_ += static_cast<u64>(static_cast<s64>(slice_budget_) - cpu->hot.cycle_budget);
@@ -838,6 +910,7 @@ void Gba::after_load() {
   cpu->host = this;
   map_gpio();
   pipe = {};
+  idle_reset();
   rebuild_timing();
   rescan();
   update_irq();
