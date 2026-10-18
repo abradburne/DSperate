@@ -4005,12 +4005,12 @@ sdl_ready:
                   else c.tex = ds::sdl::GlHires::brightened(g.lines) ? gh->recomposite(g.lines, 1) : now_tex;
                 }
                 static const bool tr = std::getenv("DS_HIRES_TRACE") != nullptr, dbg = std::getenv("DS_HIRES_DEBUG") != nullptr;
-                static u32 n = 0, n_now = 0, n_cap = 0, n_fromcap = 0;
-                ++n; n_now += now; n_cap += g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
+                static u32 n = 0, n_now = 0, n_cap = 0, n_both = 0, n_fromcap = 0;
+                ++n; n_now += now; n_cap += g.cap_kind == 1; n_both += now && g.cap_kind == 1; n_fromcap += (show[0] >= 0) + (show[1] >= 0);
                 if (tr) { const auto& L = g.lines[96]; int c0 = 0, c1 = 0, c2 = 0; for (int x = 0; x < 256; ++x) { c0 += L.cls[x] == 0; c1 += L.cls[x] == 1; c2 += L.cls[x] == 2; }
                   std::fprintf(stderr, "hrtrace %u: scr %d mode %u now %d cap %d (%08x) shows %d/%d | l96 bld %04x eva %u evb %u evy %u mb %04x full %d cls %d/%d/%d out %08x\n", n, g.scr, g.mode, now, g.cap_kind, g.cap_raw, show[0], show[1],
                                L.bldcnt, L.eva, L.evb, L.evy, L.mbright, L.full, c0, c1, c2, L.out[128]); }
-                if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u screens shown from a capture\n", n, n_now, n_cap, n_fromcap);
+                if (dbg && n % 300 == 0) std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u both, %u screens shown from a capture\n", n, n_now, n_cap, n_both, n_fromcap);
               }
               for (ds::sdl::Display* w : wins) if (w) w->draw_gl_now(sfb);
             });
