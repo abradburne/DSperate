@@ -449,7 +449,7 @@ struct GlHires::Impl {
   static constexpr int kOut = 6;   // a ring: the last frames' results (shown, and captures shown a frame or two later) stay valid
   GLuint fbo_out[kOut] = {}, out[kOut] = {};
   int slot = 0;
-  std::vector<Vtx> vb;
+  std::vector<Vtx> vb, vb2;   // the frame's vertices; a run's second part while it is built
   // The per-frame inputs (planes, classes, vertices) in a ring of sets, one
   // per render: rewriting the one the GPU still reads made Panfrost shadow
   // it (a new buffer, mapped and faulted, every upload), ~3 ms a frame of
@@ -747,7 +747,11 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   // Fans, placed as lean.vert places them: the opaque prefix (the pre-pass),
   // then the tail in list order, in runs.
   d.vb.clear();
-  std::vector<std::pair<u32, u32>> runs;   // tail: [first vertex, key] where key = translucent | depth-write << 1
+  // The tail's runs: first vertex, key (translucent | depth-write << 1 | ...),
+  // and for a run of alpha-31 translucent polygons the first vertex of its
+  // second part (below).
+  struct Run { u32 v0, key, mid; };
+  std::vector<Run> runs;
   auto vert = [&](const GpuPoly& p, u32 vi) {
     const GpuVert& vt = dl.verts[p.first_vert + vi];
     const float w = std::max(static_cast<float>(vt.w), 1.f);
@@ -771,7 +775,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     o.flags = p.flags | ((static_cast<u32>(&p - dl.polys.data()) + 1u) << 12);   // the pre-pass's winner id
     return o;
   };
-  auto fan = [&](const GpuPoly& p) { for (u32 t = 1; t + 1 < p.nverts; ++t) { d.vb.push_back(vert(p, 0)); d.vb.push_back(vert(p, t)); d.vb.push_back(vert(p, t + 1)); } };
+  auto fan = [&](const GpuPoly& p, std::vector<Vtx>& out) { for (u32 t = 1; t + 1 < p.nverts; ++t) { out.push_back(vert(p, 0)); out.push_back(vert(p, t)); out.push_back(vert(p, t + 1)); } };
   const u32 prefix = std::min(f.first_ordered, dl.npoly);
   // The prefix in list order: on a depth tie the DS keeps the earlier
   // polygon, so a reorder (near to far) flickered where polygons meet at
@@ -779,11 +783,20 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   for (u32 k = 0; k < prefix; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW))) continue;
-    fan(p);
+    fan(p, d.vb);
   }
   const u32 opaque_end = static_cast<u32>(d.vb.size());
   bool last_mask = false;
   const bool no_shadow = g_ab_no_shadow;
+  // A run of alpha-31 translucent polygons is drawn twice: their alpha-31
+  // pixels as opaque ones, then the rest blended. Each part takes only the
+  // polygons that can have such pixels (by their texture's alpha classes),
+  // each in list order; the second part goes after the first in d.vb.
+  d.vb2.clear();
+  auto new_run = [&](u32 key) {
+    if (!runs.empty() && (runs.back().key & (1u << 10))) { runs.back().mid = static_cast<u32>(d.vb.size()); d.vb.insert(d.vb.end(), d.vb2.begin(), d.vb2.end()); d.vb2.clear(); }
+    if (key != ~0u) runs.push_back(Run{static_cast<u32>(d.vb.size()), key, 0});
+  };
   for (u32 k = prefix; k < dl.npoly; ++k) {
     const GpuPoly& p = dl.polys[k];
     if (p.nverts < 3 || (no_shadow && (p.flags & (DS_PF_SHADOW_MASK | DS_PF_SHADOW)))) continue;
@@ -792,16 +805,16 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     // mask after anything else starts the marks again (bit 13).
     if (p.flags & DS_PF_SHADOW_MASK) {
       const u32 key = (1u << 11) | (last_mask ? 0u : 1u << 13);
-      if (runs.empty() || runs.back().second != key || !last_mask) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
+      if (runs.empty() || runs.back().key != key || !last_mask) new_run(key);
       last_mask = true;
-      fan(p);
+      fan(p, d.vb);
       continue;
     }
     last_mask = false;
     if (p.flags & DS_PF_SHADOW) {
       const u32 key = 1u | ((p.attr & (1u << 11)) ? 2u : 0u) | ((((p.attr >> 24) & 0x3Fu) + 1u) << 2) | (1u << 12);
-      if (runs.empty() || runs.back().second != key) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
-      fan(p);
+      if (runs.empty() || runs.back().key != key) new_run(key);
+      fan(p, d.vb);
       continue;
     }
     // Translucent runs also break on the polygon id: the stencil keeps the DS
@@ -812,9 +825,14 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     // write the depth, so a farther polygon later in the list stays behind.
     const bool opq = tr && ((p.attr >> 16) & 0x1Fu) == 31u;
     const u32 key = (tr ? 1u : 0u) | ((p.attr & (1u << 11)) ? 2u : 0u) | (tr ? ((((p.attr >> 24) & 0x3Fu) + 1u) << 2) : 0u) | (opq ? 1u << 10 : 0u);
-    if (runs.empty() || runs.back().second != key) runs.emplace_back(static_cast<u32>(d.vb.size()), key);
-    fan(p);
+    if (runs.empty() || runs.back().key != key) new_run(key);
+    if (!opq) { fan(p, d.vb); continue; }
+    // Its alpha: 31 untextured or in decal (and shadow) mode; else the texel's.
+    const bool fixed = !(p.flags & DS_PF_TEXTURED) || (((p.attr >> 4) & 1u) != 0);
+    if (fixed || (p.flags & DS_PF_TEX_FULL)) fan(p, d.vb);
+    if (!fixed && (p.flags & DS_PF_TEX_PARTIAL)) fan(p, d.vb2);
   }
+  new_run(~0u);
   const u32 total = static_cast<u32>(d.vb.size());
   d.nruns = static_cast<u32>(runs.size());
   // DS_HIRES_POLYS=x0,y0,x1,y1 (DS pixels): the polygons over that box, once, at render 60 (debug).
@@ -929,13 +947,14 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
   };
   bool win_bound = false;
   for (size_t r = 0; r < runs.size() && !(skip & 4); ++r) {
-    const u32 v0 = runs[r].first, v1 = r + 1 < runs.size() ? runs[r + 1].first : total;
-    const bool trans = runs[r].second & 1, dw = (runs[r].second & 2) != 0;
-    const GLint sref = static_cast<GLint>((runs[r].second >> 2) & 0xFFu);
+    const u32 v0 = runs[r].v0, v1 = r + 1 < runs.size() ? runs[r + 1].v0 : total, key = runs[r].key;
+    const bool trans = key & 1, dw = (key & 2) != 0;
+    const GLint sref = static_cast<GLint>((key >> 2) & 0xFFu);
+    u32 b0 = v0;   // where this run's (blended) draw starts
     if (v1 <= v0) continue;
-    if (runs[r].second & (1u << 11)) {   // shadow masks: the stencil mark where the depth test fails, nothing drawn
+    if (key & (1u << 11)) {   // shadow masks: the stencil mark where the depth test fails, nothing drawn
       glStencilMask(0x80);
-      if (runs[r].second & (1u << 13)) { const GLint zero = 0; glClearBufferiv(GL_STENCIL, 0, &zero); }
+      if (key & (1u << 13)) { const GLint zero = 0; glClearBufferiv(GL_STENCIL, 0, &zero); }
       glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
       glDisable(GL_BLEND); glDepthMask(GL_FALSE);
       glStencilFunc(GL_ALWAYS, 0x80, 0x80);
@@ -947,7 +966,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
       if (d.color_maski && want_id && !id_on) d.color_maski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);   // glColorMask set every buffer's
       continue;
     }
-    const bool shadow = (runs[r].second & (1u << 12)) != 0;
+    const bool shadow = (key & (1u << 12)) != 0;
     if (shadow) {
       if (!win_bound) {
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, d.g0); glActiveTexture(GL_TEXTURE0);
@@ -956,12 +975,13 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
       }
       glUniform1i(d.r_shadow, opaque_end ? 1 : 0);
     }
-    if (trans && (runs[r].second & (1u << 10))) {   // its opaque pixels first, as an opaque polygon's
+    if (trans && (key & (1u << 10))) {   // its opaque pixels first, as an opaque polygon's
       id_writes(true);
       glStencilFunc(GL_ALWAYS, 0, 0x7F); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
       glUniform1i(d.r_split, 1);
-      glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
+      if (runs[r].mid > v0) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(runs[r].mid - v0));
       glUniform1i(d.r_split, 2);
+      b0 = runs[r].mid;
     }
     id_writes(!trans);
     if (shadow) glStencilFunc(GL_EQUAL, 0x80 | sref, 0x80);   // only where a mask marked; writes its id where it draws
@@ -973,7 +993,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
       glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX);
       glDepthMask(dw ? GL_TRUE : GL_FALSE);
     } else { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
-    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(v0), static_cast<GLsizei>(v1 - v0));
+    if (v1 > b0) glDrawArrays(GL_TRIANGLES, static_cast<GLint>(b0), static_cast<GLsizei>(v1 - b0));
     glUniform1i(d.r_split, 0);
     if (shadow) glUniform1i(d.r_shadow, 0);
   }

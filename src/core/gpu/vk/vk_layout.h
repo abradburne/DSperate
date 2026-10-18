@@ -40,6 +40,10 @@ using uint = u32;
 // transparent index, or direct-colour alpha bit); without it every texel is
 // alpha 31 and needs no sample for the alpha test.
 #define DS_PF_TEX_ALPHA   0x0040u
+// The decoded texture has texels at alpha 1-30 / at 31 (the hi-res raster's
+// translucent tail draws a polygon's alpha-31 pixels and its others apart).
+#define DS_PF_TEX_PARTIAL 0x0080u
+#define DS_PF_TEX_FULL    0x0100u
 
 // Shadow mask RUN INDEX, per polygon per scanline. The DS clears the stencil
 // per-scanline at the start of a mask run, but a tiled raster can't see that

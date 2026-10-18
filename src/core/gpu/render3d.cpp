@@ -2677,7 +2677,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
         else off = it->second;
         o.tex_offset = off; o.tex_w = static_cast<u32>(sh.width); o.tex_h = static_cast<u32>(sh.height); o.flags |= DS_PF_TEXTURED;
         const bool may_alpha = (p.texparam & (1u << 29)) || fmt == 5 || fmt == 7;
-        if (may_alpha && r.transparent) o.flags |= DS_PF_TEX_ALPHA;
+        if (may_alpha && r.transparent()) o.flags |= DS_PF_TEX_ALPHA;
       }
     }
     gp.push_back(o);
@@ -3038,7 +3038,7 @@ bool Renderer3D::build_gpu_list(const Gpu3D& gx, const Polygon* const* polys, u3
   // Runs of polygons share a texture: the last one's lookup (texture cache
   // and arena residency) answers the next with the same image and palette.
   // Repeat/flip bits are per polygon and don't change the decoded image.
-  struct Last { u32 key = ~0u, pal = ~0u, off = 0, w = 0, h = 0; bool transparent = false; } last;
+  struct Last { u32 key = ~0u, pal = ~0u, off = 0, w = 0, h = 0; u8 alphas = 0; } last;
   for (u32 i = 0; i < npoly; ++i) {
     const Polygon& p = *polys[i];
     if (p.degenerate) continue;
@@ -3076,11 +3076,13 @@ bool Renderer3D::build_gpu_list(const Gpu3D& gx, const Polygon* const* polys, u3
           res.off = arena_top; res.words = r.words; res.version = r.version;
           arena_top += r.words;
         }
-        last = Last{key, p.texpal, res.off, static_cast<u32>(sh.width), static_cast<u32>(sh.height), r.transparent};
+        last = Last{key, p.texpal, res.off, static_cast<u32>(sh.width), static_cast<u32>(sh.height), r.alphas};
       }
       o.tex_offset = last.off; o.tex_w = last.w; o.tex_h = last.h; o.flags |= DS_PF_TEXTURED;
       const bool may_alpha = (p.texparam & (1u << 29)) || fmt == 5 || fmt == 7 || fmt == 1 || fmt == 6;
-      if (may_alpha && last.transparent) o.flags |= DS_PF_TEX_ALPHA;
+      if (may_alpha && (last.alphas & TextureCache::ALPHA_ZERO)) o.flags |= DS_PF_TEX_ALPHA;
+      if (last.alphas & TextureCache::ALPHA_PARTIAL) o.flags |= DS_PF_TEX_PARTIAL;
+      if (last.alphas & TextureCache::ALPHA_FULL) o.flags |= DS_PF_TEX_FULL;
     }
     ++np;
   }

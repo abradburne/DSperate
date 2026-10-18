@@ -28,7 +28,9 @@ public:
   const u32* lookup(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0);
   // Same, plus identity: `id` is stable for the entry's life, `version` counts
   // decodes, so a caller keeping its own copy can tell if it's stale.
-  struct Ref { const u32* texels = nullptr; u32 words = 0; u32 id = 0; u32 version = 0; bool transparent = false; };   // transparent: any texel has alpha 0
+  // alphas: the texels' alpha classes -- bit 0 some at 0, bit 1 some at 1-30, bit 2 some at 31.
+  enum : u8 { ALPHA_ZERO = 1, ALPHA_PARTIAL = 2, ALPHA_FULL = 4 };
+  struct Ref { const u32* texels = nullptr; u32 words = 0; u32 id = 0; u32 version = 0; u8 alphas = 0; bool transparent() const { return alphas & ALPHA_ZERO; } };
   Ref lookup_ref(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0);
   void clear();
   u32  decodes_this_frame() const { return decodes_; }
@@ -42,7 +44,7 @@ private:
     std::vector<u32> texels;
     u64 validated = 0, used = 0; // frames
     u32 id = 0, version = 0;     // identity and decode count, for Ref
-    bool transparent = false;
+    u8 alphas = 0;               // Ref::alphas
     u32 gen = 0, banks = 0;      // generation and banks last validated at
     u64 sig = 0;                 // block_signature of the ranges then
   };
