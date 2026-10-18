@@ -1,9 +1,9 @@
-# The pocketOS fork
+# The RG DS+ (RK3568) port
 
 This fork of DSperate (branch `pocketos` of
 [abradburne/DSperate](https://github.com/abradburne/DSperate), on top of
 [beebono/DSperate](https://github.com/beebono/DSperate) `7c1fb67`) is the emulator
-pocketOS ships for the Anbernic RG DS+ (RK3568: four Cortex-A55 at 1.99 GHz, a Mali-G52
+nibOS (formerly pocketOS) ships for the Anbernic RG DS+ (RK3568: four Cortex-A55 at 1.99 GHz, a Mali-G52
 on Panfrost with GLES 3.1, two 1024x768 panels). It adds:
 
 | | where | what |
@@ -22,8 +22,8 @@ speed-up, and the hi-res picture equals the 1x one wherever the 1x one has no ed
 
 ## Build, test, profile
 
-The build is upstream's (`README.md`). pocketOS builds it with the flags in its
-`emu/dsperate/PKGBUILD`:
+The build is upstream's (`README.md`). The handheld's package builds it with the flags in
+`packaging/arch/PKGBUILD`:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDSPERATE_TUNE=-mcpu=cortex-a55 \
@@ -50,13 +50,14 @@ dsperate-headless --gba --frames 3600 --press 400:start:4 --press 475:a:4 --hash
 ```
 
 and, for what reaches the panels, `DS_DEBUG=present-wait,present-hash=FILE` (a hash per
-present; under `--replay` the RTC is frozen, so a run repeats exactly). pocketOS's
-`emu/core-bench/bench.sh`, `gba-exact.sh`, `render-same.sh` and `render-bench.sh` wrap
-these for the DS+; their reports (`emu/core-review.md`, `emu/render-review.md`) have the
+present; under `--replay` the RTC is frozen, so a run repeats exactly). `bench/core/bench.sh`,
+`bench/core/gba-exact.sh`, `bench/render/render-same.sh` and `bench/render/render-bench.sh` wrap
+these for the DS+ (`bench/README.md`); their reports (`docs/rk3568/core-review.md`,
+`docs/rk3568/render-review.md`) have the
 measurements behind the design choices below.
 
 The package is built with profile-guided optimisation (`DSPERATE_PGO=use`, the profile
-trained on the DS+ by `emu/core-bench/pgo-train.sh`): 2-13% off the median frame time.
+trained on the DS+ by `bench/core/pgo-train.sh` into `pgo/aarch64-gcc<version>/`): 2-13% off the median frame time.
 Retrain it for every package; an edited function silently loses its profile.
 
 ## The GBA machine
@@ -128,7 +129,7 @@ GlFramePresenter::present                           |    lines upload    mapped 
                                                   S x picture -> GlPresent draws it in the window
 ```
 
-Why it is shaped like this (the measurements are in pocketOS's `emu/render-review.md`):
+Why it is shaped like this (the measurements are in `docs/rk3568/render-review.md`):
 
 - **Visibility buffer.** Golden Sun draws ~4x the screen in opaque overdraw; shading
   every fragment was most of the GPU's time on the one-core G52. The pre-pass writes
@@ -183,7 +184,7 @@ thread, and drops the policy while unpaced (fast forward).
 
 Frame pacing locked to the panels' vblanks (`video.vsync_lock`, input read at VBlank,
 button-to-screen latency logging) is on the `pacing` branch, not merged: it measured
-lower latency on DS games but costs GBA mode a flip wait (pocketOS `emu/README.md`).
+lower latency on DS games but costs GBA mode a flip wait (`docs/rk3568/measurements.md`).
 
 ## DS_DEBUG
 

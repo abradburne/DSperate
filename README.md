@@ -16,7 +16,8 @@ for distribution by its developer, Exophase) and measuring it on real
 hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques).
 
 This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
-[docs/pocketos.md](docs/pocketos.md).
+[docs/rk3568-port.md](docs/rk3568-port.md); measurements and the bench tools behind them in
+[docs/rk3568](docs/rk3568) and [bench](bench).
 
 ## Previews
 

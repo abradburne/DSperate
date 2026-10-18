@@ -10,7 +10,7 @@
 // (kKeys in debug_options.cpp) and exits. Unknown keys are reported and
 // ignored. The rest of the emulator's debug switches are DS_* variables of
 // their own (DS_VERBOSE, DS_FRAME_STATS, ...); these are the ones the hi-res
-// path and the tools around it (pocketOS's emu/render-*.sh) use.
+// path and the tools around it (bench/render/*.sh) use.
 #include "core/types.h"
 
 #include <string>

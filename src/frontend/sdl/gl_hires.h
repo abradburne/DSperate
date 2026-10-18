@@ -6,7 +6,7 @@
 // frame's polygon list (gpu::Renderer3D::DisplayList) is drawn again here
 // through OpenGL ES 3.1 at S x and composited with engine A's 2D planes
 // (Engine2D::HiresLine) into an S x picture of that screen, all on the GPU:
-// nothing is read back. One render, in passes (docs/pocketos.md has the
+// nothing is read back. One render, in passes (docs/rk3568-port.md has the
 // picture):
 //
 //   draw3d     arena upload   textures new since the last frame
