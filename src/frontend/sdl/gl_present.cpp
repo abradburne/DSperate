@@ -192,6 +192,19 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
       }
     }
   }
+  // DS_PRESENT_HASH=<file> (debug): a line per present of this window -- the
+  // window, its present count, an FNV-1a hash of the picture -- to compare two
+  // builds' output frame by frame (with DS_PRESENT_WAIT=1 every frame is shown).
+  if (static std::FILE* hf = [] { const char* p = std::getenv("DS_PRESENT_HASH"); return p ? std::fopen(p, "w") : nullptr; }(); hf) {
+    static std::vector<unsigned char> px;
+    static u32 presents[8] = {};
+    px.resize(static_cast<size_t>(ww) * wh * 4);
+    glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    u64 h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < px.size(); i += 4) { h = (h ^ px[i]) * 0x100000001b3ull; h = (h ^ px[i + 1]) * 0x100000001b3ull; h = (h ^ px[i + 2]) * 0x100000001b3ull; }
+    std::fprintf(hf, "%d %u %016llx\n", d.index, ++presents[d.index & 7], static_cast<unsigned long long>(h));
+    std::fflush(hf);
+  }
   SDL_GL_SwapWindow(d.win);
 }
 
