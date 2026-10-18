@@ -655,6 +655,11 @@ void GlHires::Impl::draw_tail(const gpu::Renderer3D::DisplayList& dl, bool wbuf,
   glStencilMask(0x7F);
   glStencilFunc(GL_ALWAYS, 0, 0x7F);
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+  // The shader declares the polygons' records (binding 1) for shadows' own-id
+  // test: something must be bound there even in a frame with no opaque
+  // prefix, where the resolve did not bind them (Panfrost reads every
+  // declared buffer's address at each draw, and crashed on none).
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, polys[polys_k]);
   glUseProgram(raster);
   glUniform1ui(raster_l.dispcnt, f.dispcnt);
   glUniform1ui(raster_l.alpha_ref, f.alpha_ref);
@@ -697,7 +702,6 @@ void GlHires::Impl::draw_tail(const gpu::Renderer3D::DisplayList& dl, bool wbuf,
     if (shadow) {
       if (!win_bound) {
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g0); glActiveTexture(GL_TEXTURE0);
-        if (fans.opaque_end) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, polys[polys_k]);
         win_bound = true;
       }
       glUniform1i(raster_l.shadow, fans.opaque_end ? 1 : 0);
