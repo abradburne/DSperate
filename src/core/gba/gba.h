@@ -12,10 +12,10 @@
 // cycles; run_frame() runs to the start of VBlank (line 160), so the picture
 // it leaves is the one just drawn.
 //
-// Sound is gba_audio.cpp (the Game Boy PSG of core/psg plus Direct Sound).
-// Not yet (phase 3/4 of pocketos/emu/gba-plan.md): save chips beyond plain
-// SRAM (Flash, EEPROM), the prefetch buffer and exact wait-state timing,
-// RTC/GPIO, the recompiler.
+// Sound is gba_audio.cpp (the Game Boy PSG of core/psg plus Direct Sound),
+// saves gba_save.cpp (SRAM, Flash, EEPROM), the clock gba_rtc.cpp; cycle
+// costs with the prefetch buffer are gba_cpu_cycles.h. The CPU is always
+// interpreted (no recompiler in GBA mode).
 #pragma once
 #include "core/types.h"
 #include "core/cpu/cpu.h"
@@ -219,7 +219,8 @@ private:
   u16  debug_read16(u32 addr) const { return addr == 0x04FFF780 && debug_on_ ? 0x1DEA : 0; }
   void debug_write(u32 addr, u32 v, u32 width);
   std::vector<std::array<u8, 4>> timing_;   // per 32 KB: N16 S16 N32 S32 (CpuContext::timing7)
-  void rebuild_timing();
+  bool timing_static_ = false;              // the regions WAITCNT leaves alone are filled in
+  void rebuild_timing();                    // the cartridge's regions, from WAITCNT
   void map_memory();
   bool eeprom_at(u32 addr) const;
   bool gpio_at(u32 addr) const { return rtc.present && addr >= 0x080000C4 && addr < 0x080000CA; }
