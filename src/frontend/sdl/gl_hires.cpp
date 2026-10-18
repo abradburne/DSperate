@@ -19,6 +19,7 @@ bool GlHires::brightened(const gpu::Engine2D::HiresLine*) { return false; }
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -286,40 +287,62 @@ void main() {
 }
 )";
 
-// Pass 1 of the composite, every S x pixel: u_base is the finished 1x pixel
-// (RGB, from the CPU's output_line) with the pixel's class in alpha: 0 = the
-// 3D layer plays no part, so the 1x pixel is exact; 1 = the 3D layer on top
-// with nothing applied after it, so the hi-res sample is the pixel; 2 = the
-// whole composite, left (discarded) for pass 2.
-const char* kFastFS = R"(#version 310 es
-precision highp float; precision highp sampler2D;
-uniform highp sampler2D u_base, u_3d, u_under;
+// Engine A's kept lines (Engine2D::HiresLine), uploaded as they lie in
+// memory: u_px holds each line's out, under, top and second records side by
+// side (x, x + 256, x + 512, x + 768; 6-bit RGB), u_bytes its top id, top
+// kind, top alpha, second id and window byte (x, x + 256, ... x + 1024), u_cls
+// its pixel classes, u_regs its effect registers (x) and master brightness
+// with the line's valid bit (y, bit 31).
+#define LINE_PLANES R"(
+precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
+uniform highp usampler2D u_px, u_bytes, u_cls, u_regs;
+uniform highp sampler2D u_3d;
 uniform int u_scale;
+uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness)
 out vec4 o_col;
+uint up(uint c, uint f, uint bias) { return c + ((((63u - c) * f) + bias) >> 4); }
+uint dn(uint c, uint f, uint bias) { return c - (((c * f) + bias) >> 4); }
+uint brighten(uint v, uint f, uint bias) { return up(v & 0x3Fu, f, bias) | (up((v >> 8) & 0x3Fu, f, bias) << 8) | (up((v >> 16) & 0x3Fu, f, bias) << 16); }
+uint darken(uint v, uint f, uint bias) { return dn(v & 0x3Fu, f, bias) | (dn((v >> 8) & 0x3Fu, f, bias) << 8) | (dn((v >> 16) & 0x3Fu, f, bias) << 16); }
+// Master brightness (kernels_ref.cpp output_line), then 6 -> 8 bits.
+vec4 finish(uint o, uint mb) {
+  uint mode = mb >> 14, f = min(mb & 0x1Fu, 16u);
+  if (mode == 1u) o = brighten(o, f, 0u);
+  else if (mode == 2u) o = darken(o, f, 0xFu);
+  uvec3 c6 = uvec3(o & 0x3Fu, (o >> 8) & 0x3Fu, (o >> 16) & 0x3Fu);
+  return vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
+}
+)"
+
+// Pass 1 of the composite, every S x pixel, from the pixel's class: 0 = the
+// 3D layer plays no part, so engine A's own 1x pixel is exact; 1 = the 3D
+// layer on top with nothing applied after it, so the hi-res sample is the
+// pixel (where it covers; elsewhere what it covers). Master brightness
+// reaches every pixel of a shown line, so there a class 1 pixel takes the
+// full composite too (a capture is taken before it). The full composite is
+// left (discarded) for pass 2.
+const char* kFastFS = "#version 310 es\n" LINE_PLANES R"(
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  vec4 b = texelFetch(u_base, p / u_scale, 0);
-  if (b.a > 0.75) discard;               // class 2
-  if (b.a > 0.25) {                       // class 1: the 3D where it covers, else what it covers
+  ivec2 p = ivec2(gl_FragCoord.xy), d = p / u_scale;
+  uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
+  uint mb = u_mode == 1 ? 0u : regs.y & 0xFFFFu;
+  bool bright = ((mb >> 14) == 1u || (mb >> 14) == 2u) && (mb & 0x1Fu) != 0u;
+  uint cls = (regs.y & 0x80000000u) != 0u ? texelFetch(u_cls, d, 0).r : 0u;
+  if (cls == 2u || (cls == 1u && bright)) discard;
+  if (cls == 1u) {
     vec4 h = texelFetch(u_3d, p, 0);
-    if (h.a > 0.0) { vec3 c6 = round(h.rgb * 255.0); o_col = vec4((c6 * 4.0 + floor(c6 / 16.0)) / 255.0, 1.0); return; }
-    o_col = vec4(texelFetch(u_under, p / u_scale, 0).rgb, 1.0);
+    if (h.a > 0.0) { uvec3 c6 = uvec3(round(h.rgb * 255.0)); o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0); return; }
+    o_col = finish(texelFetch(u_px, ivec2(d.x + 256, d.y), 0).r, 0u);
     return;
   }
-  o_col = vec4(b.rgb, 1.0);
+  o_col = finish(texelFetch(u_px, d, 0).r, mb);
 }
 )";
 
 // Engine A's colour effects and master brightness (kernels_ref.cpp
 // composite_line / output_line) per S x pixel, with the 3D layer's entries
 // taken from the hi-res frame.
-const char* kCompositeFS = R"(#version 310 es
-precision highp float; precision highp int; precision highp usampler2D; precision highp sampler2D;
-uniform highp usampler2D u_top, u_second, u_meta, u_win, u_regs, u_fb, u_class;
-uniform highp sampler2D u_3d;
-uniform int u_scale;
-uniform int u_mode;   // 0 shown, 1 captured graphics (no master brightness), 2 the 3D alone
-out vec4 o_col;
+const char* kCompositeFS = "#version 310 es\n" LINE_PLANES R"(
 uint blend(uint a, uint b, uint eva, uint evb) {
   uint r = min((((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
   uint g = min(((((a >> 8) & 0x3Fu) * eva) + (((b >> 8) & 0x3Fu) * evb) + 8u) >> 4, 0x3Fu);
@@ -334,42 +357,14 @@ uint blend_3d(uint a, uint b) {
   uint bl = min(((((a >> 16) & 0x3Fu) * eva) + (((b >> 16) & 0x3Fu) * evb) + 16u) >> 5, 0x3Fu);
   return r | (g << 8) | (bl << 16);
 }
-uint up(uint c, uint f, uint bias) { return c + ((((63u - c) * f) + bias) >> 4); }
-uint dn(uint c, uint f, uint bias) { return c - (((c * f) + bias) >> 4); }
-uint brighten(uint v, uint f, uint bias) { return up(v & 0x3Fu, f, bias) | (up((v >> 8) & 0x3Fu, f, bias) << 8) | (up((v >> 16) & 0x3Fu, f, bias) << 16); }
-uint darken(uint v, uint f, uint bias) { return dn(v & 0x3Fu, f, bias) | (dn((v >> 8) & 0x3Fu, f, bias) << 8) | (dn((v >> 16) & 0x3Fu, f, bias) << 16); }
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  ivec2 d = p / u_scale;
-  if (u_mode == 2) {   // a capture of the 3D layer: its colour, 6 -> 8 bits
-    uvec3 c6 = uvec3(round(texelFetch(u_3d, p, 0).rgb * 255.0));
-    o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
-    return;
-  }
-  // Per DS pixel (the CPU's verdict): 0 = the 3D layer plays no part, so the
-  // finished 1x pixel is exact; 1 = the 3D layer on top with nothing applied
-  // after it, so the hi-res sample is the pixel; 2 = the whole composite.
-  uint cls = texelFetch(u_class, d, 0).r;
-  if (cls == 0u) {   // engine A's own 1x pixel (u_fb: its composited line, before master brightness)
-    uint o = texelFetch(u_fb, d, 0).r & 0xFFFFFFu;
-    uint mb = u_mode == 1 ? 0u : texelFetch(u_regs, ivec2(d.y, 0), 0).g & 0xFFFFu, mode = mb >> 14, f = min(mb & 0x1Fu, 16u);
-    if (mode == 1u) o = brighten(o, f, 0u);
-    else if (mode == 2u) o = darken(o, f, 0xFu);
-    uvec3 c6 = uvec3(o & 0x3Fu, (o >> 8) & 0x3Fu, (o >> 16) & 0x3Fu);
-    o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
-    return;
-  }
-  vec4 h0 = texelFetch(u_3d, p, 0);
-  if (cls == 1u && h0.a > 0.0) {
-    uvec3 c6 = uvec3(round(h0.rgb * 255.0));
-    o_col = vec4(vec3((c6 << 2) | (c6 >> 4)) / 255.0, 1.0);
-    return;
-  }
+  ivec2 p = ivec2(gl_FragCoord.xy), d = p / u_scale;
   uvec2 regs = texelFetch(u_regs, ivec2(d.y, 0), 0).rg;
-  uint top = texelFetch(u_top, d, 0).r, second = texelFetch(u_second, d, 0).r, meta = texelFetch(u_meta, d, 0).r;
-  uint win = texelFetch(u_win, d, 0).r;
-  uint top_id = meta & 0xFFu, kind = (meta >> 8) & 0xFFu, talpha = (meta >> 16) & 0xFFu, second_id = meta >> 24;
-  vec4 h = h0;
+  uint top = texelFetch(u_px, ivec2(d.x + 512, d.y), 0).r, second = texelFetch(u_px, ivec2(d.x + 768, d.y), 0).r;
+  uint top_id = texelFetch(u_bytes, d, 0).r, kind = texelFetch(u_bytes, ivec2(d.x + 256, d.y), 0).r;
+  uint talpha = texelFetch(u_bytes, ivec2(d.x + 512, d.y), 0).r, second_id = texelFetch(u_bytes, ivec2(d.x + 768, d.y), 0).r;
+  uint win = texelFetch(u_bytes, ivec2(d.x + 1024, d.y), 0).r;
+  vec4 h = texelFetch(u_3d, p, 0);
   uint ha8 = uint(round(h.a * 255.0));
   uint ha = ha8 == 0u ? 0u : (ha8 >> 3) - 1u;
   uint hpx = uint(round(h.r * 255.0)) | (uint(round(h.g * 255.0)) << 8) | (uint(round(h.b * 255.0)) << 16) | (ha << 24);
@@ -391,13 +386,7 @@ void main() {
     else if (effect == 2u) o = brighten(top, evy, 8u);
     else if (effect == 3u) o = darken(top, evy, 7u);
   }
-  // Master brightness, then 6 -> 8 bits.
-  uint mb = u_mode == 1 ? 0u : regs.y & 0xFFFFu, mode = mb >> 14, f = min(mb & 0x1Fu, 16u);
-  if (mode == 1u) o = brighten(o, f, 0u);
-  else if (mode == 2u) o = darken(o, f, 0xFu);
-  uvec3 c6 = uvec3(o & 0x3Fu, (o >> 8) & 0x3Fu, (o >> 16) & 0x3Fu);
-  uvec3 c8 = (c6 << 2) | (c6 >> 4);
-  o_col = vec4(vec3(c8) / 255.0, 1.0);
+  o_col = finish(o, u_mode == 1 ? 0u : regs.y & 0xFFFFu);
 }
 )";
 
@@ -443,10 +432,10 @@ struct GlHires::Impl {
   GLuint polys[3] = {}; int polys_k = 0;   // the polygons' records for the resolve, a ring
   std::vector<u32> precs;
   GLint f_scale = -1;
-  GLuint t_base = 0, t_under = 0, dep_out = 0;
-  std::vector<u32> base, under;
+  GLuint dep_out = 0;
   GLint r_wbuf = -1;
-  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_scale = -1, u_mode = -1, r_split = -1, r_shadow = -1;
+  GLint u_dispcnt = -1, u_alpha_ref = -1, u_toon = -1, u_mode = -1, f_mode = -1, r_split = -1, r_shadow = -1;
+  u32 nruns = 0;   // DS_HIRES_DEBUG: the last render's tail runs
   // glColorMaski (OES/EXT_draw_buffers_indexed): the id plane's writes switched
   // on and off without changing the draw buffers, which on a tiler ends the
   // batch (a store and a reload of every attachment).
@@ -462,16 +451,14 @@ struct GlHires::Impl {
   static constexpr int kOut = 6;   // a ring: the last frames' results (shown, and captures shown a frame or two later) stay valid
   GLuint fbo_out[kOut] = {}, out[kOut] = {};
   int slot = 0;
-  GLuint t_top = 0, t_second = 0, t_meta = 0, t_win = 0, t_regs = 0, t_fb = 0, t_class = 0;
   std::vector<Vtx> vb;
-  std::vector<u32> top, second, meta, regs;
-  std::vector<u8> win, cls;
+  std::vector<u32> regs;
   // The per-frame inputs (planes, classes, vertices) in a ring of sets, one
   // per render: rewriting the one the GPU still reads made Panfrost shadow
   // it (a new buffer, mapped and faulted, every upload), ~3 ms a frame of
   // kernel time on the present thread. t_*, vao and vbo name this render's.
   static constexpr int kSets = 3;
-  struct Set { GLuint top = 0, second = 0, meta = 0, win = 0, regs = 0, fb = 0, cls = 0, base = 0, under = 0, vao = 0, vbo = 0; size_t vbo_cap = 0; };
+  struct Set { GLuint px = 0, bytes = 0, cls = 0, regs = 0, vao = 0, vbo = 0; size_t vbo_cap = 0; };
   Set sets[kSets];
   int set_k = 0, vb_k = 0;   // the planes' set (a composite's), the vertices' (a 3D draw's)
   GLuint layer3d = 0;        // the last draw3d's 3D layer for the composite, 0 when none
@@ -508,7 +495,7 @@ struct GlHires::Impl {
 
   ~Impl() {
     for (Set& st : sets) {
-      GLuint ts[] = {st.top, st.second, st.meta, st.win, st.regs, st.fb, st.cls, st.base, st.under};
+      GLuint ts[] = {st.px, st.bytes, st.cls, st.regs};
       for (GLuint t : ts) if (t) glDeleteTextures(1, &t);
       if (st.vbo) glDeleteBuffers(1, &st.vbo);
       if (st.vao) glDeleteVertexArrays(1, &st.vao);
@@ -574,12 +561,16 @@ bool GlHires::init(u32 scale, std::string* why) {
   d.g_fog_color = glGetUniformLocation(d.edge, "u_fog_color"); d.g_fog_offset = glGetUniformLocation(d.edge, "u_fog_offset");
   d.g_fog_shift = glGetUniformLocation(d.edge, "u_fog_shift"); d.g_density = glGetUniformLocation(d.edge, "u_density");
   glUniform1i(d.g_scale, static_cast<GLint>(d.S));
-  glUseProgram(d.fast);
-  glUniform1i(glGetUniformLocation(d.fast, "u_base"), 0);
-  glUniform1i(glGetUniformLocation(d.fast, "u_3d"), 1);
-  glUniform1i(glGetUniformLocation(d.fast, "u_under"), 2);
-  glUniform1i(glGetUniformLocation(d.fast, "u_scale"), static_cast<GLint>(d.S));
   if (!d.raster || !d.comp) return false;
+  // The composite's two passes read the same planes, on the same units.
+  for (GLuint pr : {d.fast, d.comp}) {
+    glUseProgram(pr);
+    const char* names[] = {"u_px", "u_bytes", "u_cls", "u_regs", "u_3d"};
+    for (int i = 0; i < 5; ++i) glUniform1i(glGetUniformLocation(pr, names[i]), i);
+    glUniform1i(glGetUniformLocation(pr, "u_scale"), static_cast<GLint>(d.S));
+  }
+  d.f_mode = glGetUniformLocation(d.fast, "u_mode");
+  d.u_mode = glGetUniformLocation(d.comp, "u_mode");
   d.u_dispcnt = glGetUniformLocation(d.raster, "u_dispcnt");
   d.r_wbuf = glGetUniformLocation(d.raster, "u_wbuf");
   d.r_split = glGetUniformLocation(d.raster, "u_split");
@@ -596,12 +587,6 @@ bool GlHires::init(u32 scale, std::string* why) {
     }
   }
   glUniform1i(d.r_shadow, 0);
-  glUseProgram(d.comp);
-  const char* names[] = {"u_top", "u_second", "u_meta", "u_win", "u_regs", "u_fb", "u_3d", "u_class"};
-  for (int i = 0; i < 8; ++i) glUniform1i(glGetUniformLocation(d.comp, names[i]), i);
-  d.u_scale = glGetUniformLocation(d.comp, "u_scale");
-  d.u_mode = glGetUniformLocation(d.comp, "u_mode");
-  glUniform1i(d.u_scale, static_cast<GLint>(d.S));
 
   glGenBuffers(1, &d.arena); glBindBuffer(GL_SHADER_STORAGE_BUFFER, d.arena);
   glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(kArenaW) * kArenaH * 4, nullptr, GL_STATIC_DRAW);
@@ -639,10 +624,9 @@ bool GlHires::init(u32 scale, std::string* why) {
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   for (Impl::Set& st : d.sets) {
-    st.top = tex2d(GL_R32UI, 256, 192); st.second = tex2d(GL_R32UI, 256, 192); st.meta = tex2d(GL_R32UI, 256, 192);
-    st.win = tex2d(GL_R8UI, 256, 192); st.regs = tex2d(GL_RG32UI, 192, 1); st.fb = tex2d(GL_R32UI, 256, 192); st.cls = tex2d(GL_R8UI, 256, 192); st.base = tex2d(GL_RGBA8, 256, 192); st.under = tex2d(GL_RGBA8, 256, 192);
+    st.px = tex2d(GL_R32UI, 4 * 256, 192); st.bytes = tex2d(GL_R8UI, 5 * 256, 192); st.cls = tex2d(GL_R8UI, 256, 192); st.regs = tex2d(GL_RG32UI, 192, 1);
   }
-  d.top.resize(256 * 192); d.second.resize(256 * 192); d.meta.resize(256 * 192); d.win.resize(256 * 192); d.cls.resize(256 * 192); d.base.resize(256 * 192); d.under.resize(256 * 192); d.regs.resize(192 * 2);
+  d.regs.resize(192 * 2);
 
   glGenVertexArrays(1, &d.vao_empty);
   for (Impl::Set& st : d.sets) {
@@ -864,6 +848,7 @@ bool GlHires::draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u
     fan(p);
   }
   const u32 total = static_cast<u32>(d.vb.size());
+  d.nruns = static_cast<u32>(runs.size());
   // DS_HIRES_POLYS=x0,y0,x1,y1 (DS pixels): the polygons over that box, once, at render 60 (debug).
   if (static const char* pd = std::getenv("DS_HIRES_POLYS"); pd) {
     static u32 n = 0;
@@ -1065,63 +1050,37 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
   const GLuint layer3d = d.layer3d;
   const GLsizei W = static_cast<GLsizei>(256 * d.S), H = static_cast<GLsizei>(192 * d.S);
   d.set_k = (d.set_k + 1) % Impl::kSets;
-  { const Impl::Set& st = d.sets[d.set_k];
-    d.t_top = st.top; d.t_second = st.second; d.t_meta = st.meta; d.t_win = st.win; d.t_regs = st.regs; d.t_fb = st.fb; d.t_class = st.cls; d.t_base = st.base; d.t_under = st.under; }
+  const Impl::Set& st = d.sets[d.set_k];
   auto stage = [&](int k) { d.stage(k); };
   stage(5);
   const auto T4 = clk::now();
-  // Engine A's planes for the composite.
-  u32 n_full = 0;   // class-2 pixels: none, and pass 2 and its planes are skipped
+  // Engine A's planes for the composite, uploaded as they lie in Gpu's lines
+  // (one row a line, a line's records sizeof(HiresLine) apart). The full
+  // composite's (top, second, ids, kind, alpha, window) only when a line
+  // takes it: a class 2 pixel, or master brightness over a class 1 one.
+  using HL = gpu::Engine2D::HiresLine;
+  static_assert(sizeof(HL) % 4 == 0 && offsetof(HL, under) == offsetof(HL, out) + 1024 && offsetof(HL, top) == offsetof(HL, out) + 2048 &&
+                offsetof(HL, second) == offsetof(HL, out) + 3072 && offsetof(HL, top_kind) == offsetof(HL, top_id) + 256 &&
+                offsetof(HL, top_alpha) == offsetof(HL, top_id) + 512 && offsetof(HL, second_id) == offsetof(HL, top_id) + 768 &&
+                offsetof(HL, win) == offsetof(HL, top_id) + 1024, "HiresLine's planes side by side");
+  bool full = false;
   for (u32 y = 0; y < 192; ++y) {
-    const gpu::Engine2D::HiresLine& h = lines[y];
+    const HL& h = lines[y];
     d.regs[y * 2] = static_cast<u32>(h.bldcnt) | (static_cast<u32>(h.eva) << 16) | (static_cast<u32>(h.evb) << 21) | (static_cast<u32>(h.evy) << 26);
     d.regs[y * 2 + 1] = static_cast<u32>(h.mbright) | (h.valid ? 0x80000000u : 0u);
-    u8* cl = &d.cls[y * 256];
-    if (!h.valid) { std::memset(cl, 0, 256); continue; }
-    // Classes from the export (class 2 only on a `full` line). Master
-    // brightness reaches every pixel of a shown line, so there the 3D pixels
-    // take the full composite too; a capture is taken before it.
-    std::memcpy(cl, h.cls, 256);
-    if (!h.full) continue;
-    const bool bright = mode != 1 && ((h.mbright >> 14) == 1 || (h.mbright >> 14) == 2) && (h.mbright & 0x1F);
-    for (u32 x = 0; x < 256; ++x) { if (bright && cl[x] == 1) cl[x] = 2; n_full += cl[x] == 2; }
-    std::memcpy(&d.top[y * 256], h.top, 256 * 4);
-    std::memcpy(&d.second[y * 256], h.second, 256 * 4);
-    std::memcpy(&d.win[y * 256], h.win, 256);
-    for (u32 x = 0; x < 256; ++x) d.meta[y * 256 + x] = static_cast<u32>(h.top_id[x]) | (static_cast<u32>(h.top_kind[x]) << 8) | (static_cast<u32>(h.top_alpha[x]) << 16) | (static_cast<u32>(h.second_id[x]) << 24);
+    full |= h.valid && h.full;
   }
-  auto up = [](GLuint t, GLsizei w, GLsizei h, GLenum fmt, GLenum type, const void* px) { glBindTexture(GL_TEXTURE_2D, t); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, fmt, type, px); };
-  if (n_full) {
+  if (bench_skip_ & 16) full = false;
+  auto up = [](GLuint t, GLsizei w, GLenum fmt, GLenum type, const void* px) { glBindTexture(GL_TEXTURE_2D, t); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 192, fmt, type, px); };
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  up(d.t_top, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.top.data());
-  up(d.t_second, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.second.data());
-  up(d.t_meta, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.meta.data());
-  up(d.t_win, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_BYTE, d.win.data());
-  up(d.t_regs, 192, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, d.regs.data());
-  for (u32 y = 0; y < 192; ++y) std::memcpy(&d.top[y * 256], lines[y].out, 256 * 4);   // reuse: engine A's own lines
-  up(d.t_fb, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_INT, d.top.data());
-  }
-  up(d.t_class, 256, 192, GL_RED_INTEGER, GL_UNSIGNED_BYTE, d.cls.data());
-  // Pass 1's input: each line's finished 1x pixels (master brightness unless a capture), RGBA bytes, class in alpha.
-  for (u32 y = 0; y < 192; ++y) {
-    u32* row = &d.base[y * 256];
-    gpu::kern::active::output_line(lines[y].out, mode == 1 ? 0 : lines[y].mbright, row);
-    const u8* cl = &d.cls[y * 256];
-    for (u32 x = 0; x < 256; ++x) {   // 0xAARRGGBB -> R, G, B, class bytes in memory
-      const u32 c = row[x];
-      row[x] = ((c >> 16) & 0xFF) | (c & 0xFF00) | ((c & 0xFF) << 16) | (static_cast<u32>(cl[x] * 127) << 24);
-    }
-  }
-  up(d.t_base, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, d.base.data());
-  // Class 1's other answer: what the 3D covers, finished the same way.
-  for (u32 y = 0; y < 192; ++y) {
-    u32* row = &d.under[y * 256];
-    if (!lines[y].valid) continue;
-    gpu::kern::active::output_line(lines[y].under, mode == 1 ? 0 : lines[y].mbright, row);
-    for (u32 x = 0; x < 256; ++x) { const u32 c = row[x]; row[x] = ((c >> 16) & 0xFF) | (c & 0xFF00) | ((c & 0xFF) << 16) | 0xFF000000u; }
-  }
-  up(d.t_under, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, d.under.data());
-
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, sizeof(HL) / 4);
+  up(st.px, full ? 4 * 256 : 2 * 256, GL_RED_INTEGER, GL_UNSIGNED_INT, lines[0].out);
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, sizeof(HL));
+  up(st.cls, 256, GL_RED_INTEGER, GL_UNSIGNED_BYTE, lines[0].cls);
+  if (full) up(st.bytes, 5 * 256, GL_RED_INTEGER, GL_UNSIGNED_BYTE, lines[0].top_id);
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+  glBindTexture(GL_TEXTURE_2D, st.regs);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 192, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, d.regs.data());
   stage(-1);
   const auto T5 = clk::now();
   stage(4);
@@ -1134,21 +1093,16 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
   // is 0.5; ALWAYS writes it), cleared 1 where it discarded.
   glClearDepthf(1.f); glClear(GL_DEPTH_BUFFER_BIT);
   glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
-  const int skip2 = bench_skip_;
-  if (skip2 & 16) n_full = 0;
+  const GLuint ts[5] = {st.px, st.bytes, st.cls, st.regs, layer3d};
+  for (int i = 4; i >= 0; --i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
   glUseProgram(d.fast);
-  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d.t_base);
-  glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, layer3d);
-  glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, d.t_under);
-  if (!(skip2 & 16)) glDrawArrays(GL_TRIANGLES, 0, 3);
+  glUniform1i(d.f_mode, mode);
+  if (!(bench_skip_ & 16)) glDrawArrays(GL_TRIANGLES, 0, 3);
   // Pass 2: the full composite, only where depth is still 1 (LESS against 0.5 fails elsewhere: early-Z skips them).
-  if (n_full) {
+  if (full) {
     glDepthFunc(GL_LESS); glDepthMask(GL_FALSE);
     glUseProgram(d.comp);
     glUniform1i(d.u_mode, mode);
-    const GLuint ts[8] = {d.t_top, d.t_second, d.t_meta, d.t_win, d.t_regs, d.t_fb, layer3d, d.t_class};
-    for (int i = 0; i < 8; ++i) { glActiveTexture(GL_TEXTURE0 + i); glBindTexture(GL_TEXTURE_2D, ts[i]); }
-    glActiveTexture(GL_TEXTURE0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
   }
   { const GLenum dead = GL_DEPTH_ATTACHMENT; glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &dead); }   // the composite's depth: only within it
@@ -1160,8 +1114,8 @@ unsigned GlHires::composite(const gpu::Engine2D::HiresLine* lines, int mode) {
     const auto T6 = clk::now();
     d.t[4] += ms(T4, T5); d.t[5] += ms(T5, T6);
     if (d.tn >= 120) {
-      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f (%zu verts, %u full-composite pixels)\n",
-                   d.t[0] / d.tn, d.t[1] / d.tn, d.t[2] / d.tn, d.t[3] / d.tn, d.t[4] / d.tn, d.t[5] / d.tn, d.vb.size(), n_full);
+      std::fprintf(stderr, "hires3d cpu ms/render: arena %.2f, fans %.2f, vbo %.2f, raster calls %.2f, planes %.2f, composite calls %.2f (%zu verts, %u runs)\n",
+                   d.t[0] / d.tn, d.t[1] / d.tn, d.t[2] / d.tn, d.t[3] / d.tn, d.t[4] / d.tn, d.t[5] / d.tn, d.vb.size(), d.nruns);
       for (double& x : d.t) x = 0;
       d.tn = 0;
     }
