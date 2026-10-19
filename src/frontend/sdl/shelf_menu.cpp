@@ -22,7 +22,7 @@ constexpr u32 kRepeatDelayMs = 400, kRepeatRateMs = 55;
 // DSperate's own pages are in capitals (its pixel font); DSlot's rows are
 // written as sentences. Words that are names keep their capitals.
 std::string sentence(const std::string& s) {
-  static const char* const kKeep[] = {"DS", "DSI", "NAND", "DNS", "PIP", "LCD", "3D", "GBA", "MSAA", "FPS", "RGA", "PNG", "AR", "OK", "A", "B", "X", "Y", "L", "R"};
+  static const char* const kKeep[] = {"DS", "DSI", "NAND", "DNS", "PIP", "LCD", "3D", "GBA", "GPU", "CPU", "JIT", "MSAA", "FPS", "RGA", "PNG", "AR", "OK", "A", "B", "X", "Y", "L", "R"};
   std::string out;
   size_t i = 0;
   bool first = true;
@@ -78,6 +78,12 @@ const char* ini_key_of(const char* option) {
 }
 bool declared_ini(const char* ini) {
   for (const DeclaredKey& d : kDeclared) if (std::strcmp(d.ini, ini) == 0) return true;
+  return false;
+}
+// What a GBA game never uses: the DS's 3D, the DSi's NAND, local wireless.
+bool ds_only(const char* key) {
+  for (const char* k : {"video.gpu3d", "video.hires3d", "video.aa", "emu.dsi_", "net.", "wifi."})
+    if (std::strncmp(key, k, std::strlen(k)) == 0) return true;
   return false;
 }
 } // namespace
@@ -192,6 +198,7 @@ void ShelfMenu::add_setting_rows(const ds::sdl::Setting* table) {
   for (const ds::sdl::Setting* s = table; s && s->key; ++s) {
     if (s->type == ds::sdl::Setting::Type::Text) continue;   // no keyboard here: the ini keeps them
     if (options_ && declared_ini(s->key)) continue;          // DSlot's settings have it (add_declared_rows)
+    if (shelf_ && shelf_->gba() && ds_only(s->key)) continue;
     if (!host_->enabled(*s)) continue;
     std::string v = host_->get(s->key);
     if (v.empty()) v = default_value(*s);

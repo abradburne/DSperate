@@ -13,6 +13,7 @@ on Panfrost with GLES 3.1, two 1024x768 panels). It adds:
 | GLES present | `frontend/sdl/gl_present.*`, `gl_frame_presenter.*` | the panels through GLES on the present thread, at 1x too |
 | Fallback | `frontend/sdl/hires_governor.h` | hi-res 3D drops to 1x while the GPU cannot keep up |
 | Real-time budget | `frontend/sdl/rt_budget.h` | the emulation thread survives RLIMIT_RTTIME |
+| Pause menu | `frontend/sdl/pause_menu.h`, `shelf_menu.*` | DSlot's menu (nibkit's), beside DSperate's own |
 | Debug switches | `frontend/sdl/debug_options.*` | `DS_DEBUG`, below |
 | Tests | `tests/gba_test.cpp`, `gl_hires_test.cpp`, `hires_governor_test.cpp` | below |
 
@@ -210,6 +211,35 @@ which counts the wait for the previous flip as present time and so sits at its c
 + 2 ms) in every game; DS games at 2x are GPU-bound enough not to show it. Measuring the
 present's own work instead is the follow-up (`docs/rk3568/measurements.md`, latency).
 
+## The pause menu
+
+Pausing a game opens the menu DSlot and the other emulators share: nibOS's nibkit menu
+(`sdk/nibkit-menu-c`, a Rust static library with a C header), linked in with
+`-DDSPERATE_NIBKIT_MENU=<that folder>` (the package: `_nibkit=`). The bottom screen shows it
+at the panel's resolution (`Display::draw_picture`, a texture on the GLES present or the SDL
+renderer); the top screen shows the game dimmed under Paused, or on States the highlighted
+state's picture and when it was saved. Back opens and closes it, Menu saves and quits, Menu +
+R / L quick save and load, L / R change tab, and the bottom screen takes taps.
+
+| tab | rows |
+|---|---|
+| Play | resume, save / load state (to States), fast forward, reset (A twice), save and quit |
+| States | a card per slot (1-6, and any of 7-10 holding a state), the resume point last: A load, X save (twice over a used slot), Y quick slot |
+| Game | the options DSperate declares to DSlot at the game's level; cheats and achievements; DSperate's options for this game only |
+| DS / GBA | the declared options for the console, then DSperate's own under headings; controls |
+| System | volume, each screen's brightness, 12- or 24-hour clock |
+
+A declared option (`packaging/arch/dslot/dsperate.toml`: 3D resolution, anti-aliasing, frame
+skip, smooth scaling) lives in DSlot's `settings.toml`, never DSperate's ini: its row shows
+DSlot's "Use ..." when the page doesn't set it, Y clears it there, and a change takes effect in
+the running game too (`SettingsHost::apply_now`) as DSlot passes it from the next start. A
+state's picture is its top screen in a `.thumb` beside it (RGBA, 256x192).
+
+Both menus are `PauseMenu`s; `ui.menu = auto` (shelf where it is built in and the screens are
+two windows that can show a picture), `shelf` or `dsperate`. DSperate's own stays for one
+window, the other display tiers and the loader cart's picker. While paused the emulation
+thread is an ordinary task: drawing a menu at panel resolution outlasted RLIMIT_RTTIME.
+
 ## DS_DEBUG
 
 The hi-res path's and the GLES present's switches, one environment variable read once
@@ -221,6 +251,7 @@ The hi-res path's and the GLES present's switches, one environment variable read
 | `present-wait` | every frame shown: the present waits for the GPU instead of leaving a frame out |
 | `present-hash=FILE` | per present: window, count, FNV-1a of the picture, and for a window one 1x screen fills the hash it must have |
 | `present-ppm=N[+COUNT]:PREFIX` | the windows' pictures at presents N.. as PPM |
+| `menu-ppm=PREFIX` | the shared pause menu's two pictures as PPM, each time they change |
 | `hires-stats` | CPU ms per stage of a render, every 120; frames drawn at once / captured, every 300 |
 | `hires-stages` | GPU ms per stage (timer queries; they change Panfrost's batching, so they rank) |
 | `hires-bench=N[:MASK/MASK/...]` | render N drawn 60 times per mask of left-out stages (`GlHires::Stage`), glFinish'd, timed |
