@@ -154,8 +154,9 @@ Before tuning, A → game was 2.1–2.55 s and Menu → shelf 0.9 s.
   each close waits for an RCU grace period. Expedited RCU
   (`rootfs/dslot/pocketos-rcu.conf` in nibOS) makes it 0.24 s.
 - SDL3's atomic KMSDRM path has no plane for the second panel and crashed DSperate (SIGSEGV
-  in `KMSDRM_DestroySurfaces`) on every exit; the launcher sets `SDL_KMSDRM_ATOMIC=0`, as DSlot
-  does.
+  in `KMSDRM_DestroySurfaces`) on every exit, and in the swap mid-game; with two windows
+  DSperate sets `SDL_KMSDRM_ATOMIC=0` itself unless the environment says otherwise (the
+  launcher used to), as DSlot does for its own.
 - sdl2-compat 2.32.74 passes SDL3's keycode for Back to SDL2 programs untranslated; in SDL2's
   numbering it is "Sleep", which is what `dsperate.ini` binds.
 - Real-time priority (`LimitRTPRIO=10` on dslot.service; DSperate runs SCHED_RR 5, presenters

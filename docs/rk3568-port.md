@@ -194,8 +194,10 @@ pressed, then exits; DSlot is back on the shelf. The log has the details.
 
 SIGTERM puts a game away as Menu does: the auto state and the battery save are written and
 DSperate exits 0 (DSlot sends it for nibOS's power menu, and systemd at shutdown). SIGINT and
-SIGTERM are blocked in every thread and taken by one waiter: delivered to whichever thread the
-kernel picked, they cut a present thread's KMS flip wait short and crashed the game instead.
+SIGTERM are blocked in every thread and taken by one waiter, so they never interrupt another
+thread's call. With two windows DSperate sets `SDL_KMSDRM_ATOMIC=0` unless the environment
+sets it: SDL3's atomic KMSDRM path has no plane for the second panel and crashed in the swap,
+mid-game or while leaving (the old launcher exported it; DSlot does not).
 
 Frame pacing is locked to the panels' vblanks in DS mode (`video.vsync_lock = auto`,
 `vsync_lock.h`): frame i flips on vblank base + i of one panel, the console runs at the panel's
