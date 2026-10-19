@@ -29,6 +29,10 @@ public:
   // draw_now() is the work itself, for a job already on that thread.
   void draw(const frontend::View* views, int nviews, const u32* const fb[2]);
   void draw_now(const frontend::View* views, int nviews, const u32* const fb[2]);
+  // A picture filling the window instead of the screens (RGBA bytes, rows
+  // top first): a menu drawn at the panel's own resolution. Shown and swapped
+  // on the present thread, like draw().
+  void draw_picture(const u8* rgba, int w, int h);
   // A window that may skip a frame identical to the one it shows (no upload,
   // draw or swap): never the one whose swap paces the frame loop.
   void set_may_skip(bool on) { may_skip_ = on; }

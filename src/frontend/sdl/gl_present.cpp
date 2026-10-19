@@ -19,6 +19,7 @@ void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
 #include "frontend/sdl/debug_options.h"
 #include "frontend/sdl/gl_util.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -111,6 +112,7 @@ struct GlPresent::Impl {
   SDL_GLContext ctx = nullptr;
   bool linear = false;
   GLuint p_fb = 0, p_tex = 0, vao = 0, fbtex[2][3] = {};
+  GLuint pic_tex = 0; int pic_w = 0, pic_h = 0;   // draw_picture's, made on first use
   int fb_k[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
   u32 presents = 0;         // present-ppm
@@ -162,7 +164,7 @@ void GlPresent::close() {
   pt.wait(pt.post([&] { if (d.ctx) SDL_GL_MakeCurrent(d.win, nullptr); }));   // released there, taken here to tear down
   if (d.ctx) {
     SDL_GL_MakeCurrent(d.win, d.ctx);
-    glDeleteTextures(6, &d.fbtex[0][0]); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
+    glDeleteTextures(6, &d.fbtex[0][0]); if (d.pic_tex) glDeleteTextures(1, &d.pic_tex); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
     if (--g_contexts == 0) g_first = nullptr;
     SDL_GL_DeleteContext(d.ctx);
   }
@@ -223,6 +225,45 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
   dump_present(d.index, ++d.presents, ww, wh);
   if (latlog::on()) gpu_stamp(d);
   SDL_GL_SwapWindow(d.win);
+}
+
+void GlPresent::draw_picture(const u8* rgba, int w, int h) {
+  if (!d_ || !rgba || w <= 0 || h <= 0) return;
+  PresentThread& pt = PresentThread::get();
+  pt.wait(pt.post([&] {
+    Impl& d = *d_;
+    SDL_GL_MakeCurrent(d.win, d.ctx);
+    if (!d.pic_tex || d.pic_w != w || d.pic_h != h) {
+      if (d.pic_tex) glDeleteTextures(1, &d.pic_tex);
+      glGenTextures(1, &d.pic_tex); glBindTexture(GL_TEXTURE_2D, d.pic_tex);
+      glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, w, h);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      d.pic_w = w; d.pic_h = h;
+    }
+    glBindTexture(GL_TEXTURE_2D, d.pic_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    int ww = 0, wh = 0;
+    SDL_GL_GetDrawableSize(d.win, &ww, &wh);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
+    glViewport(0, 0, ww, wh);
+    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    // The picture's shape kept, centred: the panel's own size fills it exactly.
+    const float s = std::min(static_cast<float>(ww) / static_cast<float>(w), static_cast<float>(wh) / static_cast<float>(h));
+    const int vw = static_cast<int>(static_cast<float>(w) * s), vh = static_cast<int>(static_cast<float>(h) * s);
+    glViewport((ww - vw) / 2, (wh - vh) / 2, vw, vh);
+    glUseProgram(d.p_tex);
+    glBindVertexArray(d.vao);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, d.pic_tex);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    d.shown_screen = -1;   // whatever may_skip remembered is gone from the window
+    dump_present(d.index, ++d.presents, ww, wh);
+    SDL_GL_SwapWindow(d.win);
+  }));
 }
 
 void GlPresent::gpu_stamp(Impl& d) {

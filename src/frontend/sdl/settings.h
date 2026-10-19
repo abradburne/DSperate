@@ -68,6 +68,10 @@ struct SettingsHost {
   virtual ~SettingsHost() = default;
   virtual std::string get(const char* key) const = 0;   // "" if unset; caller falls back to table default
   virtual void set(const char* key, const std::string& value) = 0;
+  // Takes effect in this run and is kept nowhere: a setting whose home is
+  // another program's file (DSlot's), which passes it again at each start.
+  // A host keeping nothing apart from its own file may leave it as set().
+  virtual void apply_now(const char* key, const std::string& value) { set(key, value); }
   virtual bool enabled(const Setting& s) const = 0;
   virtual const char* disabled_reason(const Setting& s) const = 0;   // "" when enabled
   // Whether a choice is offered at all, e.g. the display-engine tier can only

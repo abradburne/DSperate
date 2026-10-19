@@ -329,6 +329,7 @@ void Display::close() {
   surf_ = nullptr;   // owned by SDL, freed with the window
   if (glp_) { glp_->close(); glp_.reset(); }
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+  if (pic_tex_) { SDL_DestroyTexture(pic_tex_); pic_tex_ = nullptr; pic_w_ = pic_h_ = 0; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
   if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
 }
@@ -471,6 +472,28 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     }
   });
   for (int k = 0; k < nf; ++k) owners[k]->job_ = stage_job;
+}
+
+bool Display::draw_picture(const u8* rgba, int w, int h) {
+  sync();
+  if (gpu_ || disp_ || (!glp_ && !ren_)) return false;
+  if (glp_) { glp_->draw_picture(rgba, w, h); return true; }
+  if (!pic_tex_ || pic_w_ != w || pic_h_ != h) {
+    if (pic_tex_) SDL_DestroyTexture(pic_tex_);
+    pic_tex_ = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+    if (!pic_tex_) return false;
+    pic_w_ = w; pic_h_ = h;
+  }
+  SDL_UpdateTexture(pic_tex_, nullptr, rgba, w * 4);
+  int ow = 0, oh = 0;
+  SDL_GetRendererOutputSize(ren_, &ow, &oh);
+  const double s = std::min(static_cast<double>(ow) / w, static_cast<double>(oh) / h);
+  const SDL_Rect r{(ow - static_cast<int>(w * s)) / 2, (oh - static_cast<int>(h * s)) / 2, static_cast<int>(w * s), static_cast<int>(h * s)};
+  SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
+  SDL_RenderClear(ren_);
+  SDL_RenderCopy(ren_, pic_tex_, nullptr, &r);
+  SDL_RenderPresent(ren_);
+  return true;
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {

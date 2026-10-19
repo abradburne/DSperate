@@ -62,3 +62,27 @@ if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE)
   set_property(SOURCE gpu_present.cpp APPEND PROPERTY OBJECT_DEPENDS
                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.spv")
 endif()
+# The pause menu DSlot, inkdot and DSperate share (nibOS's sdk/nibkit-menu-c,
+# a Rust static library with a C header): -DDSPERATE_NIBKIT_MENU=<that folder>.
+# Built here with cargo into the build tree. Without it the frontend keeps its
+# own menu (menu.cpp) only.
+set(DSPERATE_NIBKIT_MENU "" CACHE PATH "nibOS's sdk/nibkit-menu-c, for the shared pause menu (empty: DSperate's own menu only)")
+if(DSPERATE_NIBKIT_MENU)
+  find_program(DSPERATE_CARGO cargo REQUIRED)
+  set(_nib_target "${CMAKE_BINARY_DIR}/nibkit-menu")
+  set(_nib_lib "${_nib_target}/release/libnibkit_menu.a")
+  file(GLOB_RECURSE _nib_sources CONFIGURE_DEPENDS "${DSPERATE_NIBKIT_MENU}/src/*.rs" "${DSPERATE_NIBKIT_MENU}/../nibkit/src/*.rs")
+  add_custom_command(OUTPUT "${_nib_lib}"
+    COMMAND "${DSPERATE_CARGO}" build --release --quiet --manifest-path "${DSPERATE_NIBKIT_MENU}/Cargo.toml" --target-dir "${_nib_target}"
+    DEPENDS "${DSPERATE_NIBKIT_MENU}/Cargo.toml" ${_nib_sources}
+    COMMENT "cargo: nibkit-menu-c")
+  add_custom_target(nibkit_menu_build DEPENDS "${_nib_lib}")
+  add_library(nibkit_menu STATIC IMPORTED)
+  set_target_properties(nibkit_menu PROPERTIES IMPORTED_LOCATION "${_nib_lib}"
+                        INTERFACE_INCLUDE_DIRECTORIES "${DSPERATE_NIBKIT_MENU}/include")
+  add_dependencies(nibkit_menu nibkit_menu_build)
+  target_sources(dsperate PRIVATE shelf_menu.cpp)
+  target_link_libraries(dsperate PRIVATE nibkit_menu ${CMAKE_DL_LIBS} m)
+  target_compile_definitions(dsperate PRIVATE DSPERATE_NIBKIT_MENU=1)
+  message(STATUS "pause menu: nibkit's (${DSPERATE_NIBKIT_MENU})")
+endif()

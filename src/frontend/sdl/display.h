@@ -50,11 +50,17 @@ public:
   void close();
 
   void draw(const u32* const fb[SCREENS]);
+  // A picture filling the window in place of the screens (RGBA bytes, rows
+  // top first), at the window's resolution: the pause menu. The GLES present
+  // and SDL_Renderer tiers only; false elsewhere, and nothing is drawn.
+  bool draw_picture(const u8* rgba, int w, int h);
+  bool picture_capable() const { return !gpu_ && !disp_ && (glp_ || ren_); }
   // The renderer tier through a GLES context of its own (GlPresent) instead
   // of an SDL_Renderer: hi-res 3D, and 1x windows drawn on the present
   // thread (gl_frame_presenter.h). Set before open().
   void set_gl(bool on) { gl_wanted_ = on; }
   GlPresent* gl() { return glp_.get(); }
+  bool gl_present() const { return glp_ != nullptr; }   // each screen a texture, scaled on the GPU
   void draw_gl_now(const u32* const fb[SCREENS]) { if (glp_) { glp_->set_lat_screen(only_screen_ > 0); glp_->draw_now(views_, nviews_, fb); latlog::swapped(only_screen_ > 0); } }   // on the present thread
   bool shows(int screen) const { for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) return true; return false; }
   // The frame loop's present: each GPU-presenting window of `ds` takes the
@@ -231,6 +237,8 @@ private:
   SDL_Window*   win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
   SDL_Texture*  tex_[SCREENS] = {nullptr, nullptr};
+  SDL_Texture*  pic_tex_ = nullptr;   // draw_picture's on the renderer tier
+  int           pic_w_ = 0, pic_h_ = 0;
   bool gl_wanted_ = false;
   std::unique_ptr<GlPresent> glp_;
   View          views_[SCREENS] = {};

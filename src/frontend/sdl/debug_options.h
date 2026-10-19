@@ -33,6 +33,9 @@ struct Options {
   // N..N+COUNT-1, as PREFIX.<window>.<present>.ppm.
   u32 present_ppm_from = 0, present_ppm_count = 0;
   std::string present_ppm_prefix;
+  // menu-ppm=PREFIX: the shared pause menu's two pictures each time they are
+  // drawn, as PREFIX.<n>.top.ppm and PREFIX.<n>.bottom.ppm.
+  std::string menu_ppm;
   // hires-stats: every 120 hi-res renders, the present thread's CPU time per
   // stage; every 300 frames, how many were drawn at once, captured, or
   // shown from a capture.

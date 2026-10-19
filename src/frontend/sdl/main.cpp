@@ -46,6 +46,10 @@
 #include "lid.h"
 #include "loader_cart.h"
 #include "menu.h"
+#if DSPERATE_NIBKIT_MENU
+#include "shelf_menu.h"
+#include <nibkit_menu.h>
+#endif
 #include "cpu_gov.h"
 #include "pacer.h"
 #include "rt_budget.h"
@@ -514,6 +518,26 @@ void read_cheevos_chunk(ds::state::Reader& r) {
 }
 
 
+// Beside each state, its top screen as it was (RGBA bytes, 256x192, no
+// header): the picture the pause menu's States page shows for the slot.
+std::string state_picture_path(const std::string& state) {
+  const size_t dot = state.rfind(".dss");
+  return (dot == std::string::npos ? state : state.substr(0, dot)) + ".thumb";
+}
+void write_state_picture(NDS& nds, const std::string& state) {
+  const u32* fb = nds.gpu.framebuffer(0);
+  std::vector<u8> px(static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H * 4);
+  for (size_t i = 0; i < static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H; ++i) {
+    px[i * 4 + 0] = static_cast<u8>(fb[i] >> 16); px[i * 4 + 1] = static_cast<u8>(fb[i] >> 8);
+    px[i * 4 + 2] = static_cast<u8>(fb[i]); px[i * 4 + 3] = 255;
+  }
+  const std::string path = state_picture_path(state);
+  if (FILE* f = std::fopen(path.c_str(), "wb")) {
+    if (std::fwrite(px.data(), 1, px.size(), f) != px.size()) std::fprintf(stderr, "state: cannot write %s\n", path.c_str());
+    std::fclose(f);
+  }
+}
+
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
   const ds::sdl::OffRealtime off_rt;
   ds::state::Writer w; std::string err;
@@ -527,6 +551,7 @@ bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::
   std::fclose(f);
   if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "state: cannot write %s\n", path.c_str()); return false; }
   std::fprintf(stderr, "state: saved %s (%zu KB)\n", path.c_str(), w.data().size() >> 10);
+  write_state_picture(nds, path);
   return true;
 }
 
@@ -1052,6 +1077,99 @@ namespace {
 // RESET on a game started from the game list: main() starts the process over.
 bool g_restart = false;
 }
+
+#if DSPERATE_NIBKIT_MENU
+// DS_DEBUG=menu-ppm=PREFIX: each picture of the shared menu as drawn.
+void debug_menu_ppm(const char* which, const u8* rgba, int w, int h) {
+  const std::string& prefix = ds::sdl::debug::options().menu_ppm;
+  if (prefix.empty() || !rgba) return;
+  static unsigned n = 0;
+  if (std::strcmp(which, "top") == 0) ++n;
+  const std::string path = prefix + "." + std::to_string(n) + "." + which + ".ppm";
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return;
+  std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+  for (int i = 0; i < w * h; ++i) std::fwrite(rgba + static_cast<size_t>(i) * 4, 1, 3, f);
+  std::fclose(f);
+}
+
+// What the shared pause menu asks of the frontend (shelf_menu.h).
+struct ShelfMenuHost final : ds::sdl::ShelfHost {
+  NDS& nds;
+  const Session& session;
+  ds::sdl::Audio& audio;
+  bool& ff_toggle;
+  std::function<std::string(int)> slot_path;
+  ShelfMenuHost(NDS& n, const Session& s, ds::sdl::Audio& a, bool& ff, std::function<std::string(int)> sp)
+      : nds(n), session(s), audio(a), ff_toggle(ff), slot_path(std::move(sp)) {}
+
+  std::string game_title() const override { return rom_stem(base_name(session.rom_path)); }
+  bool gba() const override { return nds.gba_mode(); }
+  bool fast_forward() const override { return ff_toggle; }
+  bool slot_picture(int slot, std::vector<u8>& rgba, int& w, int& h) override {
+    FILE* f = std::fopen(state_picture_path(slot_path(slot)).c_str(), "rb");
+    if (!f) return false;
+    rgba.resize(static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H * 4);
+    const bool ok = std::fread(rgba.data(), 1, rgba.size(), f) == rgba.size();
+    std::fclose(f);
+    w = static_cast<int>(ds::SCREEN_W); h = static_cast<int>(ds::SCREEN_H);
+    return ok;
+  }
+  // "Today 4:41 PM", "Yesterday 9:02 AM", "12 Oct 4:41 PM".
+  std::string slot_saved(int slot) override {
+    struct stat st{};
+    if (stat(slot_path(slot).c_str(), &st) != 0) return {};
+    const std::time_t when = st.st_mtime, now = std::time(nullptr);
+    std::tm w{}, n{};
+    localtime_r(&when, &w); localtime_r(&now, &n);
+    char day[32];
+    if (w.tm_year == n.tm_year && w.tm_yday == n.tm_yday) std::snprintf(day, sizeof day, "Today");
+    else if (w.tm_year == n.tm_year && w.tm_yday + 1 == n.tm_yday) std::snprintf(day, sizeof day, "Yesterday");
+    else std::strftime(day, sizeof day, "%d %b", &w);
+    return std::string(day) + " " + clock_of(w);
+  }
+  int  volume() const override { return audio.volume(); }
+  void set_volume(int percent) override { audio.set_volume(percent); audio.set_muted(false); }
+  std::string clock() const override { const std::time_t now = std::time(nullptr); std::tm t{}; localtime_r(&now, &t); return clock_of(t); }
+  // The device's battery, as the kernel reports it.
+  int battery(bool& charging) const override {
+    charging = false;
+    DIR* d = opendir("/sys/class/power_supply");
+    if (!d) return -1;
+    int pct = -1;
+    while (dirent* e = readdir(d)) {
+      const std::string base = std::string("/sys/class/power_supply/") + e->d_name + "/";
+      if (read_line(base + "type") != "Battery") continue;
+      const std::string cap = read_line(base + "capacity");
+      if (cap.empty()) continue;
+      pct = std::atoi(cap.c_str());
+      charging = read_line(base + "status") == "Charging";
+      break;
+    }
+    closedir(d);
+    return pct;
+  }
+
+private:
+  // As the bar shows the time: nibOS's 12- or 24-hour choice.
+  static std::string clock_of(const std::tm& t) {
+    char buf[16];
+    if (nib_clock_hour12()) std::snprintf(buf, sizeof buf, "%d:%02d %s", t.tm_hour % 12 == 0 ? 12 : t.tm_hour % 12, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+    else std::snprintf(buf, sizeof buf, "%d:%02d", t.tm_hour, t.tm_min);
+    return buf;
+  }
+  static std::string read_line(const std::string& path) {
+    std::string out;
+    if (FILE* f = std::fopen(path.c_str(), "r")) {
+      char buf[64];
+      if (std::fgets(buf, sizeof buf, f)) out = buf;
+      std::fclose(f);
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    return out;
+  }
+};
+#endif
 
 static int run(int argc, char** argv) {
   mark("started");
@@ -2120,8 +2238,23 @@ sdl_ready:
   int pip_touch_hold = std::max(0, cfg.num("video.pip_touch_hold", 60));
   constexpr int PIP_FADE_STEP = 24;                          // ~10 frames rest to opaque
   int pip_alpha = static_cast<int>(layout.pip_alpha * 255.0 + 0.5), pip_hold = 0;
-  // The pause menu (menu.h) and the two screen copies it is composited into.
-  ds::sdl::Menu menu;
+  // The pause menu, behind PauseMenu (pause_menu.h): the one DSlot and the
+  // other emulators share (shelf_menu.h), drawn as whole pictures on both
+  // panels, where DSperate was built with it, the screens are two windows
+  // that can show a picture, and no loader cart's picker needs DSperate's
+  // own (menu.h), which serves everywhere else. ui.menu = auto | shelf | dsperate.
+  ds::sdl::Menu classic_menu;
+#if DSPERATE_NIBKIT_MENU
+  ds::sdl::ShelfMenu shelf_menu;
+  const std::string ui_menu = cfg.str("ui.menu", "auto");
+  const bool shelf_fits = dual_window && display.picture_capable() && display2.picture_capable() && !boot_firmware;
+  const bool use_shelf = ui_menu == "shelf" || (ui_menu == "auto" && shelf_fits);
+  if (use_shelf && !shelf_fits) std::fprintf(stderr, "ui.menu: shelf asked for, but these screens can't show it; DSperate's own instead\n");
+  ds::sdl::PauseMenu& menu = use_shelf && shelf_fits ? static_cast<ds::sdl::PauseMenu&>(shelf_menu) : classic_menu;
+#else
+  ds::sdl::PauseMenu& menu = classic_menu;
+#endif
+  VLOG("pause menu: %s\n", menu.panel_ui() ? "shared (nibkit)" : "DSperate's own");
   menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
   session.load_enabled(nds);
   // DSI NAND LINKS: a .dspr.nds shortcut file per DSiWare title on
@@ -2179,6 +2312,11 @@ sdl_ready:
     if (f) std::fclose(f);
   }
   menu.set_slot_notice(g_state_refused.empty() ? nullptr : g_state_refused.c_str()); };
+#if DSPERATE_NIBKIT_MENU
+  ShelfMenuHost shelf_host(nds, session, audio, ff_toggle, slot_path);
+  shelf_menu.set_host(&shelf_host);
+  bool shelf_touching = false;   // a finger already down on the bottom screen: one tap, one touch
+#endif
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
   u64 sram_quiet_since = 0;
   // DSi equivalent: NAND writes go out as title saves/system sidecar/photos
@@ -2327,6 +2465,10 @@ sdl_ready:
       return cfg.str(key, "");
     }
 
+    void apply_now(const char* key, const std::string& value) override {
+      cfg.set(key, value);
+      apply(key, value);
+    }
     void set(const char* key, const std::string& value) override {
       if (is_user_key(key) && user_in_firmware()) { user_set(key, value); return; }
       // A checkbox edits the ring; ticking a mode reinserts it in Display::Mode order.
@@ -2604,16 +2746,20 @@ sdl_ready:
         if (net_live && *net_live) return "NOT DURING A NETWORK SESSION";
         return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
       case ds::sdl::Dep::PanelEffects:
+        if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         if (display.rga_present()) return "THE RGA ALWAYS SCALES BILINEAR";
         return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
       case ds::sdl::Dep::GridSeam:
+        if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? "THE RGA DRAWS THE DARK GRID ONLY" : "";
         if (!panel_effects()) return "THIS SCREEN SCALES IN HARDWARE";
         return flag("video.linear", false) ? "BILINEAR IS ON" : "";
       case ds::sdl::Dep::Chunky:
+        if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         if (display.rga_present()) return "NOT ON THE RGA PRESENT";
         return flag("video.linear", false) ? "BILINEAR IS ON" : "";
       case ds::sdl::Dep::ChunkyCell:
+        if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         if (display.rga_present()) return "NOT ON THE RGA PRESENT";
         if (flag("video.linear", false)) return "BILINEAR IS ON";
         return cfg.str("video.chunky", "false") == "false" ? "ONLY WITH CHUNKY ON" : "";
@@ -2731,9 +2877,14 @@ sdl_ready:
       host.reopen_wanted = true;
   };
   menu.set_settings_host(&host);
+  // Paused, nothing is paced: the emulation thread is an ordinary task
+  // (rt_budget.h) until it resumes. Drawing a menu at the panels' own
+  // resolution outlasts RLIMIT_RTTIME as a real-time thread.
+  std::optional<ds::sdl::OffRealtime> paused_off_rt;
   auto set_paused = [&](bool p) {
     if (p == paused) return;
     paused = p;
+    if (p) paused_off_rt.emplace(); else paused_off_rt.reset();
     audio.pause(p);
     display.set_page(p);
     if (p) flush_save(); else { pacer.reset(); fs_debt_ms = 0; }
@@ -3312,7 +3463,17 @@ sdl_ready:
       menu_ms = now_ms;
       if (host.capturing()) menu_dirty = true;   // shows "PRESS ANY..." until collected
       menu.face_presses(input.take_menu_faces());
-      switch (menu.update(input.take_menu_presses(), input.menu_held(), elapsed)) {
+      Menu::Result result = menu.update(input.take_menu_presses(), input.menu_held(), elapsed);
+#if DSPERATE_NIBKIT_MENU
+      // The shared menu is on the bottom screen, which takes taps: the DS
+      // touch point is that screen's, a quarter of the panel's pixels.
+      if (menu.panel_ui() && result == Menu::Result::None) {
+        const ds::input::Frame f = input.frame();
+        if (f.down && !shelf_touching) result = shelf_menu.touch(f.x * 4.0f + 2.0f, f.y * 4.0f + 2.0f);
+        shelf_touching = f.down;
+      }
+#endif
+      switch (result) {
       case Menu::Result::None: break;
       case Menu::Result::Resume:
         state_slot = menu.slot();
@@ -3349,11 +3510,13 @@ sdl_ready:
         } else refresh_slots();
         break;
       case Menu::Result::Launch: launch_game(menu.chosen()); break;
+      case Menu::Result::FastForward: ff_toggle = !ff_toggle; VLOG("fast forward %s\n", ff_toggle ? "on" : "off"); break;
       case Menu::Result::Quit: input.request_quit(); break;
       case Menu::Result::Delete: {
         const std::string path = slot_path(menu.doomed_slot());
         if (std::remove(path.c_str()) != 0) std::fprintf(stderr, "state: cannot delete %s: %s\n", path.c_str(), std::strerror(errno));
         else std::fprintf(stderr, "state: deleted %s\n", path.c_str());
+        std::remove(state_picture_path(path).c_str());
         if (menu.doomed_slot() == Menu::kAutoSlot) { std::string png = path; png.replace(png.size() - 3, 3, "png"); std::remove(png.c_str()); }
         if (menu.doomed_slot() == menu.slot()) g_state_refused.clear();
         refresh_slots();
@@ -3528,6 +3691,20 @@ sdl_ready:
       if (menu.open() && (menu_dirty || menu.dirty())) {
         menu_dirty = false;
         menu.clear_dirty();
+#if DSPERATE_NIBKIT_MENU
+        // The shared menu: a picture for each panel, at the panel's own
+        // resolution. The top screen is `display` in dual-window.
+        if (menu.panel_ui()) {
+          int w = 0, h = 0;
+          const u8* top = shelf_menu.render_top(nds.gpu.framebuffer(0), w, h);
+          display.draw_picture(top, w, h);
+          debug_menu_ppm("top", top, w, h);
+          const u8* bottom = shelf_menu.render(w, h);
+          display2.draw_picture(bottom, w, h);
+          debug_menu_ppm("bottom", bottom, w, h);
+        } else
+#endif
+        {
         // Dual-window: `display` is opened with only_screen 0, so it's the
         // top screen. Otherwise the layout's primary screen.
         const int menu_screen = dual_window ? 0 : display.current_layout().primary;
@@ -3574,6 +3751,7 @@ sdl_ready:
           // GPU present pipelines a frame deep: flush now, same as above.
           display.flush();
           if (dual_window) display2.flush();
+        }
         }
       }
 #if DSPERATE_CHEEVOS

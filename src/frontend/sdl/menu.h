@@ -3,6 +3,7 @@
 #pragma once
 #include "core/types.h"
 #include "core/cheat/database.h"
+#include "frontend/sdl/pause_menu.h"
 #include "frontend/sdl/settings.h"
 
 #include <string>
@@ -112,30 +113,21 @@ Rect toast_rect(const Canvas& d, const char* header, const char* title, const ch
 //
 // Navigation uses the player's own DS bindings (up/down, A, B); the guest
 // cannot see them while the menu is up.
-class Menu {
+class Menu : public PauseMenu {
 public:
-  // What the frontend should do after input(). Save/Load act on slot();
-  // Launch acts on chosen(); Delete acts on doomed_slot(). Reset restarts
-  // whatever was booted.
-  enum class Result : u8 { None, Resume, Save, Load, Quit, Launch, Reset, Delete };
-
-  // One game in the picker. `title` is the ROM header's title or the
-  // filename; `path` is what gets loaded.
-  struct GameEntry { std::string title, path; };
-
-  bool open() const { return open_; }
-  void set_open(bool o);
+  bool open() const override { return open_; }
+  void set_open(bool o) override;
 
   // The menu edits `codes` in place (the engine's own vector); `groups` give
   // headings and mark alternative sets. Null or empty hides the row entirely.
-  void set_cheats(std::vector<cheat::Code>* codes, const std::vector<cheat::Group>* groups);
+  void set_cheats(std::vector<cheat::Code>* codes, const std::vector<cheat::Group>* groups) override;
 
   // Without a host there is no OPTIONS row.
-  void set_settings_host(SettingsHost* host) { host_ = host; }
+  void set_settings_host(SettingsHost* host) override { host_ = host; }
   // A network session hides SAVE STATE/LOAD STATE/slot row (a state freezes
   // this machine, not the peer) and the page reads MENU instead of PAUSED
   // (emulation keeps running).
-  void set_network_session(bool on) {
+  void set_network_session(bool on) override {
     net_session_ = on;
     // Root page gained/lost three rows; selection may be past the new end.
     const int n = root_rows();
@@ -143,54 +135,53 @@ public:
   }
   // Null when the build has no RetroAchievements support, or it's off; the
   // root row then does not appear.
-  void set_cheevos_host(CheevosHost* host) { cheevos_ = host; }
+  void set_cheevos_host(CheevosHost* host) override { cheevos_ = host; }
   // Set when a toggle changed something; cleared by the frontend once saved.
-  bool cheats_dirty() const { return cheats_dirty_; }
-  void clear_cheats_dirty() { cheats_dirty_ = false; }
+  bool cheats_dirty() const override { return cheats_dirty_; }
+  void clear_cheats_dirty() override { cheats_dirty_ = false; }
 
   // Owned by the frontend (built once at boot); the menu only points at it.
   // Null or empty leaves open_games() showing "no games" on the page.
-  void set_games(const std::vector<GameEntry>* games) { games_ = games; }
+  void set_games(const std::vector<GameEntry>* games) override { games_ = games; }
   // Raised as the launcher's own modal page: not reached from the root menu,
   // and B does not back out (nothing behind it -- the loader cart has faded
   // to white). Way out is choosing a game or quitting.
-  void open_games();
+  void open_games() override;
   // The path of the game picked, valid when update() returned Launch.
-  const std::string& chosen() const { return chosen_; }
+  const std::string& chosen() const override { return chosen_; }
 
-  int  slot() const { return slot_; }
+  int  slot() const override { return slot_; }
   // The slot whose state the player confirmed away, valid when update()
   // returned Delete; kAutoSlot for the auto state.
-  int  doomed_slot() const { return slot_row_; }
-  void set_slot(int s) { slot_ = s; }
+  int  doomed_slot() const override { return slot_row_; }
+  void set_slot(int s) override { slot_ = s; }
   // Shown on the root row so the player can see what a save would overwrite.
   // kAutoSlot: the auto state, on the slot page only so it can be deleted.
-  void set_slot_used(int s, bool used) { if (s >= 0 && s <= kAutoSlot) used_[s] = used; }
+  void set_slot_used(int s, bool used) override { if (s >= 0 && s <= kAutoSlot) used_[s] = used; }
   // Short word after "SLOT < n >" when a state was refused rather than
   // loaded. Cleared as soon as the player acts on the slot.
-  void set_slot_notice(const char* n) { slot_notice_ = n ? n : ""; }
+  void set_slot_notice(const char* n) override { slot_notice_ = n ? n : ""; }
   void clear_slot_notice() { slot_notice_.clear(); }
 
   // One menu tick. `presses` are button edges since the last call, `held` is
   // what is down now (key repeat), `ms` is elapsed time (repeat, marquee).
-  Result update(u32 presses, u32 held, u32 ms);
+  Result update(u32 presses, u32 held, u32 ms) override;
   Result input(u32 presses) { return update(presses, 0, 0); }
   // Pad face presses by position (Input::take_menu_faces), for the next
   // update. With a pad, the Controls page's CLEAR and DEFAULTS are the west
   // and north buttons whatever DS Y/X are bound to.
-  void face_presses(u32 faces) { faces_ |= faces; }
-  void   draw(const Canvas& d) const;
+  void face_presses(u32 faces) override { faces_ |= faces; }
+  void   draw(const Canvas& d) const override;
 
   // True when the picture would differ from the last draw. The frontend
   // composites only when this says to.
-  bool dirty() const { return dirty_; }
-  void clear_dirty() { dirty_ = false; }
+  bool dirty() const override { return dirty_; }
+  void clear_dirty() override { dirty_ = false; }
 
   // Root page is a table in menu.cpp (kRoot); this is its length. Panel is
   // sized at draw time from the canvas, no fixed ceiling.
   static constexpr int kRootRows = 9;
-  static constexpr int kSlotRows = 5;   // ten slots as two columns of five
-  static constexpr int kAutoSlot = 10;  // the auto state, in a row under both columns
+  static constexpr int kSlotRows = 5;   // ten slots as two columns of five; kAutoSlot in a row under both
 
 private:
   // A page stack rather than a flat state, so B pops wherever pressed. Games
