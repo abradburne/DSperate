@@ -219,11 +219,15 @@ void ShelfMenu::add_declared_rows(bool game) {
   const std::string rom = shelf_ ? shelf_->game_title() : std::string();
   const int here = game ? 3 : 2;
   for (int i = 0; i < nib_options_count(options_); ++i) {
+    // Each string nibkit hands back lasts only until the next call on the
+    // same handle: copied before the next one.
     int level = 0;
-    const char* v = nib_option_value(options_, i, settings_, game ? rom.c_str() : nullptr, &level);
+    const char* got = nib_option_value(options_, i, settings_, game ? rom.c_str() : nullptr, &level);
+    const bool has = got != nullptr;
+    const std::string v = has ? got : "";
     const std::string label = nib_option_label(options_, i);
-    if (level == here && v) {
-      const std::string shown = nib_option_show(options_, i, v);
+    if (level == here && has) {
+      const std::string shown = nib_option_show(options_, i, v.c_str());
       row({Row::Declared, nullptr, i}, label.c_str(), NIB_VALUE_TEXT, shown.c_str());
     } else {
       const std::string inherit = nib_option_inherit(options_, i, settings_, game ? rom.c_str() : nullptr);
