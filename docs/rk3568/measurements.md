@@ -3,6 +3,11 @@
 The aim: a DS emulator started from DSlot's shelf, quick to come up on both panels. Home saves
 state and returns to DSlot; Back brings up a menu (save states, reset, shaders).
 
+## Emulator selection, October 2026 (history)
+
+How the emulator was chosen, kept as a dated record. It is not an ongoing benchmark: builds are
+measured against our own earlier builds and targets (the sections below, `bench/`).
+
 **Choice (2026-10-16): DSperate** (github.com/beebono/DSperate, GPLv3, C++17 on SDL2), measured
 against DraStic on the DS+. It is fast enough on everything tried, it is open source, and it
 already has most of what DSlot needs:
@@ -13,7 +18,7 @@ already has most of what DSlot needs:
 - filters (nearest, bilinear, LCD grid, sharp box seams, integer scaling);
 - a built-in FreeBIOS, so no BIOS dumps are needed.
 
-## Measured on the DS+ (dev system, kernel 7.3-rc7, CPU 1.99 GHz, schedutil)
+### Measured on the DS+ for the selection (dev system, kernel 7.3-rc7, CPU 1.99 GHz, schedutil)
 
 **DSperate**, built at commit 7c1fb67 (`-mcpu=cortex-a55`, Release, no PGO, `DSPERATE_NET=OFF`).
 Emulation cost per frame, unpaced, from `dsperate-headless --direct --frames 3900 --stats-from 300`:
@@ -32,11 +37,11 @@ each game's first 65 s from boot with no input (intros, attract demos), with the
 
 **DraStic** r2.5.2.2 (Linux aarch64, from ROCKNIX's packages repo, SHA-256 checked against its
 recipe; redistribution allowed by its author). It has no headless mode, and its fast-forward is
-slower than real time here, so it was only measured in real time (`bench/render/run-bench.sh`, presents
-timed by `bench/tools/framelog.c`). It holds the panels' rate in every game, but that doesn't show how much
+slower than real time here, so it was only measured in real time (a version of `bench/render/run-bench.sh` that
+ran both, presents timed by an `LD_PRELOAD` shim; both since made DSperate-only or removed). It holds the panels' rate in every game, but that doesn't show how much
 headroom it has. It's closed source and abandoned, and its menu is its own.
 
-**Not chosen:**
+**Not chosen** (at the time):
 - **NNDDSS, the stock emulator:** Android DraStic (`com/dsemu/drastic` in `libnnddss.so`) inside
   bionic/Android shims, an opaque binary from the firmware.
 - **melonDS:** reported at 30–40 fps in 3D games on this class of CPU.
@@ -56,10 +61,8 @@ re-measure DSperate in real time (`DS_FPS=1` prints emu/present/wait per second)
 
 ## Tools here
 
-- `bench/tools/framelog.c`: an LD_PRELOAD shim that times `SDL_RenderPresent` (`FRAMELOG_FRAMES`,
-  `FRAMELOG_SKIP`) and prints the same statistics as dsperate-headless.
 - `bench/tools/vblank.c`: the panels' real refresh rate (300 vblanks per CRTC).
-- `bench/render/run-bench.sh`: both emulators, seven games, on the panels.
+- `bench/render/run-bench.sh`: one DSperate build, seven games, on the panels without sound.
 - `bench/render/bench-realtime.sh`: the packaged DSperate, seven games, on the panels with sound.
 - `bench/launch/launch-timing.sh`, `bench/launch/press.py`: A on the shelf → game → Menu → shelf, timed from the journal.
 - `bench/render/render-bench.sh`, `bench/render/render-same.sh`: DSperate's render and present cost per game, and whether

@@ -7,7 +7,7 @@ says what was measured, how, and what changed because of it.
 
 | | |
 |---|---|
-| `measurements.md` | why DSperate (against DraStic), real time on the panels, the panels' refresh, the launcher integration, hi-res 3D, button-to-screen latency and frame pacing |
+| `measurements.md` | the emulator selection (October 2026, history), real time on the panels, the panels' refresh, the launcher integration, hi-res 3D, button-to-screen latency and frame pacing |
 | `core-review.md` | the emulation core on the A55: where the time goes, the speed-ups taken and rejected, PGO, exactness |
 | `render-review.md` | the render and present path: 1x and hi-res cost, the GPU per stage, Golden Sun at 2x, the fallback, battery |
 | `gba-mode.md` | GBA mode: why in DSperate, the phases, mGBA's test suite, 30-game compatibility |

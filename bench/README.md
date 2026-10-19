@@ -32,11 +32,11 @@ states are yours to provide and are never part of this repository.
 | `render/render-bench.sh` | handheld | render and present cost of one game on the panels: frame times, frames not shown, GPU and CPU per stage (`DS_DEBUG=hires-stats`, `hires-stages`) |
 | `render/render-same.sh` | handheld | whether two builds put exactly the same pictures on the panels, every present (`DS_DEBUG=present-wait,present-hash=`), replayed |
 | `render/power-run.sh` | handheld | battery charge, current and power over a run, CPU and GPU frequency residency |
-| `render/audio-bench.sh`, `bench-realtime.sh`, `run-bench.sh` | handheld | sound break-ups; real time on the panels; DSperate against DraStic (the comparison that chose DSperate) |
+| `render/audio-bench.sh`, `bench-realtime.sh`, `run-bench.sh` | handheld | sound break-ups; real time on the panels, the packaged build with sound and any build without |
 | `latency/` | handheld + computer | button-to-screen latency (`latency.sh`, `matrix.sh`, `lat-press.c`, `analyse.py`, `summary.py`) and frame pacing (`pacing-run.sh`, `pacing.py`), from `DS_DEBUG=latency=` logs |
 | `launch/` | handheld | launch timing from the launcher's shelf (`launch-timing.sh`, `press.py`); games started under the launcher's real-time limits, failing on any the kernel kills (`rt-limits.sh`) |
 | `tools/device-run.sh` | handheld | runs a measurement with the launcher stopped, refusing (or waiting, `WAIT=1`) while a game is running |
-| `tools/framelog.c`, `vblank.c` | handheld | an `LD_PRELOAD` frame timer for other emulators; the panels' real refresh rate |
+| `tools/vblank.c` | handheld | the panels' real refresh rate |
 | `gba-oracle/` | macOS | mGBA as a reference for GBA mode, frame by frame (not linked into DSperate) |
 
 `lat-press` writes a button into the GPIO keys device that nibOS's input daemon (pocket-input)
