@@ -180,7 +180,17 @@ is used for the windows too, and there a frame waits for the one before (vsync p
 
 The emulation thread runs real-time under DSlot. PipeWire sets RLIMIT_RTTIME (200 ms)
 in every process it joins; `RtBudget` naps briefly once a paced frame as a real-time
-thread, and drops the policy while unpaced (fast forward).
+thread, and drops the policy while unpaced (fast forward). One-shot work that can outlast
+the limit runs under `OffRealtime`, as an ordinary task: startup from the ROM to the starting
+state, the picker's launch, and every save and state load or save. Inflating a zipped 8 or
+16 MB GBA ROM takes 155-200 ms on the A55s; before this the kernel killed Advance Wars 2,
+DKC2 and King of Swing a quarter of a second after DSlot started them.
+`bench/launch/rt-limits.sh` starts games under dslot.service's limits and fails on any that
+is killed.
+
+A game that cannot start (unreadable file, damaged zip, no game in it, a bad BIOS dump, a
+`--load-state` that fails) shows its name and the reason on the panel until a button is
+pressed, then exits; DSlot is back on the shelf. The log has the details.
 
 Frame pacing is locked to the panels' vblanks in DS mode (`video.vsync_lock = auto`,
 `vsync_lock.h`): frame i flips on vblank base + i of one panel, the console runs at the panel's
