@@ -68,6 +68,9 @@
 #include <algorithm>
 #include <cmath>
 #include <csignal>
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
 #include <cstdio>
 #include <filesystem>
 #include <cstdlib>
@@ -804,9 +807,30 @@ void draw_flash(const ds::sdl::Canvas& d, u32 alpha) {
     ds::sdl::Display::blend_row(d.px + static_cast<size_t>(y) * d.pitch, white.data(), static_cast<size_t>(d.w), alpha);
 }
 
-// A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
-volatile std::sig_atomic_t g_signalled = 0;
+// SIGTERM (a launcher putting the game away, or shutdown) and Ctrl-C end the
+// frame loop the way Menu does: the auto state and the battery save are
+// written, then it exits 0.
+std::atomic<int> g_signalled{0};
+#if defined(_WIN32)
 void on_signal(int) { g_signalled = 1; }
+void take_quit_signals() { std::signal(SIGINT, on_signal); std::signal(SIGTERM, on_signal); }
+#else
+// Blocked in every thread (set before the first one starts, so all inherit
+// it) and taken by one waiter, so a signal never lands in another thread's
+// call: a present thread's KMS flip wait or GL call cut short by EINTR
+// crashed the game the moment DSlot asked it to leave.
+void take_quit_signals() {
+  sigset_t quit;
+  sigemptyset(&quit);
+  sigaddset(&quit, SIGINT);
+  sigaddset(&quit, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &quit, nullptr);
+  std::thread([quit] {
+    for (int sig = 0;;)
+      if (sigwait(&quit, &sig) == 0) g_signalled = 1;
+  }).detach();
+}
+#endif
 
 
 // [video] settings, re-read/re-applied from the pause menu, not just at boot.
@@ -1031,6 +1055,7 @@ bool g_restart = false;
 
 static int run(int argc, char** argv) {
   mark("started");
+  take_quit_signals();
   const char* rom = nullptr;
   const char* config_arg = nullptr;
   long frame_limit = 0;
@@ -1459,8 +1484,6 @@ static int run(int argc, char** argv) {
   Disp::Layout& layout = vs.layout;
   std::vector<Disp::Mode>& layout_cycle = vs.layout_cycle;
   ds::prof::set_level(std::getenv("DS_PROFILE"));
-  std::signal(SIGINT, on_signal);
-  std::signal(SIGTERM, on_signal);
 
   // Display-engine tier owns the panel: dummy/offscreen video driver keeps
   // window/events/controllers but draws nothing. Decided before SDL_Init.

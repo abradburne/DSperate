@@ -192,6 +192,11 @@ A game that cannot start (unreadable file, damaged zip, no game in it, a bad BIO
 `--load-state` that fails) shows its name and the reason on the panel until a button is
 pressed, then exits; DSlot is back on the shelf. The log has the details.
 
+SIGTERM puts a game away as Menu does: the auto state and the battery save are written and
+DSperate exits 0 (DSlot sends it for nibOS's power menu, and systemd at shutdown). SIGINT and
+SIGTERM are blocked in every thread and taken by one waiter: delivered to whichever thread the
+kernel picked, they cut a present thread's KMS flip wait short and crashed the game instead.
+
 Frame pacing is locked to the panels' vblanks in DS mode (`video.vsync_lock = auto`,
 `vsync_lock.h`): frame i flips on vblank base + i of one panel, the console runs at the panel's
 59.94 Hz with the sound resampled (+0.19%), and the pad is read again at line 192, just before
