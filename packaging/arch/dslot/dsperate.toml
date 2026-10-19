@@ -1,9 +1,10 @@
-# DSperate, for DSlot (packaging/arch/dslot/dsperate.toml in DSperate).
+# DSperate, for DSlot (packaging/arch/dslot/dsperate.toml in DSperate; installed as
+# /usr/share/dslot/emulators/dsperate.toml). DSperate plays DS and GBA games.
 name = "DSperate"
 priority = 100
 
 # Each system it plays and the command for it. Placeholders are whole words: {rom}, {saves}
-# (the game's saves folder, made by DSlot), {options} (launch.conf's options, zero or more words).
+# (the game's saves folder, made by DSlot), {options} (its options as set, and any extra words).
 [systems]
 NDS = ["/usr/bin/dsperate", "{options}", "--saves", "{saves}", "--states", "{saves}", "{rom}"]
 GBA = ["/usr/bin/dsperate", "--gba", "{options}", "--saves", "{saves}", "--states", "{saves}", "{rom}"]
@@ -15,3 +16,49 @@ DS_DEBUG = "marks"
 [[seed]]
 from = "/usr/share/dsperate/dslot/dsperate.ini"
 to = "~/.config/dsperate/dsperate.ini"
+
+# Options DSlot shows in its settings (per console and per game) and passes when set.
+# `default` is what DSperate does when not told (with the settings seeded above): shown,
+# never passed. One that is set wins over DSperate's own menu for that game.
+[[options]]
+key = "hires3d"
+label = "3D resolution"
+systems = ["NDS"]
+values = [1, 2, 3, 4]
+labels = ["1x (256x192)", "2x (512x384)", "3x (768x576)", "4x (1024x768, slow)"]
+default = 1
+args = ["--hires3d", "{value}"]
+
+[[options]]
+key = "aa"
+label = "3D anti-aliasing"
+systems = ["NDS"]
+kind = "toggle"
+default = false
+args = ["--aa"]
+off = ["--no-aa"]
+
+# Adaptive: frames go undrawn only while the game runs behind, at most this many in a row.
+[[options]]
+key = "frameskip"
+label = "Frame skip (when behind)"
+systems = ["NDS"]
+kind = "number"
+min = 0
+max = 4
+default = 1
+args = ["--frameskip", "{value}"]
+
+# Bilinear on the GPU instead of sharp whole pixels (each DS pixel is 4x4 panel pixels).
+[[options]]
+key = "linear"
+label = "Smooth scaling"
+kind = "toggle"
+default = false
+args = ["--linear"]
+off = []
+
+# Actions on a game's files, in the Game page of DSlot's menu (asked twice).
+[[actions]]
+label = "Clear resume state"
+delete = ["{saves}/*.auto.dss"]

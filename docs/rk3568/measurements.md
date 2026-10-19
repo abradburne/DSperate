@@ -206,9 +206,9 @@ stage marks, hi-res 3D (below).
 `video.hires3d = 2` (or `--hires3d 2`, or `DS_HIRES3D=2`) on the renderer sink draws the 3D layer at 512×384
 instead of 256×192; 4 is the panels' own 1024×768. Off by default. Edge marking (the outlines
 in NSMB), fog and shadow volumes are drawn at hi-res too (2026-10-18, below).
-It can be set in the pause menu (OPTIONS, 3D RESOLUTION; for one game or all), or for a whole
-system or one game in DSlot's `~/.config/dslot/launch.conf` (`NDS = --hires3d 2`), which the
-launcher passes as `--hires3d N` and which wins over the menu (`rootfs/dslot/README.md` in nibOS).
+It can be set in the pause menu (OPTIONS, 3D RESOLUTION; for one game or all), or for the
+console or one game in DSlot's settings (from `dsperate.toml`), which DSlot passes as
+`--hires3d N` and which wins over the menu.
 
 How (DSperate fork, `pocketos` branch): the emulation is unchanged, the CPU raster still draws
 every frame at 1x (display capture and the 1x picture stay exact). Its polygon list is kept

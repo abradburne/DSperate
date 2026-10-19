@@ -5,10 +5,9 @@
 # plus the fork's commits). pkgver: upstream base, commits on top (so pacman orders
 # them), head. To build a local checkout instead: _src=/path/to/DSperate makepkg.
 #
-# It also ships DSperate's description for DSlot (/usr/share/dslot/emulators/dsperate.toml)
-# and, until DSlot launches games itself everywhere, DSlot's older game launcher
-# (/usr/lib/dslot/launch: DS and GBA games go to DSperate), with the RG DS+'s settings. A system where the launcher came from elsewhere needs
-# --overwrite /usr/lib/dslot/launch once.
+# It also ships DSperate's description for DSlot (/usr/share/dslot/emulators/dsperate.toml:
+# the systems it plays, the command for each, the options DSlot's settings show) and the
+# RG DS+'s settings DSlot seeds into ~/.config. DSlot (0.3 and later) launches the games.
 #
 # PGO: when the fork carries a profile for the compiler doing the build
 # (pgo/aarch64-gcc<version>/, trained on the handheld by bench/core/pgo-train.sh),
@@ -57,12 +56,8 @@ package() {
     install -Dm644 DSperate/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 DSperate/src/core/bios/LICENSE.freebios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.freebios"
     install -Dm644 DSperate/src/core/gba/bios/LICENSE.cult-bios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.cult-bios"
-    # DSperate's description for DSlot (the systems it plays, the command for each, the
-    # settings DSlot seeds into ~/.config), for the DSlot that launches games itself.
+    # DSperate's description for DSlot (the systems it plays, the command for each, its
+    # options), and the handheld settings DSlot seeds into ~/.config (packaging/arch/dslot).
     install -Dm644 DSperate/packaging/arch/dslot/dsperate.toml "$pkgdir/usr/share/dslot/emulators/dsperate.toml"
-    # Until every DSlot reads that: its game launcher, and the handheld settings and options
-    # example its first run copies into ~/.config (packaging/arch/dslot).
-    install -Dm755 DSperate/packaging/arch/dslot/launch "$pkgdir/usr/lib/dslot/launch"
     install -Dm644 DSperate/packaging/arch/dslot/dsperate.ini "$pkgdir/usr/share/dsperate/dslot/dsperate.ini"
-    install -Dm644 DSperate/packaging/arch/dslot/launch.conf "$pkgdir/usr/share/dsperate/dslot/launch.conf"
 }
