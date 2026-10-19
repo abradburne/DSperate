@@ -1,0 +1,17 @@
+# DSperate, for DSlot (packaging/arch/dslot/dsperate.toml in DSperate).
+name = "DSperate"
+priority = 100
+
+# Each system it plays and the command for it. Placeholders are whole words: {rom}, {saves}
+# (the game's saves folder, made by DSlot), {options} (launch.conf's options, zero or more words).
+[systems]
+NDS = ["/usr/bin/dsperate", "{options}", "--saves", "{saves}", "--states", "{saves}", "{rom}"]
+GBA = ["/usr/bin/dsperate", "--gba", "{options}", "--saves", "{saves}", "--states", "{saves}", "{rom}"]
+
+[env]
+DS_DEBUG = "marks"
+
+# Put in place before a game starts when missing; never overwritten.
+[[seed]]
+from = "/usr/share/dsperate/dslot/dsperate.ini"
+to = "~/.config/dsperate/dsperate.ini"
