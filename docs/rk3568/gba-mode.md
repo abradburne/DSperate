@@ -90,16 +90,8 @@ mGBA on a set of commercial games, in CI headless like DSperate's existing tests
    the DS side.
 5. **Upstream** into `abradburne/DSperate`, packaged by `packaging/arch`, documented in
    DSlot's README.
-6. **Game Boy and Game Boy Color**, a third machine in DSperate. A GBA plays GB/GBC carts on a
-   separate built-in CPU (the Sharp SM83), which the DS dropped, so this is new: an SM83
-   interpreter, the GB/GBC PPU (one background, a window, 40 sprites, GBC palettes and VRAM
-   banks), cartridge mappers (MBC1/2/3 with RTC/5) and their saves, GBC double speed. Shared with
-   GBA: the **PSG sound** (the GBA's four PSG channels are the Game Boy's sound chip, so phase 3
-   builds it as a standalone component both machines use), the scheduler, states, menu, Home
-   and frontend. Screen: 160x144 at 5x = 800x720 on the top panel. DSlot gets GB and GBC pages
-   with their own cart shells (grey DMG, clear GBC). Verification: Blargg's and Mooneye's test
-   ROMs, dmg-acid2 and cgb-acid2, frame dumps against a locally built SameBoy or mGBA (reference
-   only). Smaller than the GBA core: an 8-bit CPU, and an interpreter is plenty fast here.
+6. ~~Game Boy and Game Boy Color in DSperate~~: dropped (2026-10-19). GB/GBC is its own
+   emulator, a separate clean-room project, not a machine in DSperate.
 
 ## Progress
 
@@ -175,8 +167,8 @@ apply in GBA mode.)
 DSperate 4e3c5e6 (fork `pocketos`); on the DS+ since package `0.r7c1fb67.49.3c877f0` (which the
 Golden Sun audio work built on top of it).
 
-- **`src/core/psg/gb_psg`**: the Game Boy's sound chip as a standalone component, as the GB/GBC
-  plan (phase 6) asks: two squares (one with sweep), wave, noise, length counters, envelopes and the
+- **`src/core/psg/gb_psg`**: the Game Boy's sound chip as a standalone component (the GBA's
+  four PSG channels): two squares (one with sweep), wave, noise, length counters, envelopes and the
   512 Hz frame sequencer, addressed by Game Boy register numbers (NR10-NR52, wave RAM) and clocked
   at 4.19 MHz, with no GBA in it. Models DMG/CGB/AGB; the AGB one adds the two wave banks, forced
   75% wave volume and write-only bits reading 0. Channel levels are averaged per output sample.
@@ -262,7 +254,7 @@ installed on the DS+.
 - Pacing at 59.73 Hz (the frontend paces at the DS's 59.83 Hz today, 0.17% fast), the bottom
   panel (cart art/controls or off), the "big" non-integer scale, an LCD shader.
 - Machine boundary: today NDS hosts the GBA (`NDS::gba`, dispatch in `run_frame`, states,
-  `Gpu::show_gba`). Before a third machine (GB/GBC, SM83 CPU) lands, lift that into a small
+  `Gpu::show_gba`). Should another machine ever join, lift that into a small
   interface (run a frame, framebuffer + size, keys, save data, states with a machine tag in HEAD,
   reset) that the frontend and NDS dispatch through, so menu/Home/states stay machine-agnostic.
 - Speed first where the compatibility run found it: Castlevania AoS and DKC 2 run 3-5% of frames

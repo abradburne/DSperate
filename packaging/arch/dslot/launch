@@ -17,9 +17,9 @@
 # "<ROM name without extension> = --hires3d 1" for one game. The game's line goes after its
 # system's, so it wins; options there also win over the emulator's own settings and in-game menu.
 #
-# GBA is DSperate's GBA mode. GB and GBC have no emulator here yet (DSperate's Game Boy mode is
-# planned: docs/rk3568/gba-mode.md); a stand-in at /opt/gba-standin is used if one was installed
-# by hand, else the launch says so and returns to DSlot.
+# GBA is DSperate's GBA mode. DSperate plays DS and GBA games only: GB and GBC are another
+# emulator's, so a stand-in at /opt/gba-standin is used if one was installed by hand, else the
+# launch says so and returns to DSlot.
 set -eu
 [ $# -eq 1 ] || { echo "usage: launch ROM" >&2; exit 2; }
 
