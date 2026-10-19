@@ -18,11 +18,11 @@
 # the build uses it; otherwise it builds without. See docs/rk3568-port.md.
 pkgname=dsperate
 pkgver=0.r7c1fb67.143.d54ab10
-pkgrel=1
+pkgrel=2
 pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
 arch=(aarch64)
 url="https://github.com/abradburne/DSperate"
-license=(GPL-3.0-or-later)
+license=(GPL-3.0-or-later MIT OFL-1.1)   # MIT, OFL-1.1: nibkit's menu and its face, with _nibkit
 depends=(sdl2-compat libdrm libglvnd)   # libglvnd: GLESv2 for the GLES present and hi-res 3D
 makedepends=(git cmake ninja vulkan-headers rust)   # rust: cargo for nibkit's menu (_nibkit)
 optdepends=('vulkan-driver: video.gpu3d (on the Mali-G52 ~5x slower than the GLES path)')
@@ -61,9 +61,11 @@ package() {
     install -Dm644 DSperate/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 DSperate/src/core/bios/LICENSE.freebios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.freebios"
     install -Dm644 DSperate/src/core/gba/bios/LICENSE.cult-bios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.cult-bios"
-    # nibkit's menu is linked in (MIT), with the Roboto Condensed face it draws (Apache-2.0).
+    # nibkit's menu is linked in (MIT), with the Roboto Condensed face it draws (SIL OFL 1.1,
+    # whose notice and licence go with every copy).
     if [ -n "${_nibkit:-}" ]; then
         install -Dm644 "$_nibkit/../nibkit/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nibkit"
+        install -Dm644 "$_nibkit/OFL.txt" "$pkgdir/usr/share/licenses/$pkgname/OFL.txt"
     fi
     # DSperate's description for DSlot (the systems it plays, the command for each, its
     # options), and the handheld settings DSlot seeds into ~/.config (packaging/arch/dslot).
