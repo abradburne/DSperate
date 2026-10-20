@@ -183,14 +183,21 @@ pairs stay whole). Left to that, a game the GPU cannot draw every frame of at 2x
   GPU 10% short; a stall, one run, does not count), even frames are shown and
   odd ones not -- 30 pictures a second, evenly, the game and its sound at full speed. A
   display capture on a frame between is still drawn at the scale, for the next shown frame
-  to show. Every frame is tried again once a GPU fence after each shown frame's work has
-  passed a frame later for two seconds (the job ending in time says nothing at half rate:
-  the GPU has two frames), no sooner than 5 s after it began; when that falls back within
-  3 s, the wait doubles, to 60 s.
+  to show. Whether every frame would hold again cannot be read off half rate, where the
+  GPU rests every other frame, so a probe draws the frames between too, unshown, for two
+  seconds -- every frame's GPU load, the panels still at their even half rate -- and goes
+  back to every frame if each frame's work (a fence) was done a frame after it was handed
+  over, bar one. The first probe 5 s after half rate began, the wait doubling to 60 s after
+  each failed one (it stops at its second miss), or when every frame falls back within 3 s.
 - **1x, until the next launch** (`video.hires3d_fallback`, on by default): when even half
   rate does not hold -- a quarter of four seconds' shown frames left out or their work
   running past the next one; one stall of a second, loading a scene, is not enough.
   Without frameskip: 42 runs left out in two seconds (35%). Never back and forth.
+
+On the DS+, 120 s each as DSlot launches them (`--hires3d 2 --no-aa --frameskip 1`, charging):
+Golden Sun: Dark Dawn's field, cold (44 C), warm and hot (71 C), goes to half rate once and stays,
+59.9 fps, 35-37 frames left out (1891 at every frame), the probes failing unseen; NSMB comes back
+to every frame after ~7 s of half rate, Mario Kart after two short spells (~14 s in all, hot).
 
 Only which frames are shown changes: the emulation, its frames and the 1x screens are the
 same in every mode (`DS_DEBUG=hires-half` pins half rate; under `--replay` every picture

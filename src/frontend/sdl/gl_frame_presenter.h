@@ -27,9 +27,9 @@
 // While too many are left out HiresGovernor shows every other frame at S x,
 // evenly, with adaptive frameskip on (between them only a display capture is
 // drawn, at S x, for the next shown frame), and the 3D at 1x when even that
-// cannot keep up. Only which frames are shown changes. Every frame is tried
-// again once a fence after each shown frame's work has passed a frame later:
-// at half rate the job itself always ends in time, its GPU work need not. At 1x
+// cannot keep up. Only which frames are shown changes. Whether every frame
+// would hold again is probed by drawing the frames between too, unshown
+// (HiresGovernor), each frame's work checked by a fence. At 1x
 // the GPU's share is small and what is left of a job is its swap waiting for
 // a flip: there the next frame waits, which is vsync pacing.
 #include "core/types.h"
@@ -97,8 +97,9 @@ private:
   struct Capture { std::vector<u32> img; unsigned tex = 0; };
 
   void snapshot(NDS& nds, const u32* const fb[2]);
-  // The job; !show: a capture only. `mark`: a fence after it (half rate's measure).
-  void draw(Display* const wins[2], bool show = true, bool mark = false);
+  // The job; !show: a capture only, or with `probe` the frame's 3D too,
+  // unshown (half rate's probe). `mark`: a fence after it (half rate's measure).
+  void draw(Display* const wins[2], bool show = true, bool mark = false, bool probe = false);
   void say_mode() const;
 
   std::unique_ptr<GlHires> gl_;
@@ -111,10 +112,9 @@ private:
   u64 job_ = 0;               // the last job posted
   u64 late_ = 0, between_ = 0;
   bool fast_ = false;
-  // Half rate: whether the GPU had finished the last shown frame one frame
-  // on, and two (the next shown frame) (GlHires::frame_end_passed); set on
-  // the present thread, read a pair later.
-  std::atomic<int> fit1_{-1}, fit2_{-1};
+  // Half rate: the last check of a job's fence (GlHires::frame_end_passed),
+  // set on the present thread, read the frame after.
+  std::atomic<int> fit_{-1};
   static constexpr s64 kFrameNs = 16'000'000;   // a refresh, less a little
   int period_left_ = 0;       // frames left in the display period the decision holds for
   bool skipping_ = false, hi_now_ = false;

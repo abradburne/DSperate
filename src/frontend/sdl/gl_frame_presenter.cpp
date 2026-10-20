@@ -38,7 +38,7 @@ void GlFramePresenter::say_mode() const {
   if (!verbose_) return;
   switch (governor_.mode()) {
   case HiresGovernor::Mode::Half:
-    std::fprintf(stderr, "hires3d: GPU behind, every other frame shown (%u times so far; every frame tried again after %u frames)\n",
+    std::fprintf(stderr, "hires3d: GPU behind, every other frame shown (%u times so far; every frame probed after %u frames)\n",
                  governor_.halves(), governor_.wait_frames());
     break;
   case HiresGovernor::Mode::Full: std::fprintf(stderr, "hires3d: every frame shown again\n"); break;
@@ -50,38 +50,46 @@ void GlFramePresenter::present(NDS& nds, const u32* const fb[2], Display& top, D
   PresentThread& pt = PresentThread::get();
   const bool wait = debug::options().present_wait;
   if (gl_ && debug::options().hires_stats && nds.frame_count % 300 == 0)
-    std::fprintf(stderr, "hires3d governor: %s; left out %u/120, shown late %u/120, between slow %u/60\n",
+    std::fprintf(stderr, "hires3d governor: %s%s; left out %u/120, shown late %u/120, %u probes failed, the next after %u frames\n",
                  governor_.mode() == HiresGovernor::Mode::Full ? "every frame" : governor_.mode() == HiresGovernor::Mode::Half ? "half rate" : "1x",
-                 governor_.window_late(), governor_.window_miss(), governor_.window_slow());
+                 governor_.probing() ? " (probing)" : "", governor_.window_late(), governor_.window_miss(), governor_.probes_failed(),
+                 governor_.wait_frames());
   if (gl_ && !fast_ && governor_.mode() == HiresGovernor::Mode::Half) {
     // Even frames shown, odd ones between; the period's rule doesn't apply
     // (a capture between is drawn all the same) and starts afresh after.
     const bool shown = (nds.frame_count & 1) == 0;
     const bool busy = !wait && !pt.done(job_);
+    const bool probing = governor_.probing();
     period_left_ = 0;
     hi_now_ = true;
-    // Judged by the shown frames' fences, checked a frame on (between: may
-    // every frame be shown again?) and two (shown: does half rate hold?),
-    // each check read a pair later. Left out, or no fence: not in time.
-    const bool late = shown ? busy || fit2_.exchange(-1) == 0 : busy || fit1_.exchange(-1) != 1;
+    // The last check of a job's fence, posted a frame ago: while probing,
+    // that frame's work was done a frame after it was handed over (at every
+    // frame one frame's CPU work overlaps the GPU work before it); otherwise,
+    // at a shown frame, that the shown frame before's work is done by now.
+    // Left out, or no fence: not in time.
+    const int fit = fit_.exchange(-1);
+    const bool late = probing ? busy || fit != 1 : shown && (busy || fit == 0);
     if (governor_.frame(late, shown)) say_mode();
     if (governor_.mode() != HiresGovernor::Mode::Half) hi_now_ = governor_.hires();   // changed: shown as it now is
-    else if (!shown) {
-      ++between_;
-      if (busy) return;
-      // Would every frame be shown: the shown frame's job ended within the
-      // frame (not busy), and its GPU work a frame after that -- at every
-      // frame one frame's work on the CPU overlaps the one before's on the GPU.
-      job_ = pt.post([this] { fit1_ = gl_->frame_end_passed(false, kFrameNs); });
-      if (gpu::Gpu::hires_capture(nds.gpu.captured_last()) != 1) return;
-      pt.wait(job_);
-      snapshot(nds, fb);
-      if (!snap_.has_list) return;
-      Display* const wins[2] = {&top, second};
-      job_ = pt.post([this, wins] { draw(wins, false); });
-      return;
-    } else if (busy) { ++late_; return; }
-    else pt.post([this] { fit2_ = gl_->frame_end_passed(true); });   // and two frames on, before this one's
+    else {
+      const bool check_within = governor_.probing();   // a probe begun this frame counts it
+      if (!busy && (check_within || shown)) job_ = pt.post([this, check_within] { fit_ = gl_->frame_end_passed(true, check_within ? kFrameNs : 0); });
+      if (!shown) {
+        ++between_;
+        if (busy) return;
+        // A probe draws the frame between too, unshown (Full's load); else
+        // only a capture, for the next shown frame.
+        const bool probe = governor_.probing();
+        if (!probe && gpu::Gpu::hires_capture(nds.gpu.captured_last()) != 1) return;
+        pt.wait(job_);
+        snapshot(nds, fb);
+        if (!probe && !snap_.has_list) return;
+        Display* const wins[2] = {&top, second};
+        job_ = pt.post([this, wins, probe] { draw(wins, false, probe, probe); });
+        return;
+      }
+      if (busy) { ++late_; return; }
+    }
   } else {
     if (period_left_ <= 0) {   // the resolution too changes only between display periods
       hi_now_ = gl_ && governor_.hires();
@@ -137,7 +145,7 @@ void GlFramePresenter::snapshot(NDS& nds, const u32* const fb[2]) {
 // engine A's mode 2, or engine B showing the bank -- shows that capture's
 // hi-res picture, whatever order the game moves them in (Golden Sun swaps
 // engine A between the screens every frame).
-void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark) {
+void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark, bool probe) {
   const Snapshot& s = snap_;
   const u32* const sfb[2] = {s.fb[0].data(), s.fb[1].data()};
   // The core's set of lines first, before anything slow: the frame after
@@ -161,7 +169,7 @@ void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark) {
     if (show)
       for (int sc = 0; sc < 2; ++sc)
         if (shown_from[sc] >= 0) if (Display* w = window_of(sc)) w->gl()->set_hires(sc, caps_[shown_from[sc]].tex);
-    const bool now = show && s.mode == 1 && s.has_list && shown_from[s.screen] < 0;
+    const bool now = (show || probe) && s.mode == 1 && s.has_list && shown_from[s.screen] < 0;
     if (now)
       if (const unsigned tex = gl_->render(s.dl, s.arena, s.arena_top, s.arena_epoch, lines))
         if (Display* w = window_of(s.screen)) w->gl()->set_hires(s.screen, tex);

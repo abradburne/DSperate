@@ -24,14 +24,25 @@ int full(HiresGovernor& g, int n, int late = 0, int of = 1) {
 }
 
 // Feeds `n` frames at Half, shown and between in turn: every `miss`th shown
-// frame left out, every `slow`th frame between still on the shown one's work
-// (0: none). The frame count at the first change (0: none).
-int half(HiresGovernor& g, int n, int miss = 0, int slow = 1) {
+// frame late outside a probe, every `probe_miss`th frame late inside one
+// (0: none). The frame count at the first change of mode (0: none).
+int half(HiresGovernor& g, int n, int miss = 0, int probe_miss = 0) {
+  int pn = 0;
   for (int i = 1; i <= n; ++i) {
     const bool shown = i % 2 == 1;
-    const int k = (i + 1) / 2;
-    const bool late = shown ? miss > 0 && k % miss == 0 : slow > 0 && k % slow == 0;
+    bool late;
+    if (g.probing()) late = probe_miss > 0 && ++pn % probe_miss == 0;
+    else late = shown && miss > 0 && ((i + 1) / 2) % miss == 0;
     if (g.frame(late, shown)) return i;
+  }
+  return 0;
+}
+
+// Feeds Half until a probe begins; the frame count (0: none in `n`).
+int until_probe(HiresGovernor& g, int n) {
+  for (int i = 1; i <= n; ++i) {
+    g.frame(false, i % 2 == 1);
+    if (g.probing()) return i;
   }
   return 0;
 }
@@ -88,25 +99,27 @@ void test_half_to_low() {
   CHECK(full(g, 100000) == 0 && half(g, 100000) == 0 && g.mode() == Mode::Low);
   // 24 of 120 holds at Half; so does one stall of a second (29 shown frames in a row).
   HiresGovernor h = make(true);
-  CHECK(full(h, 120, 1, 2) == 120 && half(h, 6000, 5) == 0 && h.mode() == Mode::Half);
+  CHECK(full(h, 120, 1, 2) == 120 && half(h, 6000, 5, 1) == 0 && h.mode() == Mode::Half);
   HiresGovernor s = make(true);
   CHECK(full(s, 120, 1, 2) == 120);
   for (int i = 0; i < 58; ++i) CHECK(!s.frame(i % 2 == 0, i % 2 == 0));
-  CHECK(half(s, 6000) == 0 && s.mode() == Mode::Half);
+  CHECK(half(s, 6000, 0, 1) == 0 && s.mode() == Mode::Half);
   // Without video.hires3d_fallback Half is as low as it goes.
   HiresGovernor n = make(true, false);
-  CHECK(full(n, 120, 1, 2) == 120 && half(n, 6000, 1) == 0 && n.mode() == Mode::Half);
+  CHECK(full(n, 120, 1, 2) == 120 && half(n, 6000, 1, 1) == 0 && n.mode() == Mode::Half);
 }
 
 void test_half_to_full() {
-  // Back to every frame once the shown frames' work fits a frame (at most 1 of
-  // 60 running over), no sooner than 5 s after Half began.
+  // A probe 5 s after Half began; two seconds of it with every frame's work
+  // in time: every frame again.
   HiresGovernor g = make(true);
-  CHECK(full(g, 120, 1, 2) == 120 && g.wait_frames() == 300);
-  CHECK(half(g, 300, 0, 0) == 300 && g.mode() == Mode::Full);
-  // Work running over 2 of 60 between frames keeps Half.
+  CHECK(full(g, 120, 1, 2) == 120 && g.mode() == Mode::Half && !g.probing());
+  const int p = until_probe(g, 1000);
+  CHECK(p >= 300 && p <= 302);
+  CHECK(half(g, 1000) == 120 && g.mode() == Mode::Full);
+  // One miss in a probe is allowed.
   HiresGovernor h = make(true);
-  CHECK(full(h, 120, 1, 2) == 120 && half(h, 6000, 0, 30) == 0 && h.mode() == Mode::Half);
+  CHECK(full(h, 120, 1, 2) == 120 && until_probe(h, 1000) > 0 && half(h, 1000, 0, 100) == 120 && h.mode() == Mode::Full);
   // Frameskip turned off at Half: every frame again.
   HiresGovernor o = make(true);
   CHECK(full(o, 120, 1, 2) == 120);
@@ -114,18 +127,30 @@ void test_half_to_full() {
   CHECK(o.mode() == Mode::Full);
 }
 
-void test_backoff() {
-  // Falling back within 3 s of coming back doubles the wait, up to 60 s; 30 s
-  // held at every frame starts it over.
+void test_probe_fails() {
+  // The second miss ends a probe, at Half: nothing shown changes, the next
+  // probe waits twice as long, up to 60 s.
   HiresGovernor g = make(true);
   CHECK(full(g, 120, 1, 2) == 120);
   for (unsigned want : {600u, 1200u, 2400u, 3600u, 3600u}) {
-    CHECK(half(g, 100000, 0, 0) > 0 && g.mode() == Mode::Full);
-    CHECK(full(g, 120, 1, 2) == 120 && g.mode() == Mode::Half && g.wait_frames() == want);
+    CHECK(until_probe(g, 10000) > 0);
+    CHECK(half(g, 2, 0, 1) == 0 && !g.probing() && g.mode() == Mode::Half && g.wait_frames() == want);
   }
-  CHECK(half(g, 3600, 0, 0) == 3600 && g.mode() == Mode::Full);
+  CHECK(g.probes_failed() == 5);
+  const int p = until_probe(g, 10000);
+  CHECK(p >= 3600 && p <= 3602);
+}
+
+void test_backoff() {
+  // Full falling back within 3 s of a probe's success doubles the wait too;
+  // 30 s held at every frame starts it over.
+  HiresGovernor g = make(true);
+  CHECK(full(g, 120, 1, 2) == 120);
+  CHECK(until_probe(g, 1000) > 0 && half(g, 1000) == 120 && g.mode() == Mode::Full);
+  CHECK(full(g, 120, 1, 2) == 120 && g.mode() == Mode::Half && g.wait_frames() == 600);
+  CHECK(until_probe(g, 1000) > 0 && half(g, 1000) == 120);
   CHECK(full(g, 1800) == 0 && full(g, 120, 1, 2) == 24 && g.wait_frames() == 300);   // the 12th run
-  CHECK(g.halves() == 7);
+  CHECK(g.halves() == 3);
 }
 
 } // namespace
@@ -136,6 +161,7 @@ int main() {
   test_low_without_frameskip();
   test_half_to_low();
   test_half_to_full();
+  test_probe_fails();
   test_backoff();
   std::puts("hires_governor: ok");
   return 0;
