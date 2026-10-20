@@ -175,8 +175,10 @@ The present thread draws a frame while the emulation runs the next (`gl_frame_pr
 has the hand-off). When the GPU is still drawing the frame before, a hi-res frame is left
 out rather than holding the emulation back (decided once a display period, so capture
 pairs stay whole). `HiresGovernor` (`video.hires3d_fallback`, on by default) drops the 3D
-to 1x when 15% of two seconds' frames were left out, and tries the higher scale again
-after 10 s, doubling to 80 s when it falls back again within 3 s. At 1x the GLES present
+to 1x when 35% of two seconds' frames were left out, and tries the higher scale again
+after 10 s, doubling to 80 s when it falls back again within 3 s; after two such quick
+drops in a row it stays at 1x for the session. (15% at first: Golden Sun: Dark Dawn's
+field leaves a quarter out at 2x, cold, and went to 1x and back every 10-40 s.) At 1x the GLES present
 is used for the windows too, and there a frame waits for the one before (vsync pacing).
 
 The emulation thread runs real-time under DSlot. PipeWire sets RLIMIT_RTTIME (200 ms)
