@@ -732,6 +732,9 @@ int main(int argc, char** argv) {
   const int reboot_frame = reboot_at ? std::atoi(reboot_at) : -1;
   const char* reboot_rom = reboot_at ? std::strchr(reboot_at, ':') : nullptr;
   if (reboot_rom) ++reboot_rom;
+  // DS_RESET_AT=N: the SDL frontend's in-game reset (its menu's Reset game) at frame N: no new ROM.
+  const char* reset_at = std::getenv("DS_RESET_AT");
+  const int reset_frame = reset_at ? std::atoi(reset_at) : -1;
 
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
@@ -789,6 +792,11 @@ int main(int argc, char** argv) {
       nds.reset();
       if (!nds.load_rom(reboot_rom)) std::fprintf(stderr, "reboot: could not read %s\n", reboot_rom);
       else { nds.setup_direct_boot(); std::fprintf(stderr, "reboot: direct boot at frame %d\n", i); }
+    }
+    if (i == reset_frame) {
+      nds.reset();
+      if (!nds.gba_mode()) nds.setup_direct_boot();
+      std::fprintf(stderr, "reset: at frame %d\n", i);
     }
     const auto t0 = std::chrono::steady_clock::now();
     // Armed from frame 0 regardless of TRACE_START_FRAME: arming later drops
