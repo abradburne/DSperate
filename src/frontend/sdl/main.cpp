@@ -1012,14 +1012,18 @@ bool sync_dual_modes(ds::sdl::Display& a, ds::sdl::Display& b) {
 }
 
 // Split from parse_video so a settings change can close the windows and
+// The GLES present (gl_present.h) for hi-res 3D, and at 1x on the renderer
+// sink for a window a screen with nearest scaling: the GL work runs on the
+// present thread, so the emulation thread does not wait for each panel's
+// flip in turn, as it does through SDL_Renderer.
+bool wants_gl(const VideoSetup& vs) {
+  return vs.hires3d > 1 || (vs.want_sink == ds::frontend::Sink::Renderer && vs.dual_window && !vs.linear);
+}
+
 // come back through here with new values.
 bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Display& display2) {
   display.set_gpu_present(vs.gpu_present, vs.gpu_mode); display2.set_gpu_present(vs.gpu_present, vs.gpu_mode);
-  // The GLES present (gl_present.h) for hi-res 3D, and at 1x on the renderer
-  // sink for a window a screen with nearest scaling: the GL work runs on the
-  // present thread, so the emulation thread does not wait for each panel's
-  // flip in turn, as it does through SDL_Renderer.
-  const bool gl = vs.hires3d > 1 || (vs.want_sink == ds::frontend::Sink::Renderer && vs.dual_window && !vs.linear);
+  const bool gl = wants_gl(vs);
   display.set_gl(gl); display2.set_gl(gl);
   if (vs.dual_window) {
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
@@ -1733,6 +1737,11 @@ sdl_ready:
     }
   }
   if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }
+  // A reference of our own on SDL's GL library: SDL unloads it with the last
+  // GL window and loads it again with the next, and the windows reopened
+  // mid-game (3D resolution, the scaler's settings) did that each time --
+  // on the RG DS+ the third dlclose of libEGL crashed. Held to the end.
+  if (SDL_GL_LoadLibrary(nullptr) != 0) VLOG("video: SDL_GL_LoadLibrary: %s\n", SDL_GetError());
   mark("displays open");
   // The second window may skip frames that did not change; the first one's swap paces the loop.
   if (display2.gl()) display2.gl()->set_may_skip(true);
@@ -1745,7 +1754,20 @@ sdl_ready:
   // there at S x, at 1x while the GPU cannot keep up (video.hires3d_fallback).
   ds::sdl::GlFramePresenter gl_frames;
   gl_frames.set_verbose(verbose());
-  if (vs.hires3d > 1) gl_frames.open_hires(nds, display, vs.hires3d, cfg.flag("video.hires3d_fallback", true));
+  const bool hires_fallback = cfg.flag("video.hires3d_fallback", true);
+  if (vs.hires3d > 1) gl_frames.open_hires(nds, display, vs.hires3d, hires_fallback);
+  // Hi-res 3D off and on again mid-game (a new 3D resolution, the windows
+  // reopened): with the core quiesced as for a save state, at the frame
+  // boundary the pause menu holds the game at.
+  auto close_hires_now = [&] {
+    if (!gl_frames.hires()) return;
+    nds.gpu.quiesce();
+    nds.gpu3d.sync_raster();
+    gl_frames.close_hires(nds, display);
+  };
+  auto open_hires_now = [&] {
+    if (vs.hires3d > 1 && !nds.gba_mode() && !gl_frames.hires()) gl_frames.open_hires(nds, display, vs.hires3d, hires_fallback);
+  };
   // video.gpu3d (DS_GPU3D=1 overrides): the 3D layer on the GPU (Renderer3D::set_gpu).
   // After the displays: the Vulkan device opens the DRM node, and under direct
   // KMS the display must take master first.
@@ -2425,6 +2447,7 @@ sdl_ready:
   auto reopen_display = [&]() -> bool {
     VideoSetup want;
     if (!parse_video(cfg, want)) return false;
+    want.hires3d = static_cast<u32>(std::clamp(cfg.num("video.hires3d", 1), 1, 4));   // read at startup, not by parse_video
     want.panel_sink = vs.panel_sink;
     want.want_sink = vs.want_sink;
     want.upper_display = vs.upper_display;
@@ -2432,6 +2455,7 @@ sdl_ready:
     want.layout = display.current_layout();
     if (dual_window) want.layout.primary = vs.layout.primary;   // the windows' own layouts don't track it
     const VideoSetup before = vs;
+    close_hires_now();   // its GL objects belong to the windows' contexts, which go now
     display.close();
     if (dual_window) display2.close();
     vs = want;
@@ -2441,8 +2465,10 @@ sdl_ready:
       if (dual_window) display2.close();
       vs = before;
       if (!open_displays(vs, display, display2)) { std::fprintf(stderr, "video: and neither will the old ones\n"); input.request_quit(); }
+      open_hires_now();
       return false;
     }
+    open_hires_now();
     apply_visibility();
     // A new window forgets a text page is on it, else the menu's glyphs merge.
     display.set_page(paused);
@@ -2883,6 +2909,18 @@ sdl_ready:
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
     if (is("emu.autosave")) { autosave = on; return; }
     if (is("video.aa")) { apply_aa(nds, aa_on(v)); return; }
+    // 3D RESOLUTION: at once, the windows kept, when they are GLES either way;
+    // else the windows reopen as for the scaler's settings (which reads it).
+    if (is("video.hires3d")) {
+      VideoSetup want = vs;
+      want.hires3d = static_cast<u32>(std::clamp(std::atoi(v.c_str()), 1, 4));
+      if (wants_gl(want) != wants_gl(vs) || (want.hires3d > 1 && !display.gl())) { vs.hires3d = want.hires3d; host.reopen_wanted = true; return; }
+      if (want.hires3d == vs.hires3d && gl_frames.hires() == (want.hires3d > 1)) return;
+      close_hires_now();
+      vs.hires3d = want.hires3d;
+      open_hires_now();
+      return;
+    }
     if (is("video.gpu3d")) { std::string why; if (!nds.gpu3d.renderer().set_gpu(on, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); return; }
     if (is("video.gpu_present")) { host.reopen_wanted = true; return; }
     if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }
@@ -3609,7 +3647,15 @@ sdl_ready:
   }
   ds::place_current_thread(ds::ThreadRole::Emu);
   ds::place_foreign_threads();
+  std::vector<std::pair<u64, std::string>> hires_switches = ds::sdl::debug::options().hires_switch;   // DS_DEBUG=hires-switch
   while (!input.quit() && !g_signalled && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
+    // The pause menu's 3D resolution change, at a set frame, through the same path.
+    if (!hires_switches.empty() && frames == hires_switches.front().first) {
+      std::fprintf(stderr, "hires-switch: 3D resolution %s at frame %llu\n", hires_switches.front().second.c_str(), static_cast<unsigned long long>(frames));
+      host.apply_now("video.hires3d", hires_switches.front().second);
+      host.commit();
+      hires_switches.erase(hires_switches.begin());
+    }
     if (frames == 120) ds::place_foreign_threads();
     SDL_Event e;
     input.set_menu_open(menu.open());

@@ -34,6 +34,25 @@ bool GlFramePresenter::open_hires(NDS& nds, Display& top, u32 scale, bool fallba
   return true;
 }
 
+void GlFramePresenter::close_hires(NDS& nds, Display& top) {
+  PresentThread& pt = PresentThread::get();
+  pt.wait(job_);
+  if (gl_) {   // its GL objects deleted in their own context group, on the thread that owns it
+    std::unique_ptr<GlHires> gl = std::move(gl_);
+    pt.wait(pt.post([&] { if (top.gl()) top.gl()->make_current(); gl.reset(); }));
+  }
+  for (Capture& c : caps_) { c.tex = 0; c.img.clear(); }   // their textures were GlHires's
+  cap_next_ = 0;
+  snap_ = Snapshot{};
+  lines_.clear();
+  governor_ = HiresGovernor{};
+  fit_ = -1;
+  period_left_ = 0;
+  skipping_ = hi_now_ = false;
+  nds.gpu3d.renderer().set_display_list(false);
+  nds.gpu.set_hires(false);
+}
+
 void GlFramePresenter::say_mode() const {
   if (!verbose_) return;
   switch (governor_.mode()) {

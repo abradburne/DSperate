@@ -43,6 +43,9 @@ struct Options {
   // hires-half: hi-res 3D at half rate from the start and throughout (every
   // other frame shown; HiresGovernor), to check it against every frame.
   bool hires_half = false;
+  // hires-switch=FRAME:SCALE[+FRAME:SCALE...]: the 3D resolution changed at
+  // those frames as the pause menu changes it (no menu shown).
+  std::vector<std::pair<u64, std::string>> hires_switch;
   // hires-stages: GPU time per stage (timer queries), every 120 renders.
   // They change Panfrost's batching, so they rank the stages only.
   bool hires_stages = false;

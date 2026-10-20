@@ -122,7 +122,7 @@ const Setting kVideoSettings[] = {
          "PANEL PIXELS PER CELL", "auto", "AUTO"),
   boolean("video.aa", "ANTI-ALIASING", "false", FlagLive, Dep::None,
           "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER, 4X MSAA ON THE GPU RASTER"),
-  pick("video.hires3d", "3D RESOLUTION", kHires3d, 3, "1", FlagRestart, Dep::None,
+  pick("video.hires3d", "3D RESOLUTION", kHires3d, 3, "1", FlagLive, Dep::None,
        "DRAW THE 3D AGAIN ON THE GPU AT 2X OR 4X FOR THE SCREEN (RENDERER SINK, GLES)"),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
           "DRAW THE 3D LAYER ON THE GPU. NEEDS VULKAN; THE CPU DRAWS IT OTHERWISE"),

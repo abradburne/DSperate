@@ -58,6 +58,11 @@ public:
   // and engine A's lines kept by the core, the 3D drawn again at that scale.
   // `fallback`: video.hires3d_fallback. Prints what it got; false at 1x.
   bool open_hires(NDS& nds, Display& top, u32 scale, bool fallback);
+  // Back to 1x, as before open_hires: the GPU's side deleted in `top`'s
+  // context (before its window goes), the core's lists and line sets
+  // dropped. With the core quiesced, at a frame boundary (the pause menu's
+  // switch, a display reopen); open_hires again for another scale.
+  void close_hires(NDS& nds, Display& top);
   bool hires() const { return gl_ != nullptr; }
   void set_verbose(bool on) { verbose_ = on; }
   // Each frame, before present(): `half`, adaptive frameskip is on (the
