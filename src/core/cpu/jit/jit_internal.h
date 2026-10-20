@@ -150,6 +150,13 @@ struct Runtime {
   size_t stubs_end = 0;        // arena below this is permanent
   bool   stubs_fast = false;   // the timing model the stubs were emitted for (g_fast_timing)
   bool   need_reset = false;   // reset at the next safe point
+  // Blocks translated in the frame now running, per CPU (0 ARM9, 1 ARM7):
+  // past kStormBlocks, code is running that will not run again (a CPU off in
+  // memory that holds no program), and new blocks are interpreted first.
+  static constexpr u32 kStormBlocks = 2048;
+  u64    tx_frame = ~u64{0};
+  u32    tx_in_frame[2] = {};
+  u32    tx_max = 0;           // DS_JIT_TXMAX: the most in any frame, printed at exit
 
   void (*enter)(CpuContext*, const void*) = nullptr;
   u8* enter_light = nullptr;   // enter without saving x19-x28; caller must have
