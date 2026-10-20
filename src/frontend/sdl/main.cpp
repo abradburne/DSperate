@@ -518,24 +518,56 @@ void read_cheevos_chunk(ds::state::Reader& r) {
 }
 
 
-// Beside each state, its top screen as it was (RGBA bytes, 256x192, no
-// header): the picture the pause menu's States page shows for the slot.
+// Beside each state, its picture for the pause menu's States page: what the
+// screens showed, RGBA bytes behind a header with the size. A DS game's is
+// both screens, the top one above (256x384, as the console is held); a GBA
+// game's is its 240x160. A file without the header is an older one, the
+// top screen alone (256x192).
+constexpr char kThumbMagic[8] = {'D', 'S', 'T', 'H', 'U', 'M', 'B', '1'};
 std::string state_picture_path(const std::string& state) {
   const size_t dot = state.rfind(".dss");
   return (dot == std::string::npos ? state : state.substr(0, dot)) + ".thumb";
 }
 void write_state_picture(NDS& nds, const std::string& state) {
-  const u32* fb = nds.gpu.framebuffer(0);
-  std::vector<u8> px(static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H * 4);
-  for (size_t i = 0; i < static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H; ++i) {
-    px[i * 4 + 0] = static_cast<u8>(fb[i] >> 16); px[i * 4 + 1] = static_cast<u8>(fb[i] >> 8);
-    px[i * 4 + 2] = static_cast<u8>(fb[i]); px[i * 4 + 3] = 255;
+  const bool gba = nds.gba_mode();
+  // GBA: the frame Gpu::show_gba centres on the top screen.
+  const u32 w = gba ? 240 : ds::SCREEN_W, h = gba ? 160 : ds::SCREEN_H * 2;
+  const u32 x0 = gba ? (ds::SCREEN_W - 240) / 2 : 0, y0 = gba ? (ds::SCREEN_H - 160) / 2 : 0;
+  std::vector<u8> px(sizeof kThumbMagic + 8 + static_cast<size_t>(w) * h * 4);
+  std::memcpy(px.data(), kThumbMagic, sizeof kThumbMagic);
+  for (int k = 0; k < 4; ++k) { px[8 + k] = static_cast<u8>(w >> (8 * k)); px[12 + k] = static_cast<u8>(h >> (8 * k)); }
+  u8* out = px.data() + 16;
+  for (u32 y = 0; y < h; ++y) {
+    const u32* row = gba ? nds.gpu.framebuffer(0) + (y0 + y) * ds::SCREEN_W + x0
+                         : nds.gpu.framebuffer(y < ds::SCREEN_H ? 0 : 1) + (y % ds::SCREEN_H) * ds::SCREEN_W;
+    for (u32 x = 0; x < w; ++x, out += 4) {
+      out[0] = static_cast<u8>(row[x] >> 16); out[1] = static_cast<u8>(row[x] >> 8); out[2] = static_cast<u8>(row[x]); out[3] = 255;
+    }
   }
   const std::string path = state_picture_path(state);
   if (FILE* f = std::fopen(path.c_str(), "wb")) {
     if (std::fwrite(px.data(), 1, px.size(), f) != px.size()) std::fprintf(stderr, "state: cannot write %s\n", path.c_str());
     std::fclose(f);
   }
+}
+bool read_state_picture(const std::string& state, std::vector<u8>& rgba, int& w, int& h) {
+  FILE* f = std::fopen(state_picture_path(state).c_str(), "rb");
+  if (!f) return false;
+  std::vector<u8> all;
+  u8 buf[65536];
+  for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) all.insert(all.end(), buf, buf + got);
+  std::fclose(f);
+  size_t at = 0;
+  u32 pw = ds::SCREEN_W, ph = ds::SCREEN_H;   // an older file: the top screen, no header
+  if (all.size() >= 16 && std::memcmp(all.data(), kThumbMagic, sizeof kThumbMagic) == 0) {
+    pw = ph = 0;
+    for (int k = 0; k < 4; ++k) { pw |= static_cast<u32>(all[8 + k]) << (8 * k); ph |= static_cast<u32>(all[12 + k]) << (8 * k); }
+    at = 16;
+  }
+  if (pw == 0 || ph == 0 || pw > 4096 || ph > 4096 || all.size() - at != static_cast<size_t>(pw) * ph * 4) return false;
+  rgba.assign(all.begin() + static_cast<long>(at), all.end());
+  w = static_cast<int>(pw); h = static_cast<int>(ph);
+  return true;
 }
 
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
@@ -1107,13 +1139,7 @@ struct ShelfMenuHost final : ds::sdl::ShelfHost {
   bool gba() const override { return nds.gba_mode(); }
   bool fast_forward() const override { return ff_toggle; }
   bool slot_picture(int slot, std::vector<u8>& rgba, int& w, int& h) override {
-    FILE* f = std::fopen(state_picture_path(slot_path(slot)).c_str(), "rb");
-    if (!f) return false;
-    rgba.resize(static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H * 4);
-    const bool ok = std::fread(rgba.data(), 1, rgba.size(), f) == rgba.size();
-    std::fclose(f);
-    w = static_cast<int>(ds::SCREEN_W); h = static_cast<int>(ds::SCREEN_H);
-    return ok;
+    return read_state_picture(slot_path(slot), rgba, w, h);
   }
   // "Today 4:41 PM", "Yesterday 9:02 AM", "12 Oct 4:41 PM".
   std::string slot_saved(int slot) override {

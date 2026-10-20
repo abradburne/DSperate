@@ -233,7 +233,9 @@ A declared option (`packaging/arch/dslot/dsperate.toml`: 3D resolution, anti-ali
 skip, smooth scaling) lives in DSlot's `settings.toml`, never DSperate's ini: its row shows
 DSlot's "Use ..." when the page doesn't set it, Y clears it there, and a change takes effect in
 the running game too (`SettingsHost::apply_now`) as DSlot passes it from the next start. A
-state's picture is its top screen in a `.thumb` beside it (RGBA, 256x192).
+state's picture is a `.thumb` beside it: RGBA behind an 8-byte magic and its width and height,
+a DS game's both screens stacked as the console is held (256x384), a GBA game's 240x160; an older
+file with no header is the top screen alone (256x192) and still shows.
 
 Both menus are `PauseMenu`s; `ui.menu = auto` (shelf where it is built in and the screens are
 two windows that can show a picture), `shelf` or `dsperate`. DSperate's own stays for one
