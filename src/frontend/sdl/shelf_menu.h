@@ -119,6 +119,7 @@ private:
   int repeat_key_ = -1; u32 repeat_ms_ = 0; bool repeating_ = false;
   int row_of_tab_[kTabs] = {};   // each tab's highlighted row, kept while the menu is open
   int pending_row_ = -1;         // the row to highlight once the page now opening is filled
+  bool pending_first_slot_ = false;   // States just opened: highlight its first numbered slot
 
   void message(std::string m) { msg_ = std::move(m); msg_ms_ = 2000; dirty_ = true; }
   void fill();                   // the page as it stands, into nib's menu

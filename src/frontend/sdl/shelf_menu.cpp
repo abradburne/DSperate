@@ -133,6 +133,7 @@ void ShelfMenu::go_tab(int t) {
   if (sub_ == Sub::None) row_of_tab_[tab_] = nib_menu_row_at(m_);
   tab_ = t; sub_ = Sub::None;
   pending_row_ = row_of_tab_[t];
+  if (t == States) pending_first_slot_ = true;   // opens on the first numbered slot, Left reaches the resume point
   reset_armed_ = bind_reset_armed_ = false; save_armed_ = -1;
   dirty_ = true;
 }
@@ -165,14 +166,22 @@ void ShelfMenu::fill_play() {
 void ShelfMenu::fill_states() {
   cards_.clear();
   if (net_) return;
+  // The resume point first, set apart and labelled by when it was written,
+  // as every app's shelf shows it; then the numbered slots.
+  if (used_[kAutoSlot]) {
+    int w = 0, h = 0;
+    const std::vector<u8>* pic = picture(kAutoSlot, w, h);
+    const std::string when = shelf_ ? shelf_->slot_saved(kAutoSlot) : std::string();
+    nib_menu_resume_card(m_, when.c_str(), pic ? pic->data() : nullptr, w, h);
+    cards_.push_back(kAutoSlot);
+  }
   for (int s = 0; s < kAutoSlot; ++s)
     if (s < kSlotsShown || used_[s]) cards_.push_back(s);
-  cards_.push_back(kAutoSlot);
-  for (int s : cards_) {
+  for (size_t i = used_[kAutoSlot] ? 1 : 0; i < cards_.size(); ++i) {
+    const int s = cards_[i];
     int w = 0, h = 0;
     const std::vector<u8>* pic = used_[s] ? picture(s, w, h) : nullptr;
-    const std::string label = s == kAutoSlot ? std::string("Auto") : std::to_string(s + 1);
-    nib_menu_card(m_, label.c_str(), pic ? pic->data() : nullptr, w, h);
+    nib_menu_card(m_, std::to_string(s + 1).c_str(), pic ? pic->data() : nullptr, w, h);
   }
 }
 
@@ -361,6 +370,7 @@ std::string ShelfMenu::hint() const {
   switch (tab_) {
   case Play: return "A choose   \xc2\xb7   D-pad move   \xc2\xb7   L / R page   \xc2\xb7   B resume";
   case States:
+    if (top_slot() == kAutoSlot) return "A load   \xc2\xb7   L / R page   \xc2\xb7   B back";
     if (save_armed_ >= 0) return "X again to save over slot " + std::to_string(save_armed_ + 1);
     return "A load   \xc2\xb7   X save here   \xc2\xb7   Y quick slot   \xc2\xb7   L / R page   \xc2\xb7   B back";
   default: break;
@@ -420,6 +430,7 @@ void ShelfMenu::fill() {
     nib_menu_status(m_, clock.c_str(), battery, charging, gba ? 2 : 1, gba ? 560.0f : 0.0f);
     // A page just opened: its highlight, once its rows are there to move on.
     if (pass == 0 && pending_row_ >= 0) { nib_menu_set_row(m_, pending_row_); pending_row_ = -1; }
+    if (pass == 0 && pending_first_slot_ && tab_ == States) { nib_menu_set_card(m_, nib_menu_first_slot(m_)); pending_first_slot_ = false; }
   }
 }
 
