@@ -58,9 +58,10 @@ public:
 
   // Half rate's measure (gl_frame_presenter.h): a fence after a shown frame's
   // work; then whether the GPU is past it (1), not yet (0), or there was none
-  // (-1). The fence goes once passed, or when `take`.
+  // (-1), waiting until `within_ns` after the mark at most (0: not at all).
+  // The fence goes once passed, or when `take`.
   void mark_frame_end();
-  int frame_end_passed(bool take);
+  int frame_end_passed(bool take, s64 within_ns = 0);
 
   struct Impl;
 private:

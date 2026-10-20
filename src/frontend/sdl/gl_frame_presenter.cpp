@@ -69,7 +69,10 @@ void GlFramePresenter::present(NDS& nds, const u32* const fb[2], Display& top, D
     else if (!shown) {
       ++between_;
       if (busy) return;
-      job_ = pt.post([this] { fit1_ = gl_->frame_end_passed(false); });   // the shown frame's GPU work, a frame on
+      // Would every frame be shown: the shown frame's job ended within the
+      // frame (not busy), and its GPU work a frame after that -- at every
+      // frame one frame's work on the CPU overlaps the one before's on the GPU.
+      job_ = pt.post([this] { fit1_ = gl_->frame_end_passed(false, kFrameNs); });
       if (gpu::Gpu::hires_capture(nds.gpu.captured_last()) != 1) return;
       pt.wait(job_);
       snapshot(nds, fb);
@@ -137,6 +140,11 @@ void GlFramePresenter::snapshot(NDS& nds, const u32* const fb[2]) {
 void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark) {
   const Snapshot& s = snap_;
   const u32* const sfb[2] = {s.fb[0].data(), s.fb[1].data()};
+  // The core's set of lines first, before anything slow: the frame after
+  // next writes it again, and a job can run on past that (a scene's first
+  // frame uploading its textures, with the frame between not waiting).
+  if (s.lines) lines_.assign(s.lines, s.lines + 192);
+  const gpu::Engine2D::HiresLine* const lines = s.lines ? lines_.data() : nullptr;
   auto window_of = [&](int screen) -> Display* {
     for (int i = 0; i < 2; ++i) if (wins[i] && wins[i]->gl() && wins[i]->shows(screen)) return wins[i];
     return nullptr;
@@ -155,7 +163,7 @@ void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark) {
         if (shown_from[sc] >= 0) if (Display* w = window_of(sc)) w->gl()->set_hires(sc, caps_[shown_from[sc]].tex);
     const bool now = show && s.mode == 1 && s.has_list && shown_from[s.screen] < 0;
     if (now)
-      if (const unsigned tex = gl_->render(s.dl, s.arena, s.arena_top, s.arena_epoch, s.lines))
+      if (const unsigned tex = gl_->render(s.dl, s.arena, s.arena_top, s.arena_epoch, lines))
         if (Display* w = window_of(s.screen)) w->gl()->set_hires(s.screen, tex);
     if (s.capture == 1 && s.has_list) {   // into the oldest slot
       Capture& c = caps_[cap_next_];
@@ -163,10 +171,10 @@ void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark) {
       c.img.resize(256 * 192);
       u16 v15[256];
       for (u32 y = 0; y < 192; ++y) {
-        gpu::kern::active::capture_a15(s.lines[y].out, 256, v15);
+        gpu::kern::active::capture_a15(lines[y].out, 256, v15);
         gpu::kern::active::output_vram_line(v15, 0, &c.img[y * 256]);
       }
-      c.tex = gl_->render(s.dl, s.arena, s.arena_top, s.arena_epoch, s.lines, GlHires::kCaptured);
+      c.tex = gl_->render(s.dl, s.arena, s.arena_top, s.arena_epoch, lines, GlHires::kCaptured);
     }
     if (debug::options().hires_stats) {
       ++n_; n_now_ += now; n_cap_ += s.capture == 1; n_both_ += now && s.capture == 1; n_from_cap_ += (shown_from[0] >= 0) + (shown_from[1] >= 0);

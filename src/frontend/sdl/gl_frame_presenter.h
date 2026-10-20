@@ -86,7 +86,7 @@ private:
     std::vector<u32> arena;
     u32 arena_top = 0;
     u64 arena_epoch = ~0ull;
-    const gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for the frame (two alternate)
+    const gpu::Engine2D::HiresLine* lines = nullptr;   // Gpu's own set for the frame (two alternate): the job copies it first
     int screen = -1;          // engine A's screen, -1: no hi-res this frame
     u32 mode = 0;             // engine A's display mode
     int capture = 0;          // Gpu::hires_capture() of the frame's capture
@@ -106,6 +106,7 @@ private:
   bool verbose_ = false;
   Snapshot snap_;
   Capture caps_[3];
+  std::vector<gpu::Engine2D::HiresLine> lines_;   // the job's copy of the frame's lines
   int cap_next_ = 0;
   u64 job_ = 0;               // the last job posted
   u64 late_ = 0, between_ = 0;
@@ -114,6 +115,7 @@ private:
   // on, and two (the next shown frame) (GlHires::frame_end_passed); set on
   // the present thread, read a pair later.
   std::atomic<int> fit1_{-1}, fit2_{-1};
+  static constexpr s64 kFrameNs = 16'000'000;   // a refresh, less a little
   int period_left_ = 0;       // frames left in the display period the decision holds for
   bool skipping_ = false, hi_now_ = false;
   // hires-stats.

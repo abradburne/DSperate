@@ -10,7 +10,7 @@ GlHires::~GlHires() = default;
 bool GlHires::init(u32, std::string* why) { if (why) *why = "built without GLES"; return false; }
 unsigned GlHires::render(const gpu::Renderer3D::DisplayList&, const std::vector<u32>&, u32, u64, const gpu::Engine2D::HiresLine*, Output) { return 0; }
 void GlHires::mark_frame_end() {}
-int GlHires::frame_end_passed(bool) { return -1; }
+int GlHires::frame_end_passed(bool, s64) { return -1; }
 } // namespace ds::sdl
 #else
 #include "frontend/sdl/debug_options.h"
@@ -208,7 +208,8 @@ struct GlHires::Impl {
   GpuStages gpu;
   u32 renders = 0, renders_1x_nolist = 0, renders_1x_stale = 0;
   bool benching = false;
-  GLsync frame_end = nullptr;   // mark_frame_end()'s
+  GLsync frame_end = nullptr;   // mark_frame_end()'s, and when
+  std::chrono::steady_clock::time_point frame_end_at;
   void stage(int s) { if (stages_on) gpu.begin(s); }
 
   ~Impl() {
@@ -252,12 +253,14 @@ void GlHires::mark_frame_end() {
   if (!d_) return;
   if (d_->frame_end) glDeleteSync(d_->frame_end);
   d_->frame_end = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+  d_->frame_end_at = std::chrono::steady_clock::now();
   glFlush();   // so the fence is on its way: an unflushed one never signals
 }
 
-int GlHires::frame_end_passed(bool take) {
+int GlHires::frame_end_passed(bool take, s64 within_ns) {
   if (!d_ || !d_->frame_end) return -1;
-  const GLenum r = glClientWaitSync(d_->frame_end, 0, 0);
+  const s64 left = within_ns - std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - d_->frame_end_at).count();
+  const GLenum r = glClientWaitSync(d_->frame_end, 0, left > 0 ? static_cast<GLuint64>(left) : 0);
   const bool passed = r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED;
   if (passed || take) { glDeleteSync(d_->frame_end); d_->frame_end = nullptr; }
   return passed ? 1 : 0;
