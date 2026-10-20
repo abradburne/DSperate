@@ -23,14 +23,20 @@
 // stays up) rather than holding the emulation, and its sound, back: at 2x
 // Golden Sun's field takes ~21 ms of GPU a frame, and waiting ran the whole
 // game at 47 fps. That is decided once a display period, so a game that
-// moves engine A between the screens through captures keeps each pair whole;
-// HiresGovernor drops the 3D to 1x while too many frames are left out. At 1x
+// moves engine A between the screens through captures keeps each pair whole.
+// While too many are left out HiresGovernor shows every other frame at S x,
+// evenly, with adaptive frameskip on (between them only a display capture is
+// drawn, at S x, for the next shown frame), and the 3D at 1x when even that
+// cannot keep up. Only which frames are shown changes. Every frame is tried
+// again once a fence after each shown frame's work has passed a frame later:
+// at half rate the job itself always ends in time, its GPU work need not. At 1x
 // the GPU's share is small and what is left of a job is its swap waiting for
 // a flip: there the next frame waits, which is vsync pacing.
 #include "core/types.h"
 #include "frontend/sdl/gl_hires.h"
 #include "frontend/sdl/hires_governor.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -54,6 +60,10 @@ public:
   bool open_hires(NDS& nds, Display& top, u32 scale, bool fallback);
   bool hires() const { return gl_ != nullptr; }
   void set_verbose(bool on) { verbose_ = on; }
+  // Each frame, before present(): `half`, adaptive frameskip is on (the
+  // governor may show every other frame); `fast`, fast forward (which shows
+  // what it shows: nothing is judged by it).
+  void set_frameskip(bool half, bool fast) { governor_.set_half(half); fast_ = fast; }
 
   // Optional callbacks: `handed_over` on the emulation thread once the frame
   // is the present thread's (after the wait for the one before), `swapped`
@@ -65,6 +75,8 @@ public:
 
   // Frames left out so far, the GPU still drawing the one before.
   u64 late() const { return late_; }
+  // Frames not shown on purpose, between the shown ones at half rate.
+  u64 between() const { return between_; }
 
 private:
   // What the present thread reads for a frame, copied on the emulation thread.
@@ -85,7 +97,9 @@ private:
   struct Capture { std::vector<u32> img; unsigned tex = 0; };
 
   void snapshot(NDS& nds, const u32* const fb[2]);
-  void draw(Display* const wins[2]);   // the job
+  // The job; !show: a capture only. `mark`: a fence after it (half rate's measure).
+  void draw(Display* const wins[2], bool show = true, bool mark = false);
+  void say_mode() const;
 
   std::unique_ptr<GlHires> gl_;
   HiresGovernor governor_;
@@ -94,7 +108,12 @@ private:
   Capture caps_[3];
   int cap_next_ = 0;
   u64 job_ = 0;               // the last job posted
-  u64 late_ = 0;
+  u64 late_ = 0, between_ = 0;
+  bool fast_ = false;
+  // Half rate: whether the GPU had finished the last shown frame one frame
+  // on, and two (the next shown frame) (GlHires::frame_end_passed); set on
+  // the present thread, read a pair later.
+  std::atomic<int> fit1_{-1}, fit2_{-1};
   int period_left_ = 0;       // frames left in the display period the decision holds for
   bool skipping_ = false, hi_now_ = false;
   // hires-stats.

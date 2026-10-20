@@ -283,9 +283,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # resolution for the screen, composited with the 2D there (2: 512x384, 4:
                                 # 1024x768). The CPU raster still draws every frame at 1x for the game
                                 # (captures, the 1x picture). Needs sink = renderer; --hires3d N wins
-# hires3d_fallback = true       # while the GPU cannot keep up at hires3d (35% of two seconds' frames
-                                # left out), the 3D at 1x, tried again after 10 s (doubling to 80 s when
-                                # it falls back again within 3 s; after two of those, 1x for the session)
+# hires3d_fallback = true       # the 3D at 1x, until the next launch, while the GPU cannot keep up at
+                                # hires3d: with adaptive frameskip, when even every other frame falls
+                                # behind (a quarter of four seconds' shown frames late); without it,
+                                # when 35% of two seconds' frames were left out, here and there
 # sink = auto                   # where frames go. auto picks per device: the display engine's hardware
                                 # scaler where /dev/disp answers (Miyoo A30 and other Allwinner boards),
                                 # /dev/fb0 on the H700 handhelds' mali-only SDL2, KMS page flips on a bare
@@ -414,7 +415,11 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # +3.6 ms of emulation a frame in Golden Sun)
 # frameskip = 0                 # skip drawing up to N frames in a row (0 = off). The game runs
                                 # exactly as usual, only the drawing is skipped. A frame the game
-                                # display-captures is always drawn: it reads those pixels back
+                                # display-captures is always drawn: it reads those pixels back.
+                                # With hires3d, adaptive frameskip also covers the GPU: while it
+                                # cannot draw every frame at hires3d, every other frame is shown
+                                # (evenly, 30 a second) and the 3D goes to 1x only if even that
+                                # falls behind. Only which frames are shown changes
 # frameskip_mode = adaptive     # adaptive: skip only while behind real time, up to `frameskip` |
                                 # fixed: always skip that many of every frameskip+1
 # frameskip_capture = true      # INEXACT, and on by default: skip display-capture frames too. The

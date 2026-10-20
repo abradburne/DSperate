@@ -56,6 +56,12 @@ public:
   unsigned render(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch,
                   const gpu::Engine2D::HiresLine* lines, Output output = kShown);
 
+  // Half rate's measure (gl_frame_presenter.h): a fence after a shown frame's
+  // work; then whether the GPU is past it (1), not yet (0), or there was none
+  // (-1). The fence goes once passed, or when `take`.
+  void mark_frame_end();
+  int frame_end_passed(bool take);
+
   struct Impl;
 private:
   bool draw3d(const gpu::Renderer3D::DisplayList& dl, const std::vector<u32>& arena, u32 arena_top, u64 arena_epoch);

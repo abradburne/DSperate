@@ -214,6 +214,8 @@ const char* kUsage =
     "  --frameskip N   skip drawing up to N frames in N+1 (0 = off); emu.frameskip. Skipping runs\n"
     "                  in whole display periods, so on a game that drives its screens on\n"
     "                  alternate frames the limit counts pairs (DS_DEBUG_SKIP=1 shows the period)\n"
+    "                  Adaptive, with --hires3d: while the GPU is behind, every other frame is\n"
+    "                  shown at that scale, evenly, before the 3D goes to 1x\n"
     "  --frameskip-mode M  adaptive (default; skip only while the emulator is behind, up to N)\n"
     "                  | fixed (always skip N of every N+1)\n"
     "  --no-frameskip-capture  do not skip frames that display-capture. Exact, but a game that\n"
@@ -4177,6 +4179,7 @@ sdl_ready:
             ds::sdl::GlFramePresenter::Hooks hooks;
             hooks.handed_over = [&] { ds::sdl::latlog::post(fb); if (lock) lock->posted(ds::sdl::VblankClock::now_ns()); };
             if (lock) hooks.swapped = [lock, lock_frame] { lock->swapped(lock_frame, ds::sdl::VblankClock::now_ns()); };
+            gl_frames.set_frameskip(fs_limit > 0 && fs_adaptive, fast);
             gl_frames.present(nds, fb, display, dual_window ? &display2 : nullptr, hooks);
           } else {
             ds::sdl::latlog::post(fb);
@@ -4391,6 +4394,8 @@ sdl_ready:
     if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
     else std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
   }
+  if (gl_frames.between()) VLOG("present: %llu of %llu frames between the ones shown (2x at half rate)\n",
+                                 static_cast<unsigned long long>(gl_frames.between()), static_cast<unsigned long long>(frames));
   if (gl_frames.late()) VLOG("present: %llu of %llu frames not shown, the GPU still drawing the one before\n",
                              static_cast<unsigned long long>(gl_frames.late()), static_cast<unsigned long long>(frames));
   if (fs_limit > 0)

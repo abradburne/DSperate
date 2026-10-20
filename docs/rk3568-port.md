@@ -174,12 +174,28 @@ Compared with the CPU's 1x picture (`test_gl_hires`):
 The present thread draws a frame while the emulation runs the next (`gl_frame_presenter.h`
 has the hand-off). When the GPU is still drawing the frame before, a hi-res frame is left
 out rather than holding the emulation back (decided once a display period, so capture
-pairs stay whole). `HiresGovernor` (`video.hires3d_fallback`, on by default) drops the 3D
-to 1x when 35% of two seconds' frames were left out, and tries the higher scale again
-after 10 s, doubling to 80 s when it falls back again within 3 s; after two such quick
-drops in a row it stays at 1x for the session. (15% at first: Golden Sun: Dark Dawn's
-field leaves a quarter out at 2x, cold, and went to 1x and back every 10-40 s.) At 1x the GLES present
-is used for the windows too, and there a frame waits for the one before (vsync pacing).
+pairs stay whole). Left to that, a game the GPU cannot draw every frame of at 2x shows
+40-50 uneven pictures a second. `HiresGovernor` decides what to do instead:
+
+- **Every frame** at the hires3d scale while it keeps up.
+- **Every other frame**, with adaptive frameskip on (`emu.frameskip` >= 1, DSlot's
+  "Frame skip"): when frames are left out here and there (12 runs of them in two seconds, a
+  GPU 10% short; a stall, one run, does not count), even frames are shown and
+  odd ones not -- 30 pictures a second, evenly, the game and its sound at full speed. A
+  display capture on a frame between is still drawn at the scale, for the next shown frame
+  to show. Every frame is tried again once a GPU fence after each shown frame's work has
+  passed a frame later for two seconds (the job ending in time says nothing at half rate:
+  the GPU has two frames), no sooner than 5 s after it began; when that falls back within
+  3 s, the wait doubles, to 60 s.
+- **1x, until the next launch** (`video.hires3d_fallback`, on by default): when even half
+  rate does not hold -- a quarter of four seconds' shown frames left out or their work
+  running past the next one; one stall of a second, loading a scene, is not enough.
+  Without frameskip: 42 runs left out in two seconds (35%). Never back and forth.
+
+Only which frames are shown changes: the emulation, its frames and the 1x screens are the
+same in every mode (`DS_DEBUG=hires-half` pins half rate; under `--replay` every picture
+it shows is the every-frame run's for that frame). At 1x the GLES present is used for the
+windows too, and there a frame waits for the one before (vsync pacing).
 
 The emulation thread runs real-time under DSlot. PipeWire sets RLIMIT_RTTIME (200 ms)
 in every process it joins; `RtBudget` naps briefly once a paced frame as a real-time

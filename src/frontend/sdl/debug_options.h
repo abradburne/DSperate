@@ -40,6 +40,9 @@ struct Options {
   // stage; every 300 frames, how many were drawn at once, captured, or
   // shown from a capture.
   bool hires_stats = false;
+  // hires-half: hi-res 3D at half rate from the start and throughout (every
+  // other frame shown; HiresGovernor), to check it against every frame.
+  bool hires_half = false;
   // hires-stages: GPU time per stage (timer queries), every 120 renders.
   // They change Panfrost's batching, so they rank the stages only.
   bool hires_stages = false;

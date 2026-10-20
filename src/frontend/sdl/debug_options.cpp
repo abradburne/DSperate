@@ -19,6 +19,7 @@ constexpr Key kKeys[] = {
     {"present-ppm", "N[+COUNT]:PREFIX", "the windows' pictures at presents N.. as PPM"},
     {"menu-ppm", "PREFIX", "the shared pause menu's pictures as PPM, each time they change"},
     {"hires-stats", nullptr, "hi-res 3D: CPU ms per stage, frames drawn / captured"},
+    {"hires-half", nullptr, "hi-res 3D at half rate (every other frame shown) throughout"},
     {"hires-stages", nullptr, "hi-res 3D: GPU ms per stage (timer queries)"},
     {"hires-bench", "N[:MASK/MASK/...]", "hi-res 3D: render N drawn 60 times per stage mask, timed"},
     {"latency", "FILE", "button-to-flip latency, a line a frame"},
@@ -76,6 +77,7 @@ Options parse(const char* env) {
     else if (key == "present-ppm" && parse_ppm(value, o)) {}
     else if (key == "menu-ppm" && !value.empty()) o.menu_ppm = value;
     else if (key == "hires-stats") o.hires_stats = true;
+    else if (key == "hires-half") o.hires_half = true;
     else if (key == "hires-stages") o.hires_stages = true;
     else if (key == "hires-bench" && !value.empty()) parse_bench(value, o);
     else if (key == "latency" && !value.empty()) o.latency = value;

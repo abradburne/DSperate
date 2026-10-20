@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
-// video.hires3d_fallback (frontend/sdl/hires_governor.h): when hi-res 3D
-// drops to 1x and when it comes back, frame by frame.
+// video.hires3d_fallback and adaptive frameskip at hi-res
+// (frontend/sdl/hires_governor.h): every frame, every other frame, or 1x,
+// frame by frame.
 #include "check.h"
 #include "frontend/sdl/hires_governor.h"
 
@@ -10,92 +11,132 @@
 #include <initializer_list>
 
 using ds::sdl::HiresGovernor;
+using Mode = HiresGovernor::Mode;
 
 namespace {
 
-// Feeds `n` frames, `late` of every `of` left out; the frame count at the
-// first switch (0: none).
-int feed(HiresGovernor& g, int n, int late = 0, int of = 1) {
+// Feeds `n` frames at Full, `late` of every `of` left out; the frame count at
+// the first change of mode (0: none).
+int full(HiresGovernor& g, int n, int late = 0, int of = 1) {
   for (int i = 1; i <= n; ++i)
     if (g.frame(i % of < late)) return i;
   return 0;
 }
 
-void test_off() {
-  HiresGovernor g;
-  g.set_enabled(false);
-  CHECK(feed(g, 1000, 1) == 0);
-  CHECK(g.hires());
+// Feeds `n` frames at Half, shown and between in turn: every `miss`th shown
+// frame left out, every `slow`th frame between still on the shown one's work
+// (0: none). The frame count at the first change (0: none).
+int half(HiresGovernor& g, int n, int miss = 0, int slow = 1) {
+  for (int i = 1; i <= n; ++i) {
+    const bool shown = i % 2 == 1;
+    const int k = (i + 1) / 2;
+    const bool late = shown ? miss > 0 && k % miss == 0 : slow > 0 && k % slow == 0;
+    if (g.frame(late, shown)) return i;
+  }
+  return 0;
 }
 
-void test_threshold() {
-  // 35% of two seconds: 41 of 120 left out holds 2x, 42 drops it. A
-  // quarter (Golden Sun: Dark Dawn's field at 2x) stays at 2x.
-  HiresGovernor a;
-  CHECK(feed(a, 6000, 41, 120) == 0 && a.hires());
-  HiresGovernor q;
-  CHECK(feed(q, 6000, 1, 4) == 0 && q.hires());
-  HiresGovernor b;
-  CHECK(feed(b, 240, 42, 120) == 120 && !b.hires() && b.drops() == 1);
-  // Nothing is judged before two seconds have passed at 2x.
-  HiresGovernor c;
-  CHECK(feed(c, 119, 1) == 0 && c.hires());
+HiresGovernor make(bool half_ok, bool fallback = true) {
+  HiresGovernor g;
+  g.set_half(half_ok);
+  g.set_fallback(fallback);
+  return g;
+}
+
+void test_off() {
+  HiresGovernor g = make(false, false);
+  CHECK(full(g, 1000, 1) == 0 && g.mode() == Mode::Full);
+}
+
+void test_to_half() {
+  // Frameskip on: runs of frames left out, 11 in two seconds hold every frame, 12 halve it.
+  HiresGovernor a = make(true);
+  CHECK(full(a, 6000, 1, 11) == 0 && a.mode() == Mode::Full);
+  HiresGovernor b = make(true);
+  CHECK(full(b, 240, 1, 10) == 120 && b.mode() == Mode::Half && b.hires());
+  // Nothing is judged before two seconds at Full.
+  HiresGovernor c = make(true);
+  CHECK(full(c, 119, 1, 2) == 0);
+  // A stall of a second every ten (60 frames in one run) is not the GPU short.
+  HiresGovernor e = make(true);
+  CHECK(full(e, 6000, 60, 600) == 0 && e.mode() == Mode::Full);
+  // A quarter left out (Golden Sun: Dark Dawn's field at 2x): Half, not 1x.
+  HiresGovernor d = make(true);
+  CHECK(full(d, 240, 1, 4) == 120 && d.mode() == Mode::Half);
+}
+
+void test_low_without_frameskip() {
+  // Frameskip off: 42 runs in two seconds to 1x (every third frame, 40, holds); and 1x stays.
+  HiresGovernor a = make(false);
+  CHECK(full(a, 6000, 1, 3) == 0 && a.mode() == Mode::Full);
+  HiresGovernor b = make(false);
+  CHECK(full(b, 240, 1, 2) == 120 && b.mode() == Mode::Low && !b.hires());
+  CHECK(full(b, 100000) == 0 && b.mode() == Mode::Low);
+  // A quarter left out without frameskip stays at every frame (as before).
+  HiresGovernor c = make(false);
+  CHECK(full(c, 6000, 1, 4) == 0);
+  HiresGovernor e = make(false);
+  CHECK(full(e, 6000, 60, 600) == 0);
+}
+
+void test_half_to_low() {
+  // At Half, a quarter of the last 120 shown frames not in time: 1x, until
+  // the next launch.
+  HiresGovernor g = make(true);
+  CHECK(full(g, 120, 1, 2) == 120);
+  CHECK(half(g, 239, 4) == 239 && g.mode() == Mode::Low);   // the 120th shown frame is the 30th late
+  CHECK(full(g, 100000) == 0 && half(g, 100000) == 0 && g.mode() == Mode::Low);
+  // 24 of 120 holds at Half; so does one stall of a second (29 shown frames in a row).
+  HiresGovernor h = make(true);
+  CHECK(full(h, 120, 1, 2) == 120 && half(h, 6000, 5) == 0 && h.mode() == Mode::Half);
+  HiresGovernor s = make(true);
+  CHECK(full(s, 120, 1, 2) == 120);
+  for (int i = 0; i < 58; ++i) CHECK(!s.frame(i % 2 == 0, i % 2 == 0));
+  CHECK(half(s, 6000) == 0 && s.mode() == Mode::Half);
+  // Without video.hires3d_fallback Half is as low as it goes.
+  HiresGovernor n = make(true, false);
+  CHECK(full(n, 120, 1, 2) == 120 && half(n, 6000, 1) == 0 && n.mode() == Mode::Half);
+}
+
+void test_half_to_full() {
+  // Back to every frame once the shown frames' work fits a frame (at most 1 of
+  // 60 running over), no sooner than 5 s after Half began.
+  HiresGovernor g = make(true);
+  CHECK(full(g, 120, 1, 2) == 120 && g.wait_frames() == 300);
+  CHECK(half(g, 300, 0, 0) == 300 && g.mode() == Mode::Full);
+  // Work running over 2 of 60 between frames keeps Half.
+  HiresGovernor h = make(true);
+  CHECK(full(h, 120, 1, 2) == 120 && half(h, 6000, 0, 30) == 0 && h.mode() == Mode::Half);
+  // Frameskip turned off at Half: every frame again.
+  HiresGovernor o = make(true);
+  CHECK(full(o, 120, 1, 2) == 120);
+  o.set_half(false);
+  CHECK(o.mode() == Mode::Full);
 }
 
 void test_backoff() {
-  HiresGovernor g;
-  CHECK(feed(g, 120, 1) == 120 && !g.hires());
-  CHECK(g.wait_frames() == 600);              // the first drop does not double the wait
-  CHECK(feed(g, 600) == 600 && g.hires());    // 2x again after 10 s
-  // Dropping again within 3 s of coming back doubles the wait.
-  CHECK(feed(g, 120, 1) == 120 && !g.hires() && g.wait_frames() == 1200);
-  CHECK(feed(g, 1200) == 1200 && g.hires());
-  // 2x held for 30 s: the wait starts over at 10 s.
-  CHECK(feed(g, 1800) == 0 && g.hires());
-  CHECK(g.wait_frames() == 600);
-  // A drop after more than 3 s at 2x keeps the wait as it is; with two
-  // seconds at 2x behind it, 42 frames left out in a row are 35%.
-  CHECK(feed(g, 120, 1) == 42 && g.wait_frames() == 600);
-  CHECK(feed(g, 600) == 600);
-  CHECK(feed(g, 300) == 0);                   // 5 s at 2x, then behind again
-  CHECK(feed(g, 120, 1) == 42 && g.wait_frames() == 600);
-}
-
-void test_gives_up() {
-  // Two quick drops in a row (each within 3 s of coming back): 1x for good,
-  // not 2x every 20-80 s for a few seconds.
-  HiresGovernor g;
-  CHECK(feed(g, 120, 1) == 120 && !g.hires());
-  CHECK(feed(g, 600) == 600 && g.hires());
-  CHECK(feed(g, 120, 1) == 120 && g.wait_frames() == 1200);
-  CHECK(feed(g, 1200) == 1200 && g.hires());
-  CHECK(feed(g, 120, 1) == 120 && !g.hires() && g.drops() == 3);
-  CHECK(feed(g, 100000) == 0 && !g.hires());
-  // One quick drop, then 30 s held: the count starts over.
-  HiresGovernor h;
-  CHECK(feed(h, 120, 1) == 120 && feed(h, 600) == 600);
-  CHECK(feed(h, 120, 1) == 120 && feed(h, 1200) == 1200);   // quick drop 1
-  CHECK(feed(h, 1800) == 0 && h.hires());                    // held 30 s
-  CHECK(feed(h, 120, 1) == 42 && feed(h, 600) == 600);       // a slow drop, back
-  CHECK(feed(h, 120, 1) == 120 && feed(h, 1200) == 1200 && h.hires());   // quick drop 1 again: still retried
-}
-
-void test_window_clears() {
-  // Frames left out before a return to 2x do not count against it.
-  HiresGovernor g;
-  CHECK(feed(g, 120, 1) == 120);
-  CHECK(feed(g, 600) == 600 && g.hires());
-  CHECK(feed(g, 119, 1) == 0 && g.hires());   // a new window of two seconds
+  // Falling back within 3 s of coming back doubles the wait, up to 60 s; 30 s
+  // held at every frame starts it over.
+  HiresGovernor g = make(true);
+  CHECK(full(g, 120, 1, 2) == 120);
+  for (unsigned want : {600u, 1200u, 2400u, 3600u, 3600u}) {
+    CHECK(half(g, 100000, 0, 0) > 0 && g.mode() == Mode::Full);
+    CHECK(full(g, 120, 1, 2) == 120 && g.mode() == Mode::Half && g.wait_frames() == want);
+  }
+  CHECK(half(g, 3600, 0, 0) == 3600 && g.mode() == Mode::Full);
+  CHECK(full(g, 1800) == 0 && full(g, 120, 1, 2) == 24 && g.wait_frames() == 300);   // the 12th run
+  CHECK(g.halves() == 7);
 }
 
 } // namespace
 
 int main() {
   test_off();
-  test_threshold();
+  test_to_half();
+  test_low_without_frameskip();
+  test_half_to_low();
+  test_half_to_full();
   test_backoff();
-  test_window_clears();
-  test_gives_up();
   std::puts("hires_governor: ok");
   return 0;
 }

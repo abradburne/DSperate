@@ -28,28 +28,73 @@ bool GlFramePresenter::open_hires(NDS& nds, Display& top, u32 scale, bool fallba
   nds.gpu3d.renderer().set_display_list(true);
   nds.gpu.set_hires(true);
   gl_ = std::move(gl);
-  governor_.set_enabled(fallback);
+  governor_.set_fallback(fallback);
+  if (debug::options().hires_half) governor_.pin_half();
   std::fprintf(stderr, "hires3d: %ux on the GPU (%ux%u)\n", scale, 256 * scale, 192 * scale);
   return true;
 }
 
+void GlFramePresenter::say_mode() const {
+  if (!verbose_) return;
+  switch (governor_.mode()) {
+  case HiresGovernor::Mode::Half:
+    std::fprintf(stderr, "hires3d: GPU behind, every other frame shown (%u times so far; every frame tried again after %u frames)\n",
+                 governor_.halves(), governor_.wait_frames());
+    break;
+  case HiresGovernor::Mode::Full: std::fprintf(stderr, "hires3d: every frame shown again\n"); break;
+  case HiresGovernor::Mode::Low: std::fprintf(stderr, "hires3d: GPU behind, 3D at 1x until the next launch\n"); break;
+  }
+}
+
 void GlFramePresenter::present(NDS& nds, const u32* const fb[2], Display& top, Display* second, const Hooks& hooks) {
   PresentThread& pt = PresentThread::get();
-  if (period_left_ <= 0) {   // the resolution too changes only between display periods
-    hi_now_ = gl_ && governor_.hires();
-    skipping_ = !debug::options().present_wait && hi_now_ && !pt.done(job_);
-    period_left_ = std::max<int>(1, nds.gpu.display_phase_period());
+  const bool wait = debug::options().present_wait;
+  if (gl_ && debug::options().hires_stats && nds.frame_count % 300 == 0)
+    std::fprintf(stderr, "hires3d governor: %s; left out %u/120, shown late %u/120, between slow %u/60\n",
+                 governor_.mode() == HiresGovernor::Mode::Full ? "every frame" : governor_.mode() == HiresGovernor::Mode::Half ? "half rate" : "1x",
+                 governor_.window_late(), governor_.window_miss(), governor_.window_slow());
+  if (gl_ && !fast_ && governor_.mode() == HiresGovernor::Mode::Half) {
+    // Even frames shown, odd ones between; the period's rule doesn't apply
+    // (a capture between is drawn all the same) and starts afresh after.
+    const bool shown = (nds.frame_count & 1) == 0;
+    const bool busy = !wait && !pt.done(job_);
+    period_left_ = 0;
+    hi_now_ = true;
+    // Judged by the shown frames' fences, checked a frame on (between: may
+    // every frame be shown again?) and two (shown: does half rate hold?),
+    // each check read a pair later. Left out, or no fence: not in time.
+    const bool late = shown ? busy || fit2_.exchange(-1) == 0 : busy || fit1_.exchange(-1) != 1;
+    if (governor_.frame(late, shown)) say_mode();
+    if (governor_.mode() != HiresGovernor::Mode::Half) hi_now_ = governor_.hires();   // changed: shown as it now is
+    else if (!shown) {
+      ++between_;
+      if (busy) return;
+      job_ = pt.post([this] { fit1_ = gl_->frame_end_passed(false); });   // the shown frame's GPU work, a frame on
+      if (gpu::Gpu::hires_capture(nds.gpu.captured_last()) != 1) return;
+      pt.wait(job_);
+      snapshot(nds, fb);
+      if (!snap_.has_list) return;
+      Display* const wins[2] = {&top, second};
+      job_ = pt.post([this, wins] { draw(wins, false); });
+      return;
+    } else if (busy) { ++late_; return; }
+    else pt.post([this] { fit2_ = gl_->frame_end_passed(true); });   // and two frames on, before this one's
+  } else {
+    if (period_left_ <= 0) {   // the resolution too changes only between display periods
+      hi_now_ = gl_ && governor_.hires();
+      skipping_ = !wait && hi_now_ && !pt.done(job_);
+      period_left_ = std::max<int>(1, nds.gpu.display_phase_period());
+    }
+    --period_left_;
+    if (gl_ && !fast_ && governor_.frame(skipping_)) say_mode();
+    if (skipping_) { ++late_; return; }
   }
-  --period_left_;
-  if (gl_ && governor_.frame(skipping_) && verbose_)
-    std::fprintf(stderr, "hires3d: %s (%u drops to 1x so far; 2x tried again after %u frames)\n", governor_.hires() ? "back to 2x" : "GPU behind, 3D at 1x",
-                 governor_.drops(), governor_.wait_frames());
-  if (skipping_) { ++late_; return; }
   pt.wait(job_);
   if (hooks.handed_over) hooks.handed_over();
   snapshot(nds, fb);
   Display* const wins[2] = {&top, second};
-  job_ = pt.post([this, wins, swapped = hooks.swapped] { draw(wins); if (swapped) swapped(); });
+  const bool mark = gl_ && governor_.mode() == HiresGovernor::Mode::Half;
+  job_ = pt.post([this, wins, mark, swapped = hooks.swapped] { draw(wins, true, mark); if (swapped) swapped(); });
 }
 
 // What the job reads, copied while the emulation waits: the screens, and
@@ -89,7 +134,7 @@ void GlFramePresenter::snapshot(NDS& nds, const u32* const fb[2]) {
 // engine A's mode 2, or engine B showing the bank -- shows that capture's
 // hi-res picture, whatever order the game moves them in (Golden Sun swaps
 // engine A between the screens every frame).
-void GlFramePresenter::draw(Display* const wins[2]) {
+void GlFramePresenter::draw(Display* const wins[2], bool show, bool mark) {
   const Snapshot& s = snap_;
   const u32* const sfb[2] = {s.fb[0].data(), s.fb[1].data()};
   auto window_of = [&](int screen) -> Display* {
@@ -103,11 +148,12 @@ void GlFramePresenter::draw(Display* const wins[2]) {
       return true;
     };
     int shown_from[2] = {-1, -1};
-    for (int sc = 0; sc < 2; ++sc)
+    for (int sc = 0; sc < 2 && show; ++sc)
       for (int k = 0; k < 3; ++k) if (caps_[k].tex && same5(sfb[sc], caps_[k].img.data())) { shown_from[sc] = k; break; }
-    for (int sc = 0; sc < 2; ++sc)
-      if (shown_from[sc] >= 0) if (Display* w = window_of(sc)) w->gl()->set_hires(sc, caps_[shown_from[sc]].tex);
-    const bool now = s.mode == 1 && s.has_list && shown_from[s.screen] < 0;
+    if (show)
+      for (int sc = 0; sc < 2; ++sc)
+        if (shown_from[sc] >= 0) if (Display* w = window_of(sc)) w->gl()->set_hires(sc, caps_[shown_from[sc]].tex);
+    const bool now = show && s.mode == 1 && s.has_list && shown_from[s.screen] < 0;
     if (now)
       if (const unsigned tex = gl_->render(s.dl, s.arena, s.arena_top, s.arena_epoch, s.lines))
         if (Display* w = window_of(s.screen)) w->gl()->set_hires(s.screen, tex);
@@ -128,7 +174,8 @@ void GlFramePresenter::draw(Display* const wins[2]) {
         std::fprintf(stderr, "hires3d: %u frames: %u shown at once, %u captured, %u both, %u screens shown from a capture\n", n_, n_now_, n_cap_, n_both_, n_from_cap_);
     }
   }
-  for (int i = 0; i < 2; ++i) if (wins[i]) wins[i]->draw_gl_now(sfb);
+  if (show) for (int i = 0; i < 2; ++i) if (wins[i]) wins[i]->draw_gl_now(sfb);
+  if (mark) gl_->mark_frame_end();
 }
 
 } // namespace ds::sdl

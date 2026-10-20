@@ -38,10 +38,13 @@ default = false
 args = ["--aa"]
 off = ["--no-aa"]
 
-# Adaptive: frames go undrawn only while the game runs behind, at most this many in a row.
+# Adaptive: frames go undrawn only while the game runs behind, at most this many in a row;
+# and at a 3D resolution above 1x, while the GPU is behind, every other frame is shown (an even
+# 30 a second, the game and its sound at full speed) before the 3D drops to 1x. Off: the 3D
+# drops to 1x straight away (when 3D resolution fallback is on).
 [[options]]
 key = "frameskip"
-label = "Frame skip (when behind)"
+label = "Frame skip (game or 3D behind)"
 systems = ["NDS"]
 kind = "number"
 min = 0

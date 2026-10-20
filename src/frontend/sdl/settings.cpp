@@ -73,7 +73,7 @@ constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 
 
 const Setting kEmuSettings[] = {
   number("emu.frameskip", "FRAMESKIP", 0, 3, 1, "0", FlagLive, Dep::NetSession,
-         "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"),
+         "DRAW FEWER FRAMES WHILE BEHIND; 2X 3D SHOWS EVERY OTHER FRAME BEFORE 1X. THE GAME STILL RUNS IN FULL"),
   pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
        "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"),
   pick("emu.limiter", "FRAME LIMITER", kLimiter, 7, "auto", FlagLive, Dep::NetSession,
