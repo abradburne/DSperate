@@ -17,8 +17,8 @@
 # (pgo/aarch64-gcc<version>/, trained on the handheld by bench/core/pgo-train.sh),
 # the build uses it; otherwise it builds without. See docs/rk3568-port.md.
 pkgname=dsperate
-pkgver=0.r7c1fb67.151.8e7179d
-pkgrel=2
+pkgver=0.r7c1fb67.156.255c585
+pkgrel=1
 pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
 arch=(aarch64)
 url="https://github.com/abradburne/DSperate"
@@ -28,7 +28,7 @@ makedepends=(git cmake ninja vulkan-headers rust)   # rust: cargo for nibkit's m
 optdepends=('vulkan-driver: video.gpu3d (on the Mali-G52 ~5x slower than the GLES path)')
 # DSperate's own flags only: makepkg's would change the build that was measured.
 options=(!buildflags !debug)
-_commit=8e7179d8c9f3a7a4d794ba8d4486c840a66c09ce
+_commit=255c58569c44837548d0d253d7eaf3c34432c5e8
 source=("DSperate::git+${_src:+file://}${_src:-https://github.com/abradburne/DSperate.git}#commit=$_commit")
 sha256sums=(SKIP)
 
