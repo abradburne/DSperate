@@ -15,7 +15,7 @@ namespace ds::sdl {
 namespace {
 using Btn = ds::io::Io::Button;
 
-constexpr const char* kTabNames[] = {"Play", "States", "Game", nullptr, "System"};
+constexpr const char* kTabNames[] = {"Play", "States", "Game", nullptr, "System", "Connections"};
 constexpr int kSlotsShown = 6;   // slots 1-6 always; 7-10 only when they hold a state
 constexpr u32 kRepeatDelayMs = 400, kRepeatRateMs = 55;
 
@@ -90,6 +90,7 @@ bool ds_only(const char* key) {
 
 ShelfMenu::ShelfMenu() : m_(nib_menu_new()) {}
 ShelfMenu::~ShelfMenu() {
+  if (conn_) nib_connections_free(conn_);
   if (options_) nib_options_free(options_);
   if (settings_) nib_settings_free(settings_);
   nib_menu_free(m_);
@@ -109,6 +110,7 @@ void ShelfMenu::set_open(bool o) {
       options_ = nib_options_load("dsperate", gba ? "GBA" : "NDS");
       options_gba_ = gba;
     }
+    if (!conn_) conn_ = nib_connections_new();
     tab_ = Play; sub_ = Sub::None;
     reset_armed_ = bind_reset_armed_ = false; save_armed_ = -1;
     capturing_ = false; msg_.clear();
@@ -117,6 +119,7 @@ void ShelfMenu::set_open(bool o) {
     pending_row_ = 0;
   }
   if (!o && capturing_ && host_) { host_->cancel_capture(); capturing_ = false; }
+  if (!o && conn_) { nib_connections_free(conn_); conn_ = nullptr; if (tab_ == Connections) tab_ = Play; }
   open_ = o;
   dirty_ = true;
 }
@@ -146,6 +149,7 @@ void ShelfMenu::row(Row r, const char* label, int kind, const char* text, int nu
 
 void ShelfMenu::fill_tabs() {
   for (int t = 0; t < kTabs; ++t) {
+    if (t == Connections && !conn_) continue;   // always the last, so tab numbers stay put
     const char* name = t == Console ? (shelf_ && shelf_->gba() ? "GBA" : "DS") : kTabNames[t];
     nib_menu_tab(m_, name, t == tab_);
   }
@@ -405,8 +409,12 @@ void ShelfMenu::fill() {
   for (int pass = 0; pass < 2; ++pass) {
     if (pass) h = hint();
     rows_.clear();
-    nib_menu_begin(m_, title.c_str(), h.c_str());
+    // The Connections page is nibkit's whole: its title says what it's doing.
+    const bool conn = sub_ == Sub::None && tab_ == Connections && conn_;
+    if (conn) nib_menu_begin(m_, nib_connections_title(conn_), nib_connections_hint());
+    else nib_menu_begin(m_, title.c_str(), h.c_str());
     fill_tabs();
+    if (conn) conn_first_ = nib_connections_fill(conn_, m_);
     switch (sub_) {
     case Sub::Cheats: fill_cheats(); break;
     case Sub::Achievements: fill_achievements(); break;
@@ -418,6 +426,7 @@ void ShelfMenu::fill() {
       case Game: fill_game(); break;
       case Console: fill_console(); break;
       case System: fill_system(); break;
+      case Connections: break;   // filled above
       }
     }
     int charging = 0;
@@ -484,6 +493,8 @@ const u8* ShelfMenu::render_top(const u32* game, int& w, int& h) {
 }
 
 PauseMenu::Result ShelfMenu::update(u32 presses, u32 held, u32 ms) {
+  // The Connections page shows how its work is going: drawn again 4 times a second.
+  if (tab_ == Connections && conn_) { conn_ms_ += ms; if (conn_ms_ >= 250) { conn_ms_ = 0; dirty_ = true; } }
   if (!msg_.empty()) {
     if (msg_ms_ <= ms) { msg_.clear(); dirty_ = true; } else msg_ms_ -= ms;
   }
@@ -535,8 +546,15 @@ PauseMenu::Result ShelfMenu::effect(int kind, int index, int step, int key) {
     if (sub_ != Sub::None) { sub_ = Sub::None; pending_row_ = row_of_tab_[tab_]; return Result::None; }
     if (tab_ != Play) { go_tab(Play); return Result::None; }
     return Result::Resume;
-  case NIB_EFFECT_CHOOSE: return choose(index);
-  case NIB_EFFECT_CHANGE: change(index, step); return Result::None;
+  case NIB_EFFECT_CHOOSE:
+  case NIB_EFFECT_CHANGE:
+    if (tab_ == Connections && sub_ == Sub::None) {
+      if (conn_) nib_connections_act(conn_, index - conn_first_);
+      return Result::None;
+    }
+    if (kind == NIB_EFFECT_CHOOSE) return choose(index);
+    change(index, step);
+    return Result::None;
   case NIB_EFFECT_CARD: return card(index, key);
   case NIB_EFFECT_USE:
     if (index >= 0 && static_cast<size_t>(index) < rows_.size() && rows_[static_cast<size_t>(index)].kind == Row::Declared)

@@ -21,6 +21,7 @@
 struct NibMenu;
 struct NibSettings;
 struct NibOptions;
+struct NibConnections;
 
 namespace ds::sdl {
 
@@ -82,7 +83,7 @@ public:
   const u8* render_top(const u32* game, int& w, int& h);
 
 private:
-  enum Tab : int { Play, States, Game, Console, System, kTabs };
+  enum Tab : int { Play, States, Game, Console, System, Connections, kTabs };
   enum class Sub : u8 { None, Cheats, Achievements, Controls };
   struct Row {
     enum Kind : u8 { Heading, Resume, SaveState, LoadState, FastForward, Reset, SaveQuit, SaveForGame,
@@ -98,6 +99,11 @@ private:
   NibSettings* settings_ = nullptr;
   NibOptions* options_ = nullptr;
   bool options_gba_ = false;     // which console options_ was loaded for
+  // Wi-Fi and Bluetooth (nibkit's Connections page), kept while the menu is
+  // open; null where the system gives an app none (the stock OS): no tab.
+  NibConnections* conn_ = nullptr;
+  int conn_first_ = 0;           // the page's first row, as nib_connections_fill said
+  u32 conn_ms_ = 0;              // since the page was last drawn: its work runs on a thread of its own
   ShelfHost* shelf_ = nullptr;
   SettingsHost* host_ = nullptr;
   CheevosHost* cheevos_ = nullptr;
