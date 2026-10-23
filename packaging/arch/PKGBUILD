@@ -18,7 +18,7 @@
 # the build uses it; otherwise it builds without. See docs/rk3568-port.md.
 pkgname=dsperate
 pkgver=0.r7c1fb67.162.840b968
-pkgrel=4
+pkgrel=5
 pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
 arch=(aarch64)
 url="https://github.com/abradburne/DSperate"
