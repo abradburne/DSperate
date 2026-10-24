@@ -763,8 +763,10 @@ void Gpu3D::submit_vertex() {
 
 namespace {
 // Viewport transform of one vertex in place. W is truncated to 24 bits; the
-// 32-bit divider loses a bit of precision when W exceeds 16 bits.
-inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport) {
+// 32-bit divider loses a bit of precision when W exceeds 16 bits. `subpixel`:
+// also work out the GPU raster's fraction (two 64-bit divisions); without it
+// the fraction is zero, as the CPU raster and the hi-res display list need.
+inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport, bool subpixel) {
   vt.pos[3] &= 0x00FFFFFF;
   u32 px, py;
   s32 fx = 0, fy = 0;
@@ -778,11 +780,14 @@ inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport) {
     den <<= 1;
     // The same division at 16x for the GPU raster's fraction, kept only
     // where its integer part agrees with the hardware's (whose product can wrap).
-    const u64 fpx = (u64{px} * viewport[4] << 4) / den, fpy = (u64{py} * viewport[5] << 4) / den;
+    const u32 hx = px, hy = py;
     px = ((px * viewport[4]) / den) + viewport[0];
     py = ((py * viewport[5]) / den) + viewport[3];
-    if ((fpx >> 4) + viewport[0] == px) fx = static_cast<s32>(fpx & 15);
-    if ((fpy >> 4) + viewport[3] == py) fy = static_cast<s32>(fpy & 15);
+    if (subpixel) {
+      const u64 fpx = (u64{hx} * viewport[4] << 4) / den, fpy = (u64{hy} * viewport[5] << 4) / den;
+      if ((fpx >> 4) + viewport[0] == px) fx = static_cast<s32>(fpx & 15);
+      if ((fpy >> 4) + viewport[3] == py) fy = static_cast<s32>(fpy & 15);
+    }
   }
   vt.sx = px & 0x1FF;
   vt.sy = py & 0xFF;
@@ -870,12 +875,13 @@ void Gpu3D::emit_polygon_unclipped(const Vertex* const* src, int nverts, int cli
   Vertex* fresh = vr + num_vertices_;
   const Vertex* vv[4];
   for (int i = 0; i < clipstart; ++i) vv[i] = src[i];
+  const bool subpixel = renderer_.wants_subpixel();
   for (int i = clipstart; i < nverts; ++i) {
     Vertex& vt = fresh[i - clipstart];
     vt = *src[i];
     // Colours keep only their 5-bit integer part across the clip stage.
     for (int k = 0; k < 3; ++k) { vt.col[k] &= ~0xFFF; vt.col[k] += 0xFFF; }
-    viewport_vertex(vt, viewport_);
+    viewport_vertex(vt, viewport_, subpixel);
     vv[i] = &vt;
   }
 
@@ -916,7 +922,8 @@ void Gpu3D::emit_polygon_clipped(const Vertex* const* src, int nverts, int clips
     return;
   }
 
-  for (int i = clipstart; i < nverts; ++i) viewport_vertex(clipped[i], viewport_);
+  const bool subpixel = renderer_.wants_subpixel();
+  for (int i = clipstart; i < nverts; ++i) viewport_vertex(clipped[i], viewport_, subpixel);
 
   // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
   if (!(cur_polygon_attr_ & (1 << 13))) {
