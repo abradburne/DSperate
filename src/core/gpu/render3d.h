@@ -95,9 +95,6 @@ public:
   };
   const std::vector<u32>& display_arena(u32* top, u64* epoch) const { *top = dl_arena_top_; *epoch = dl_epoch_; return dl_arena_; }
   bool gpu_active() const { return gpu_on_; }
-  // Vertices need their 28.4 position (Vertex::fx, fy): only the GPU raster
-  // and its frame dump read it, so the viewport transform skips it otherwise.
-  bool wants_subpixel() const { return gpu_on_ || gpu_dump_path_; }
 private:
   NDS& nds_;
   // Holds a whole chunk of scanlines at once (render_chunk draws chunk at a
