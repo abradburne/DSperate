@@ -212,12 +212,6 @@ private:
   bool lid_ = false, mic_key_ = false, mic_pad_ = false, ff_key_ = false, ff_pad_ = false;
   u32  noise_ = 0x2545F491;
   SDL_GameController* pad_ = nullptr;
-  // SDL holds the guide button down for at least 250 ms (a quick tap's release
-  // comes late), so its release is taken from the joystick button it maps to.
-  int  guide_joy_ = -1;          // that joystick button, or -1 (guide on an axis or hat, or unmapped)
-  bool guide_down_ = false;      // SDL has reported guide down and not yet up
-  bool guide_up_early_ = false;  // released from the joystick; SDL's late release is dropped
-  bool guide_up_pending_ = false;   // the joystick's release came before SDL's press
 
   Bind key_map_[io::Io::BTN_COUNT];
   Bind pad_map_[io::Io::BTN_COUNT];

@@ -338,11 +338,6 @@ void Input::open_controllers() {
     pad_ = SDL_GameControllerOpen(i);
     if (pad_) std::fprintf(stderr, "controller: %s\n", SDL_GameControllerName(pad_));
   }
-  guide_joy_ = -1; guide_down_ = guide_up_early_ = guide_up_pending_ = false;
-  if (pad_) {
-    const SDL_GameControllerButtonBind g = SDL_GameControllerGetBindForButton(pad_, SDL_CONTROLLER_BUTTON_GUIDE);
-    if (g.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON) guide_joy_ = g.value.button;
-  }
   detect_faces();
 }
 
@@ -917,40 +912,6 @@ void Input::handle(const SDL_Event& e0, Display& display, Display* second) {
   SDL_Event e = e0;
   if ((e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) && e.cbutton.button < 4)
     e.cbutton.button = face_remap_[e.cbutton.button];
-  // Guide's release as soon as the joystick reports it; the one SDL sends
-  // after its minimum hold is then dropped. A tap can put the joystick's
-  // release ahead of SDL's press in the queue, so it waits for the press.
-  if (e.type == SDL_JOYBUTTONDOWN && guide_joy_ >= 0 && e.jbutton.button == guide_joy_) guide_up_pending_ = false;   // a new press
-  if (e.type == SDL_JOYBUTTONUP && pad_ && guide_joy_ >= 0 && e.jbutton.button == guide_joy_ &&
-      e.jbutton.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad_))) {
-    if (!guide_down_) { guide_up_pending_ = true; return; }
-    e = SDL_Event{};
-    e.type = SDL_CONTROLLERBUTTONUP;
-    e.cbutton.which = e0.jbutton.which;
-    e.cbutton.button = SDL_CONTROLLER_BUTTON_GUIDE;
-    e.cbutton.state = SDL_RELEASED;
-    guide_down_ = false;
-    guide_up_early_ = true;
-  } else if ((e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) && e.cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
-    if (e.type == SDL_CONTROLLERBUTTONDOWN) {
-      guide_down_ = true; guide_up_early_ = false;
-      if (guide_up_pending_) {
-        guide_up_pending_ = false;
-        handle(e0, display, second);
-        SDL_Event up = e0;
-        up.type = SDL_JOYBUTTONUP;
-        up.jbutton.which = e0.cbutton.which;
-        up.jbutton.button = static_cast<Uint8>(guide_joy_);
-        up.jbutton.state = SDL_RELEASED;
-        handle(up, display, second);
-        return;
-      }
-    } else {
-      const bool late = guide_up_early_;
-      guide_down_ = guide_up_early_ = false;
-      if (late) return;
-    }
-  }
   // Route window-addressed events to the window they happened on; keyboard
   // and controller input is global.
   auto owner = [&](u32 wid) -> Display& {
@@ -986,7 +947,6 @@ void Input::handle(const SDL_Event& e0, Display& display, Display* second) {
   case SDL_CONTROLLERDEVICEREMOVED:
     if (pad_ && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad_))) {
       SDL_GameControllerClose(pad_); pad_ = nullptr;
-      guide_joy_ = -1; guide_down_ = guide_up_early_ = guide_up_pending_ = false;
       detect_faces();
     }
     break;

@@ -191,8 +191,8 @@ const char* kUsage =
     "                  surface (SDL's window surface) | renderer (SDL_Renderer). One that won't open\n"
     "                  falls back to the renderer. video.sink. --disp / --fbdev are --sink disp / fbdev\n"
     "  --gpu-present / --no-gpu-present  scale and lay out the picture off the CPU, into the\n"
-    "                  scanout buffer: the Rockchip RGA where the device has one, else a Vulkan\n"
-    "                  compute pass (video.gpu_present = true | rga | vulkan | false; on by default)\n"
+    "                  scanout buffer: a Vulkan render pass, else the Rockchip RGA where the\n"
+    "                  device has one (video.gpu_present = true | rga | vulkan | false; on by default)\n"
     "  --preload-rom / --no-preload-rom  read the whole ROM into memory at load, or page it in as\n"
     "                  the game reads it (cart.preload = auto | true | false; auto preloads a ROM on a\n"
     "                  network share that fits in memory, where a page read mid-frame is a round trip)\n"
@@ -908,12 +908,12 @@ struct VideoSetup {
   u32    chunky_thresh = 180 * 256;
   ds::sdl::Display::Layout layout;
   std::vector<ds::sdl::Display::Mode> layout_cycle;
+  bool   gpu_present = false;
+  ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: Vulkan, else RGA) | rga | vulkan
   // Boot-only, see above.
   ds::frontend::Sink panel_sink = ds::frontend::Sink::Count;   // Disp/Fbdev when one owns the panel (frontend/video/select.h)
   ds::frontend::Sink want_sink = ds::frontend::Sink::Count;    // explicit video.sink among the window sinks
-  bool   gpu_present = false;
   u32    hires3d = 1;   // video.hires3d: the 3D at this resolution on the display, 1-4 (GLES, renderer sink)
-  ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: RGA, else Vulkan) | rga | vulkan
   int    upper_display = 0, lower_display = 1;   // dual-window: SDL display per physical panel
 };
 
@@ -948,6 +948,14 @@ bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
   if (vs.scale < 1) vs.scale = 1;
   vs.fullscreen = cfg.flag("video.fullscreen", false);
   vs.linear = cfg.flag("video.linear", false);
+  // GPU present stage, default on. Display falls back to the scanline scaler
+  // without dma-buf import, and GpuPresent::open() declines without Vulkan.
+  // Read here, not at boot only, so reopening for a menu change keeps it.
+  {
+    const std::string g = cfg.str("video.gpu_present", "true");
+    vs.gpu_mode = g == "rga" ? Disp::GpuPresentMode::Rga : g == "vulkan" ? Disp::GpuPresentMode::Vulkan : Disp::GpuPresentMode::Auto;
+    vs.gpu_present = g == "rga" || g == "vulkan" || g == "true" || g == "auto" || g == "on" || g == "1";
+  }
   vs.vsync = cfg.flag("video.vsync", true);
   vs.dual_window = cfg.flag("video.dual_window", false);
   if (!Disp::parse_int_scale(cfg.str("video.integer_scale", "off"), vs.int_scale)) { std::fprintf(stderr, "integer_scale must be off, under or over\n"); return false; }
@@ -1678,14 +1686,6 @@ static int run(int argc, char** argv) {
     chunky = 2;
   }
 
-  // GPU present stage, default on. Display falls back to the scanline scaler
-  // without dma-buf import, and GpuPresent::open() declines without Vulkan.
-  {
-    const std::string g = cfg.str("video.gpu_present", "true");
-    vs.gpu_mode = g == "rga" ? ds::sdl::Display::GpuPresentMode::Rga : g == "vulkan" ? ds::sdl::Display::GpuPresentMode::Vulkan : ds::sdl::Display::GpuPresentMode::Auto;
-    vs.gpu_present = g == "rga" || g == "vulkan" || g == "true" || g == "auto" || g == "on" || g == "1";
-  }
-
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
   if (audio_on || mic_on) init |= SDL_INIT_AUDIO;
   // Prefer SDL's native pipewire backend over Pulse (more daemon/wakeup cost).
@@ -1868,7 +1868,7 @@ sdl_ready:
     }
   };
   // Leaving before the frame loop, once the panels are open: torn down in the
-  // same order as at the end (SDL_Quit with a GL context still up asserts).
+  // same order as at the end (SDL_Quit with a GL context still up can assert).
   auto quit_early = [&](int code) {
     input.close();
     audio.close();
@@ -1962,7 +1962,7 @@ sdl_ready:
   };
   // A game that cannot start says why on the panel, not only in the log, and
   // waits for a button (or a minute) before the caller exits: started from a
-  // shelf, the player is back on it knowing what went wrong. `why` is the
+  // launcher, the player is back in it knowing what went wrong. `why` is the
   // panel's short line (19 characters fit); the log has the details.
   auto start_failed = [&](const std::string& path, const char* why) {
     std::fprintf(stderr, "launch: %s cannot start: %s\n", path.c_str(), why);
@@ -1986,6 +1986,8 @@ sdl_ready:
     else return "FILE CANNOT BE READ";
     if (err.find("GBA BIOS") != std::string::npos) return "GBA BIOS IS BAD";
     if (err.find("corrupt zip") != std::string::npos || err.find("not a zip") != std::string::npos) return "THE ZIP IS DAMAGED";
+    if (err.find("in the archive") != std::string::npos || err.find("the archive is") != std::string::npos ||
+        err.find("compression method") != std::string::npos) return "ZIP NOT SUPPORTED";
     if (rom_ext(path) == ".zip") return "NO GAME IN THE ZIP";
     return "UNSUPPORTED ROM";
   };
@@ -2002,13 +2004,13 @@ sdl_ready:
     if (!nds.load_dsi_nand_title(sc.title_lo, &err)) { std::fprintf(stderr, "dsi: %s: %s\n", path.c_str(), err.c_str()); return false; }
     return true;
   };
+  // From the ROM to the starting state: one-shot work, off the real-time
+  // class (rt_budget.h). Inflating a big zipped ROM alone can outlast RLIMIT_RTTIME.
+  std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
   if (!bios_error.empty()) {
     start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? "FIRMWARE IS BAD" : "DS BIOS IS BAD");
     return quit_early(1);
   }
-  // From the ROM to the starting state: one-shot work, off the real-time
-  // class (rt_budget.h). A zipped 16 MB GBA ROM alone outlasts RLIMIT_RTTIME.
-  std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
   if (dsi_hle && rom_shortcut) {
     if (!load_shortcut_title(rom_path)) { return quit_early(1); }
   } else if (dsi_hle && rom_is_cia) {
@@ -2022,7 +2024,7 @@ sdl_ready:
     if ((!gba_game && rom_ext(rom_path) != ".zip") || !nds.load_gba(rom_path, cfg.str("paths.gba_bios"), &err)) {
       if (!err.empty()) std::fprintf(stderr, "gba: %s\n", err.c_str());
       std::fprintf(stderr, "could not read %s\n", rom_path.c_str());
-      start_failed(rom_path, rom_failure(rom_path, err));
+      start_failed(rom_path, rom_failure(rom_path, err + "\n" + nds.rom_error));
       return quit_early(1);
     }
     ds::sdl::print_gba_game(*nds.gba, cfg.str("paths.gba_bios"));
@@ -2801,7 +2803,7 @@ sdl_ready:
         return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
       case ds::sdl::Dep::PanelEffects:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
-        if (display.rga_present()) return "THE RGA ALWAYS SCALES BILINEAR";
+        if (display.rga_present()) return "";   // off: exact at whole-number scales, bilinear between
         return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
       case ds::sdl::Dep::GridSeam:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";

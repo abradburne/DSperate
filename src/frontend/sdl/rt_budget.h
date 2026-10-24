@@ -77,8 +77,8 @@ private:
 
 // For as long as it lives, the calling thread is an ordinary task: for
 // one-shot work that may run longer than RLIMIT_RTTIME allows without a
-// sleep (a 16 MB zipped GBA ROM inflates for 200 ms on the A55s). Threads
-// started meanwhile inherit SCHED_OTHER too. On the way out the real-time
+// sleep (a big zipped ROM inflates for longer than 200 ms on a Cortex-A55).
+// Threads started meanwhile inherit SCHED_OTHER too. On the way out the real-time
 // policy comes back and the thread naps once as a real-time thread, so the
 // count starts from nothing. Nests: an inner guard finds nothing to drop.
 class OffRealtime {

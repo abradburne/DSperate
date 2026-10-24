@@ -59,7 +59,8 @@ struct GpuVert {
   DS_INT z, w;          // depth and normalised W for this polygon's slot
   DS_INT r, g, b;       // 9-bit vertex colour; the raster narrows to 6 with >> 3
   DS_INT s, t;          // 12.4 texture coordinates
-  uint   pad_[3];
+  DS_INT fx, fy;        // screen position in 28.4 (sx == fx >> 4): the lean path draws here
+  uint   pad_;
 };
 
 // One polygon. 64 bytes.

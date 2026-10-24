@@ -167,9 +167,13 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   the DS-resolution frames are scaled and laid out into the scanout buffer by
   the Rockchip RGA (the RK3566's 2D accelerator, through V4L2) where the
   device has one, else by a Vulkan compute pass. The RGA leaves the GPU to the
-  3D layer alone; its filter is bilinear, it draws the LCD grid and a fading
-  PiP inset, and the menu greys out what it cannot do (nearest, seams, chunky
-  cells). Rotated panels and everything else fall back to the scanline scaler.
+  3D layer alone. With bilinear off, whole-number scales are exact nearest
+  neighbour (the CPU repeats each pixel across a small strip, the RGA repeats
+  the rows; no job scales, so nothing is filtered) and fractional ones stay
+  bilinear; `video.integer_scale` makes any panel whole. It draws the LCD
+  grid and a fading PiP inset, and the menu greys out what it cannot do
+  (seams, chunky cells). Rotated panels and everything else fall back to the
+  scanline scaler.
 - **Dual-window mode** for dual-panel handhelds: one fullscreen window per
   display, one DS screen each.
 - **On-screen overlays:** FPS counter, state slot number, screenshot flash,

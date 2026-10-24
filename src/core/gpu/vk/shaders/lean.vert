@@ -1,10 +1,13 @@
 #version 450
 // The lean path: polygons as fans through the hardware rasteriser, one
-// instance per polygon, at 1x with the pipeline's MSAA. Vertices sit on
-// pixel corners so the samples measure the polygon's true area: the DS
-// span covers columns [xstart, xend] inclusive and rows [ytop, ybot)
-// exclusive, so a left vertex is on its pixel's left edge and a right one on
-// its pixel's right edge.
+// instance per polygon, at 1x with the pipeline's MSAA. Vertices sit at
+// their 28.4 sub-pixel positions (the DS's own, before it drops the
+// fraction), shared by every polygon that uses them, so neighbours meet
+// without cracks, T-junctions included: whole pixels bent a vertex off the
+// edge it lies on and opened a sliver. (A per-polygon shift of "right" vertices
+// onto their pixel's right edge, after the DS's inclusive xend, left
+// single-pixel holes along slanted seams: neighbours disagreed on the shift.)
+// Axis-aligned quads come out exact: [x0, x1 - 1] x [y0, y1 - 1], the DS span.
 #extension GL_GOOGLE_include_directive : require
 #define DS_GLSL 1
 #include "vk_layout.h"
@@ -24,19 +27,21 @@ void main() {
   uint vi = k == 0u ? 0u : tri + k;
   GpuVert vt = verts[p.first_vert + vi];
   float w = max(float(vt.w), 1.0);
-  float cx = 0.5 * float(p.xmin + p.xmax);
-  float sxf = float(vt.sx), syf = float(vt.sy);
-  float ox = sxf > cx ? 1.0 : 0.0, oy = 0.0;
-  // A vertical right edge is the exception to "a right vertex is on its pixel's
-  // right edge": the DS ends such a span one pixel short (xend - 1), so the
-  // rows' pixels are [xl, x - 1] and the attributes run over exactly that
-  // width. Axis-aligned quads (text, sprites, UI) all have one; extending them
-  // by a pixel stretched their texcoords across width + 1.
-  if (ox > 0.0 && p.nverts > 2u) {
-    uint n = p.nverts;
-    float sxp = float(verts[p.first_vert + (vi + n - 1u) % n].sx), sxn = float(verts[p.first_vert + (vi + 1u) % n].sx);
-    if (sxp == sxf || sxn == sxf) ox = 0.0;
+  // The DS floors its positions and lights the pixel a vertex lands in; a
+  // quarter-pixel pull back towards that measured closest to its edges.
+  float sxf = float(vt.fx) / 16.0 - 0.25, syf = float(vt.fy) / 16.0 - 0.25;
+  // Each polygon grows 1/16 px outward from its centre: a T-junction vertex
+  // sits on its neighbour's edge only to the 28.4 grid, and the hairline
+  // left over showed whatever lay behind (bright terrain under a black
+  // horizon wall) as specks. The DS's inclusive spans never leave one.
+  {
+    vec2 c = vec2(0.0);
+    for (uint j = 0u; j < p.nverts; ++j) c += vec2(float(verts[p.first_vert + j].fx), float(verts[p.first_vert + j].fy));
+    vec2 dv = vec2(float(vt.fx), float(vt.fy)) - c / float(p.nverts);
+    float len = length(dv);
+    if (len > 0.0) { sxf += dv.x / len * 0.0625; syf += dv.y / len * 0.0625; }
   }
+  float ox = 0.0, oy = 0.0;
   // A zero-width/height polygon is a line to the DS but zero area here:
   // give it one pixel via the second/third vertex.
   if (p.xmax == p.xmin) ox = (vi == 1u || vi == 2u) ? 1.0 : 0.0;

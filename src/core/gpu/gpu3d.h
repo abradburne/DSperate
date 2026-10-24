@@ -46,6 +46,8 @@ struct Vertex {
   u8  oc;              // frustum outcode of pos (bits: +x -x +y -y +z -z)
   s32 sx, sy;          // screen position after viewport transform
   s32 fcol[3];         // final 9-bit colour used by the rasteriser
+  s32 fx, fy;          // sx, sy in 28.4: the GPU raster's sub-pixel position (sx == fx >> 4), so
+                       // a T-junction vertex stays on its neighbour's edge; not hashed, not saved
 };
 
 struct Polygon {

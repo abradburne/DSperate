@@ -330,13 +330,20 @@ int alloc(size_t len, const std::function<bool(int fd)>& usable, const char* tag
   static const long fail_after = [] { const char* e = std::getenv("DS_DMABUF_FAIL_AFTER"); return e ? std::atol(e) : -1L; }();
   static long allocs = 0;
   if (fail_after >= 0 && allocs++ >= fail_after) { errno = ENOMEM; std::fprintf(stderr, "%s: alloc: %s (DS_DMABUF_FAIL_AFTER)\n", tag, std::strerror(errno)); return -1; }
+  std::string exhausted;   // a pinned source that ran out: the sweep below skips it
   if (g_have_pinned) {
     const int fd = alloc_from(g_pinned, len);
-    if (fd < 0) { std::fprintf(stderr, "%s: %s: alloc: %s\n", tag, g_chosen.c_str(), std::strerror(errno)); return -1; }
-    if (usable(fd)) return fd;
-    ::close(fd);
-    std::fprintf(stderr, "%s: %s: buffer rejected\n", tag, g_chosen.c_str());
-    return -1;
+    if (fd >= 0) {
+      if (usable(fd)) return fd;
+      ::close(fd);
+      std::fprintf(stderr, "%s: %s: buffer rejected\n", tag, g_chosen.c_str());
+      return -1;
+    }
+    std::fprintf(stderr, "%s: %s: alloc: %s\n", tag, g_chosen.c_str(), std::strerror(errno));
+    // A small CMA pool (ROCKNIX gives RK356x 32 MiB) runs dry at two
+    // fullscreen panels; the next source that imports takes over the pin.
+    if (errno != ENOMEM) return -1;
+    exhausted = g_chosen;
   }
 
   const std::vector<Source> cands = candidates();
@@ -345,6 +352,7 @@ int alloc(size_t len, const std::function<bool(int fd)>& usable, const char* tag
     return -1;
   }
   for (const Source& s : cands) {
+    if (s.path == exhausted) continue;
     const int fd = alloc_from(s, len);
     if (fd < 0) {
       // legacy-ION sweep: most of its 32 bits are not heaps, so stay quiet

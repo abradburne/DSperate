@@ -2656,7 +2656,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     s32 xmin = 0x7FFFFFFF, xmax = -0x7FFFFFFF;
     for (u32 j = 0; j < p.nverts; ++j) {
       const Vertex& v = gx.vertex(p.vtx[j]);
-      GpuVert d{}; d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
+      GpuVert d{}; d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1]; d.fx = v.fx; d.fy = v.fy;
       gv.push_back(d);
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
@@ -3054,8 +3054,8 @@ bool Renderer3D::build_gpu_list(const Gpu3D& gx, const Polygon* const* polys, u3
     for (u32 j = 0; j < p.nverts; ++j) {
       const Vertex& v = gx.vertex(p.vtx[j]);
       GpuVert& d = gv[nv + j];
-      d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1];
-      d.pad_[0] = d.pad_[1] = d.pad_[2] = 0;
+      d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1]; d.fx = v.fx; d.fy = v.fy;
+      d.pad_ = 0;
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
     o.xmin = xmin; o.xmax = xmax;
