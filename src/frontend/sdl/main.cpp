@@ -85,6 +85,18 @@ namespace {
 // Gates startup chatter and hotkey echoes; errors, refusals and disk-touching
 // confirmations are never gated. DS_VERBOSE=1 enables.
 bool verbose() { static const bool v = std::getenv("DS_VERBOSE") != nullptr; return v; }
+
+// DS_MARK=1: the stages of a start and an exit (settings read, SDL up, the
+// panels and audio open, the first frame shown, leaving, saved, closed) on
+// stderr against CLOCK_BOOTTIME, the clock a launcher can time its own side
+// against too.
+void mark(const char* stage) {
+  static const bool on = std::getenv("DS_MARK") != nullptr;
+  if (!on) return;
+  timespec t{};
+  clock_gettime(CLOCK_BOOTTIME, &t);
+  std::fprintf(stderr, "dsperate: %.3f s %s\n", static_cast<double>(t.tv_sec) + t.tv_nsec / 1e9, stage);
+}
 #define VLOG(...) do { if (verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
 
 
@@ -1010,6 +1022,7 @@ bool g_restart = false;
 }
 
 static int run(int argc, char** argv) {
+  mark("started");
   const char* rom = nullptr;
   const char* config_arg = nullptr;
   long frame_limit = 0;
@@ -1172,6 +1185,7 @@ static int run(int argc, char** argv) {
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
+  mark("settings read");
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   const std::string dsi_fw = cfg.str("paths.dsi_firmware");
   const bool have_dsi_fw = !dsi_fw.empty() && std::filesystem::exists(dsi_fw);
@@ -1484,6 +1498,7 @@ static int run(int argc, char** argv) {
   // and the menu's pips assume it. SDL2 otherwise uses labels on Nintendo pads.
   SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
 #endif
+  mark("SDL_Init");
   if (SDL_Init(init) != 0) {
     if ((init & SDL_INIT_AUDIO) && !driver_forced && !audio_driver.empty()) {
       unsetenv("SDL_AUDIODRIVER");
@@ -1494,6 +1509,7 @@ static int run(int argc, char** argv) {
     audio_on = mic_on = false;   // no audio subsystem: run silent
   }
 sdl_ready:
+  mark("SDL ready");
 
   ds::sdl::Display display;
   ds::sdl::Display display2;   // dual-window: the lower panel's window
@@ -1517,6 +1533,7 @@ sdl_ready:
     }
   }
   if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }
+  mark("displays open");
   // video.gpu3d (DS_GPU3D=1 overrides): the 3D layer on the GPU (Renderer3D::set_gpu).
   // After the displays: the Vulkan device opens the DRM node, and under direct
   // KMS the display must take master first.
@@ -1550,6 +1567,7 @@ sdl_ready:
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open(cfg.flag("audio.native_rate", true));
+  mark("audio open");
   audio.set_volume(cfg.num("audio.volume", 100));
   // buffer_size (ms) supersedes latency_frames; the old key is still read
   // when buffer_size is unset.
@@ -1578,6 +1596,7 @@ sdl_ready:
   input.set_touch_routes(std::move(touch_routes));
   input.configure(cfg);
   input.open_controllers();
+  mark("controllers open");
   std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   {
     const std::string pl = cfg.str("cart.preload", "auto");
@@ -3964,6 +3983,7 @@ sdl_ready:
       }
     }
     ++frames;
+    if (frames == 1) mark("first frame presented");
     rt_budget.nap();
     // DS_SHOT_AT=N: a screenshot after frame N, for offscreen/replay runs.
     if (static const long shot_at = [] { const char* v = std::getenv("DS_SHOT_AT"); return v ? std::atol(v) : -1L; }(); shot_at >= 0 && frames == static_cast<u64>(shot_at)) shot_pending = true;
@@ -4003,8 +4023,10 @@ sdl_ready:
     }
   }
 
+  mark("leaving");
   autosave_now();
   flush_save();
+  mark("saved");
   discard_session_cache();
   // Not after a DSiWare session: nothing a DSi title wrote belongs beside the DS firmware.
   if (!fw_override.empty() && nds.firmware_override_dirty() && !nds.dsi) {
@@ -4070,6 +4092,7 @@ sdl_ready:
   display.close();
   display2.close();
   SDL_Quit();
+  mark("closed");
   return 0;
 }
 
