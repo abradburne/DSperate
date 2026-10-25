@@ -105,6 +105,20 @@ void Scheduler::cut_arm9_at(u64 at) {
   a9.hot.cycle_budget = nb - consumed;   // <= 0: the ARM9 stops after this instruction, as melonDS's loop does
 }
 
+void Scheduler::settle(EventId id) {
+  const u32 i = static_cast<u32>(id);
+  const u32 bit = 1u << i;
+  const u64 until = now();
+  const u64 previous = firing_at_;
+  while ((armed_ & bit) && at_[i] <= until) {
+    armed_ &= ~bit;
+    if (next_id_ == i) rescan();
+    firing_at_ = at_[i];
+    fn_[i](nds_, param_[i]);
+  }
+  firing_at_ = previous;
+}
+
 void Scheduler::cancel(EventId id) {
   const u32 i = static_cast<u32>(id);
   if (!(armed_ & (1u << i))) return;

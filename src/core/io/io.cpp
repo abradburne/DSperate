@@ -224,6 +224,10 @@ void Io::timer_overflow(Cpu cpu, int idx) {
 }
 
 void Io::timer_write_control(Cpu cpu, int idx, u16 value) {
+  // A CPU may reach an overflow before the slice-end dispatcher. Fire it
+  // before this rewrite can overwrite its deadline and lose the reload/IRQ.
+  const EventId id = static_cast<EventId>(static_cast<int>(cpu == Cpu::ARM9 ? EventId::Timer0 : EventId::Timer7_0) + idx);
+  nds_.sched.settle(id);
   Timer& t = cpu_io[ci(cpu)].timers[idx];
   const bool was = t.running();
   const u64 now = nds_.sched.now();
