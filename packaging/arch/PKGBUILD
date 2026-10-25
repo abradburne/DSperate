@@ -18,7 +18,7 @@
 # the build uses it; otherwise it builds without. See docs/rk3568-port.md.
 pkgname=dsperate
 pkgver=0.r7c1fb67.198.21d1353
-pkgrel=1
+pkgrel=2
 pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
 arch=(aarch64)
 url="https://github.com/abradburne/DSperate"
@@ -61,6 +61,16 @@ package() {
     install -Dm644 DSperate/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 DSperate/src/core/bios/LICENSE.freebios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.freebios"
     install -Dm644 DSperate/src/core/gba/bios/LICENSE.cult-bios "$pkgdir/usr/share/licenses/$pkgname/LICENSE.cult-bios"
+    # The code and fonts DSperate carries in its tree, each under its own licence, whose notices
+    # go with every copy: enet and slirp (netplay), rcheevos (achievements), miniz (zipped
+    # games), and the DSi's system fonts.
+    local l
+    for l in net/enet net/slirp cheevos/rcheevos core/cart/miniz; do
+        install -Dm644 "DSperate/src/$l/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.${l##*/}"
+    done
+    install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" \
+        DSperate/src/core/io/dsi_font/LICENSE-WenQuanYi-MicroHei.txt \
+        DSperate/src/core/io/dsi_font/LICENSE-NotoSans-OFL-1.1.txt
     # nibkit's menu is linked in (MIT), with the Roboto Condensed face it draws (SIL OFL 1.1,
     # whose notice and licence go with every copy).
     if [ -n "${_nibkit:-}" ]; then
