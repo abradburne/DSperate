@@ -65,7 +65,10 @@ struct Options {
 // The options, parsed from DS_DEBUG on the first call.
 const Options& options();
 
-// With `marks`: "dsperate: <seconds since boot> s <stage>" on stderr.
+// With `marks`: "dsperate: <seconds since boot> s <stage>" on stderr. The
+// stage is kept (with or without `marks`) for the crash line.
 void mark(const char* stage);
+// The last stage marked, for a signal handler: a static buffer, never freed.
+const char* last_mark();
 
 } // namespace ds::sdl::debug

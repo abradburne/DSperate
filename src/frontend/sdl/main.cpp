@@ -891,6 +891,52 @@ void take_quit_signals() {
 }
 #endif
 
+// A crash says what it was doing: one line on stderr from the handler, e.g.
+//   dsperate: crashed (SIGBUS) after "displays open", loading /mnt/ds/Roms/NDS/X.nds
+// (the last mark, and the ROM once run() knows it), then the signal's default
+// action again, so the exit status is still the signal and DSlot's notice
+// shows both. Async-signal-safe only: write(2), no stdio, no allocation. The
+// handler runs on its own stack, so a blown one still reports. The JIT's
+// fastmem handler goes in later and chains to this one for faults that are
+// not its own.
+#if !defined(_WIN32)
+char g_crash_rom[4096];   // run() fills it in, once; empty = no ROM yet
+void write_str(const char* s) {
+  for (size_t n = std::strlen(s); n;) {
+    const ssize_t w = write(2, s, n);
+    if (w <= 0) return;
+    s += w; n -= static_cast<size_t>(w);
+  }
+}
+void on_crash(int sig) {
+  const char* name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGFPE ? "SIGFPE" : sig == SIGABRT ? "SIGABRT" : "signal";
+  write_str("dsperate: crashed (");
+  write_str(name);
+  write_str(") after \"");
+  write_str(ds::sdl::debug::last_mark());
+  write_str("\"");
+  if (g_crash_rom[0]) { write_str(", loading "); write_str(g_crash_rom); }
+  write_str("\n");
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+void take_crash_signals() {
+  // The alternate stack is this thread's; a worker that overflows its own
+  // reports from whatever stack it has left.
+  static char alt[1 << 16];
+  stack_t ss{};
+  ss.ss_sp = alt;
+  ss.ss_size = sizeof alt;
+  sigaltstack(&ss, nullptr);
+  struct sigaction sa {};
+  sa.sa_handler = on_crash;
+  sa.sa_flags = SA_ONSTACK | SA_NODEFER;
+  sigemptyset(&sa.sa_mask);
+  for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(sig, &sa, nullptr);
+}
+#else
+void take_crash_signals() {}
+#endif
 
 // [video] settings, re-read/re-applied from the pause menu, not just at boot.
 // parse_video() is pure (no SDL); open_displays() does the set_* calls that
@@ -1214,6 +1260,7 @@ private:
 static int run(int argc, char** argv) {
   mark("started");
   take_quit_signals();
+  take_crash_signals();
   const char* rom = nullptr;
   const char* config_arg = nullptr;
   long frame_limit = 0;
@@ -1381,6 +1428,23 @@ static int run(int argc, char** argv) {
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "emu.frame_end", "emu.input_at", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
+  // What this run was given, first: a journal with nothing else in it still
+  // names the file. The size and the zip check come from the file itself.
+  if (rom) {
+#if !defined(_WIN32)
+    std::strncpy(g_crash_rom, rom, sizeof g_crash_rom - 1);
+#endif
+    struct stat st{};
+    char given[sizeof g_crash_rom + 64];
+    if (stat(rom, &st) != 0) std::snprintf(given, sizeof given, "given %s (cannot stat: %s)", rom, std::strerror(errno));
+    else {
+      u8 magic[4] = {};
+      bool zip = false;
+      if (FILE* f = std::fopen(rom, "rb")) { zip = std::fread(magic, 1, 4, f) == 4 && ds::cart::is_zip(magic, 4); std::fclose(f); }
+      std::snprintf(given, sizeof given, "given %s (%lld bytes, %s)", rom, static_cast<long long>(st.st_size), zip ? "zip" : "not a zip");
+    }
+    mark(given);
+  }
   mark("settings read");
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   const std::string dsi_fw = cfg.str("paths.dsi_firmware");
@@ -1970,11 +2034,16 @@ sdl_ready:
     const std::string title = rom_stem(base_name(path));
     display.set_page(true);
     const Uint32 start = SDL_GetTicks();
+    // The press that launched the game may still be down (DSlot's A, held
+    // through the start): nothing counts until every button has been let go,
+    // and never in the first half second.
+    bool let_go = false;
     while (!g_signalled && !input.quit() && SDL_GetTicks() - start < 60000) {
       SDL_Event e;
       while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
-      // Presses in the first half second are the one that launched the game.
-      if (input.take_menu_presses() && SDL_GetTicks() - start > 500) break;
+      const u32 pressed = input.take_menu_presses();
+      if (!let_go) let_go = input.menu_held() == 0 && SDL_GetTicks() - start > 500;
+      else if (pressed) break;
       draw_notice_frame(title, why, "ANY BUTTON RETURNS");
       SDL_Delay(50);
     }

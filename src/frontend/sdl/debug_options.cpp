@@ -103,7 +103,15 @@ const Options& options() {
   return o;
 }
 
+// The crash line reads this from a signal handler, so it is a fixed buffer
+// and written with nothing that could lock or allocate.
+static char g_last_mark[96] = "nothing";
+
+const char* last_mark() { return g_last_mark; }
+
 void mark(const char* stage) {
+  std::strncpy(g_last_mark, stage, sizeof g_last_mark - 1);
+  g_last_mark[sizeof g_last_mark - 1] = 0;
   if (!options().marks) return;
   timespec t{};
   clock_gettime(CLOCK_BOOTTIME, &t);
