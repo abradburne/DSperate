@@ -116,7 +116,8 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
 - **Action Replay cheats** from a `usrcheat.dat` database, matched by game
   code and header checksum, toggled per game from the pause menu.
 - **RetroAchievements** (Casual mode only, no Hardcore) via rcheevos: sign in
-  with a username or a token the CFW already holds, unlock toasts, an
+  with a username or a token the CFW already holds (or the launcher's sign-in,
+  `RA_TOKEN_FILE` in the environment: DSlot on nibOS), unlock toasts, an
   achievements list and account page in the pause menu, encore mode, and an
   optional screenshot on unlock. DS games and DSiWare, however they are
   started. Uses the system's libcurl at runtime.

@@ -259,6 +259,10 @@ const char* kUsage =
     "                  CFW's PPSSPP helper writes: the token alone, with the account name coming\n"
     "                  from cheevos.username or --cheevos-user). Implies --cheevos\n"
     "  --cheevos-user U  the account that token signs in as, instead of cheevos.username\n"
+    "                  A launcher that signed the player in (DSlot) passes the same through the\n"
+    "                  environment: RA_TOKEN_FILE (the file: username, then token, one a line),\n"
+    "                  RA_USERNAME, and RA_HARDCORE=1 for hardcore, which DSperate does not play\n"
+    "                  yet (it says so and plays Casual). Read when cheevos.enabled is not set\n"
 #endif
     "  --autoload      start from the auto slot (emu.autosave's state) when there is one\n"
     "  --no-autoload   ignore it for this run, whatever emu.autoload says\n"
@@ -3072,7 +3076,11 @@ sdl_ready:
   // RetroAchievements, Casual mode. Off unless asked for; every failure is
   // reported once and then ignored.
   ds::cheevos::Client cheevos;
-  const bool cheevos_on = cfg.flag("cheevos.enabled", false);
+  // Off unless the config or the command line says; a launcher that passes a sign-in in
+  // the environment (DSlot's RA_TOKEN_FILE) turns it on when neither says anything.
+  const char* ra_token_env = std::getenv("RA_TOKEN_FILE");
+  const bool cheevos_on = cfg.has("cheevos.enabled") ? cfg.flag("cheevos.enabled", false)
+                                                     : (ra_token_env && *ra_token_env);
 #endif
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
@@ -3436,18 +3444,27 @@ sdl_ready:
       ds::cheevos::Credentials creds;
       // A token file named on the command line overrides whatever is
       // stored; nothing is written back, the file isn't ours.
-      const std::string token_file = cfg.str("cheevos.token_file");
+      // The launcher's sign-in (DSlot: RA_TOKEN_FILE, RA_USERNAME) stands in for one when the
+      // config names none; its hardcore wish is noted, since only Casual is played here.
+      std::string token_file = cfg.str("cheevos.token_file");
+      const bool from_launcher = token_file.empty() && ra_token_env && *ra_token_env;
+      if (from_launcher) token_file = ra_token_env;
+      if (const char* hc = std::getenv("RA_HARDCORE"); hc && std::string(hc) == "1")
+        std::fprintf(stderr, "cheevos: hardcore was asked for (RA_HARDCORE=1); DSperate plays Casual, hardcore is not supported yet\n");
       if (!token_file.empty()) {
         if (!ds::cheevos::read_token_file(token_file, creds, err)) {
           std::fprintf(stderr, "cheevos: %s\n", err.c_str());
         } else {
+          if (creds.username.empty() && from_launcher)
+            if (const char* u = std::getenv("RA_USERNAME"); u && *u) creds.username = u;
           if (creds.username.empty()) creds.username = cfg.str("cheevos.username");
           if (creds.username.empty()) {
             std::fprintf(stderr, "cheevos: %s has a token but no username; pass --cheevos-user or set cheevos.username\n",
                          token_file.c_str());
             creds = ds::cheevos::Credentials{};
           } else {
-            std::fprintf(stderr, "cheevos: using the token from %s\n", token_file.c_str());
+            std::fprintf(stderr, "cheevos: using the token from %s%s\n", token_file.c_str(),
+                         from_launcher ? " (the launcher's sign-in)" : "");
           }
         }
       }
