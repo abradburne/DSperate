@@ -17,18 +17,18 @@
 # (pgo/aarch64-gcc<version>/, trained on the handheld by bench/core/pgo-train.sh),
 # the build uses it; otherwise it builds without. See docs/rk3568-port.md.
 pkgname=dsperate
-pkgver=0.r7c1fb67.216.817771a
+pkgver=0.r7c1fb67.218.840a394
 pkgrel=1
 pkgdesc="Nintendo DS and GBA emulator (DraStic's techniques, clean-room), built for RK3568 handhelds"
 arch=(aarch64)
 url="https://github.com/abradburne/DSperate"
 license=(GPL-3.0-or-later MIT OFL-1.1)   # MIT, OFL-1.1: nibkit's menu and its face, with _nibkit
-depends=(sdl2-compat libdrm libglvnd)   # libglvnd: GLESv2 for the GLES present and hi-res 3D
+depends=(sdl2-compat libdrm libglvnd curl)   # libglvnd: GLESv2 for the GLES present and hi-res 3D; curl: libcurl for RetroAchievements
 makedepends=(git cmake ninja vulkan-headers rust)   # rust: cargo for nibkit's menu (_nibkit)
 optdepends=('vulkan-driver: video.gpu3d (on the Mali-G52 ~5x slower than the GLES path)')
 # DSperate's own flags only: makepkg's would change the build that was measured.
 options=(!buildflags !debug)
-_commit=817771a4a09a6e73f77a62ceb45222faa59522a8
+_commit=840a394eb86fd8c2374268429ccbc0f3c7c998ea
 source=("DSperate::git+${_src:+file://}${_src:-https://github.com/abradburne/DSperate.git}#commit=$_commit")
 sha256sums=(SKIP)
 
@@ -38,7 +38,8 @@ pkgver() {
 }
 
 build() {
-    # Wi-Fi and RetroAchievements off: nothing on the handheld uses them yet.
+    # Wi-Fi off: nothing on the handheld uses it yet. RetroAchievements on: DSlot's sign-in
+    # reaches DSperate through RA_TOKEN_FILE (DSlot's docs/retroachievements.md).
     local pgo=(-DDSPERATE_PGO=OFF)
     if [ -f "DSperate/pgo/aarch64-gcc$(g++ -dumpfullversion)/MANIFEST" ]; then
         pgo=(-DDSPERATE_PGO=use)
@@ -47,7 +48,7 @@ build() {
         -DCMAKE_BUILD_TYPE=Release \
         -DDSPERATE_TUNE=-mcpu=cortex-a55 \
         -DDSPERATE_NET=OFF \
-        -DDSPERATE_CHEEVOS=OFF \
+        -DDSPERATE_CHEEVOS=ON \
         -DDSPERATE_TESTS=OFF \
         -DDSPERATE_NIBKIT_MENU="${_nibkit:-}" \
         "${pgo[@]}"
