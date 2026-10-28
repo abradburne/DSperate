@@ -67,6 +67,7 @@
 #include <cerrno>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <algorithm>
@@ -3038,10 +3039,16 @@ sdl_ready:
     VLOG("%s\n", p ? "paused" : "resumed");
   };
   // A framed, four-second notice drawn over the game. One at a time.
-  struct Toast { const char* header = nullptr; std::string title, detail; u32 points = 0; int frames = 0; };
+  struct Toast { const char* header = nullptr; std::string title, detail, badge; u32 points = 0; int frames = 0; };
   std::deque<Toast> toast_queue;
   Toast toast_now;
   int toast_left = 0;
+  // Badges by name, as the cheevos worker delivers them (docs/retroachievements.md); an
+  // unlock toast waits for its badge for up to TOAST_BADGE_WAIT frames.
+  std::map<std::string, ds::sdl::ToastImage> toast_badges;
+  std::map<std::string, std::vector<u32>> toast_badge_px;
+  int toast_wait = 0;
+  constexpr int TOAST_BADGE_WAIT = 90;
   ds::sdl::Rect toast_last{};          // what the canvas has to take back out
   constexpr int TOAST_FRAMES = 240;    // four seconds: long enough to read two lines
   constexpr int TOAST_INFO_FRAMES = 150;
@@ -3061,15 +3068,26 @@ sdl_ready:
   auto toast_step = [&] {
     if (toast_left > 0) { --toast_left; return; }
     if (toast_queue.empty()) return;
+    const Toast& next = toast_queue.front();
+    if (!next.badge.empty() && !toast_badges.count(next.badge) && toast_wait < TOAST_BADGE_WAIT) {
+      ++toast_wait;   // the badge is on its way: a moment more, then without it
+      return;
+    }
+    toast_wait = 0;
     toast_now = std::move(toast_queue.front());
     toast_queue.pop_front();
     toast_left = toast_now.frames;
   };
   const auto toast_on = [&] { return toast_left > 0; };
+  const auto toast_badge = [&]() -> const ds::sdl::ToastImage* {
+    if (toast_now.badge.empty()) return nullptr;
+    const auto it = toast_badges.find(toast_now.badge);
+    return it == toast_badges.end() ? nullptr : &it->second;
+  };
   auto draw_toast_on = [&](const ds::sdl::Canvas& c) {
     ds::sdl::draw_toast(c, toast_now.header, toast_now.title.c_str(),
                         toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
-                        toast_now.points);
+                        toast_now.points, toast_badge());
   };
 
 #if DSPERATE_CHEEVOS
@@ -3267,6 +3285,12 @@ sdl_ready:
   };
 
   auto cheevos_show = [&] {
+    // Badges decoded by the worker: moved into the map, nothing else done here.
+    for (ds::cheevos::Badge& b : cheevos.take_badges()) {
+      std::vector<u32>& px = toast_badge_px[b.name];
+      px = std::move(b.px);
+      toast_badges[b.name] = ds::sdl::ToastImage{b.w, b.h, px.data()};
+    }
     for (const ds::cheevos::Message& m : cheevos.take_messages()) {
       std::fprintf(stderr, "cheevos: %s%s%s\n", m.text.c_str(),
                    m.detail.empty() ? "" : " -- ", m.detail.c_str());
@@ -3282,6 +3306,10 @@ sdl_ready:
       t.detail = m.detail;
       t.points = m.points;
       t.frames = m.kind == ds::cheevos::Message::Kind::Unlock ? TOAST_FRAMES : TOAST_INFO_FRAMES;
+      if (m.kind == ds::cheevos::Message::Kind::Unlock && !m.badge.empty()) {
+        t.badge = m.badge;
+        cheevos.fetch_badge(m.badge);   // on the worker thread, from the cache or the media host
+      }
       toast_queue.push_back(std::move(t));
     }
   };
@@ -4230,7 +4258,7 @@ sdl_ready:
             draw_toast_on(c);
             toast_last = ds::sdl::toast_rect(c, toast_now.header, toast_now.title.c_str(),
                                              toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
-                                             toast_now.points);
+                                             toast_now.points, toast_badge());
           }
           if (toast_last.w) {
             note(toast_last);

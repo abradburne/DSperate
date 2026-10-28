@@ -102,10 +102,14 @@ void draw_notice(const Canvas& d, const char* title, const char* line2, const ch
 // truncates beyond. `header` is the accent line above the title
 // ("ACHIEVEMENT UNLOCKED"), may be null. `detail` may be null. `points`
 // drawn only when non-zero (RetroAchievements has 0-point achievements).
-void draw_toast(const Canvas& d, const char* header, const char* title, const char* detail, u32 points);
+// A picture for the toast's left edge: an achievement's badge, 0xAARRGGBB rows.
+struct ToastImage { int w = 0, h = 0; const u32* px = nullptr; };
+void draw_toast(const Canvas& d, const char* header, const char* title, const char* detail, u32 points,
+                const ToastImage* badge = nullptr);
 // Where draw_toast will put it, so the caller can tell Display which part of
 // the canvas changed rather than repainting all of it.
-Rect toast_rect(const Canvas& d, const char* header, const char* title, const char* detail, u32 points);
+Rect toast_rect(const Canvas& d, const char* header, const char* title, const char* detail, u32 points,
+                const ToastImage* badge = nullptr);
 
 // The pause menu: a blitted, modal list drawn over the held last frame while
 // emulation is stopped. Not an overlay; drawn once per idle tick into a copy

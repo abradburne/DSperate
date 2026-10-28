@@ -2,6 +2,8 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "cheevos/cheevos_client.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "cheevos/cheevos_png.h"
 #include "core/nds.h"
 #include "rc_client.h"
 
@@ -26,6 +29,42 @@ bool verbose() {
     return e && std::atoi(e) != 0;
   }();
   return on;
+}
+
+// The badge cache, shared with DSlot: $XDG_CACHE_HOME or ~/.cache, then
+// retroachievements/badges. Empty when there is no home to put it in.
+std::string badge_cache_dir() {
+  std::string base;
+  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x) base = x;
+  else if (const char* h = std::getenv("HOME"); h && *h) base = std::string(h) + "/.cache";
+  else return {};
+  ::mkdir(base.c_str(), 0755);
+  base += "/retroachievements";
+  ::mkdir(base.c_str(), 0755);
+  base += "/badges";
+  ::mkdir(base.c_str(), 0755);
+  return base;
+}
+
+bool read_file(const std::string& path, std::vector<u8>& out) {
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  out.clear();
+  u8 buf[4096];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.insert(out.end(), buf, buf + n);
+  std::fclose(f);
+  return !out.empty();
+}
+
+// Written beside its final name, then renamed: a reader never sees half a file.
+void write_file_atomic(const std::string& path, const std::string& body) {
+  const std::string tmp = path + ".part";
+  FILE* f = std::fopen(tmp.c_str(), "wb");
+  if (!f) return;
+  const bool ok = std::fwrite(body.data(), 1, body.size(), f) == body.size();
+  std::fclose(f);
+  if (ok) ::rename(tmp.c_str(), path.c_str()); else ::unlink(tmp.c_str());
 }
 
 #define CLOG(...) do { if (verbose()) std::fprintf(stderr, "cheevos: " __VA_ARGS__); } while (0)
@@ -236,9 +275,9 @@ bool Client::encore() const {
   return rc_client_get_encore_mode_enabled(static_cast<rc_client_t*>(client_)) != 0;
 }
 
-void Client::post(Message::Kind kind, std::string text, std::string detail, u32 points) {
+void Client::post(Message::Kind kind, std::string text, std::string detail, u32 points, std::string badge) {
   std::lock_guard<std::mutex> lk(mu_);
-  messages_.push_back(Message{kind, std::move(text), std::move(detail), points});
+  messages_.push_back(Message{kind, std::move(text), std::move(detail), points, std::move(badge)});
 }
 
 std::vector<Message> Client::take_messages() {
@@ -334,6 +373,10 @@ void Client::worker_loop() {
       jobs_.pop_front();
     }
 
+    if (!job.badge.empty()) {
+      fetch_badge_now(job.badge);
+      continue;
+    }
     CLOG("-> %s%s\n", job.req.url.c_str(), job.req.body.empty() ? "" : " (POST)");
     Response res = http_->perform(job.req, user_agent());
     CLOG("<- status %d, %zu bytes%s%s\n", res.status, res.body.size(),
@@ -344,6 +387,61 @@ void Client::worker_loop() {
       done_.push_back(Completion{std::move(res), job.callback, job.callback_data});
     }
   }
+}
+
+// On the worker thread: the cache, else the media host (and into the cache), then decoded.
+void Client::fetch_badge_now(const std::string& name) {
+  const std::string dir = badge_cache_dir();
+  const std::string path = dir.empty() ? std::string() : dir + "/" + name + ".png";
+  std::vector<u8> png;
+  if (path.empty() || !read_file(path, png)) {
+    Request req;
+    req.url = "https://media.retroachievements.org/Badge/" + name + ".png";
+    CLOG("-> %s\n", req.url.c_str());
+    Response res = http_->perform(req, user_agent());
+    CLOG("<- status %d, %zu bytes%s%s\n", res.status, res.body.size(),
+         res.error.empty() ? "" : ", ", res.error.c_str());
+    if (res.status != 200 || res.body.empty()) {
+      // Not had: asked again at the next unlock that wants it (the network may be back).
+      std::lock_guard<std::mutex> lk(mu_);
+      badges_asked_.erase(std::remove(badges_asked_.begin(), badges_asked_.end(), name), badges_asked_.end());
+      return;
+    }
+    if (!path.empty()) write_file_atomic(path, res.body);
+    png.assign(res.body.begin(), res.body.end());
+  }
+  Badge b;
+  b.name = name;
+  std::string err;
+  if (!decode_png(png.data(), png.size(), b.w, b.h, b.px, err)) {
+    CLOG("badge %s: %s\n", name.c_str(), err.c_str());
+    return;
+  }
+  std::lock_guard<std::mutex> lk(mu_);
+  badges_.push_back(std::move(b));
+}
+
+void Client::fetch_badge(const std::string& name) {
+  if (name.empty() || !worker_.joinable()) return;
+  // The name is a file name in the cache: the service's are digits, nothing else gets in.
+  for (const char c : name)
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) return;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const std::string& n : badges_asked_) if (n == name) return;
+    badges_asked_.push_back(name);
+    Job job;
+    job.badge = name;
+    jobs_.push_back(std::move(job));
+  }
+  cv_.notify_one();
+}
+
+std::vector<Badge> Client::take_badges() {
+  std::lock_guard<std::mutex> lk(mu_);
+  std::vector<Badge> out;
+  out.swap(badges_);
+  return out;
 }
 
 void Client::enqueue(Request req, void* callback, void* callback_data) {
@@ -637,7 +735,7 @@ void Client::handle_event(const void* event_ptr) {
         self->post(Message::Kind::Unlock,
                    e->achievement->title ? e->achievement->title : "Achievement unlocked",
                    e->achievement->description ? e->achievement->description : "",
-                   e->achievement->points);
+                   e->achievement->points, e->achievement->badge_name);
       }
       break;
     case RC_CLIENT_EVENT_GAME_COMPLETED:

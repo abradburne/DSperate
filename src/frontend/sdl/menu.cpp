@@ -563,21 +563,25 @@ void draw_notice(const Canvas& d, const char* title, const char* line2, const ch
 namespace {
 // One place decides the geometry, so draw_toast and toast_rect cannot
 // disagree and leave a strip of an old toast on the canvas.
-struct ToastBox { Metrics m; int x0, y0, w, h, lines; };
+struct ToastBox { Metrics m; int x0, y0, w, h, lines, badge; };   // badge: the square's side, 0 = none
 
-ToastBox toast_box(const Canvas& d, const char* header, const char* title, const char* detail, u32 points) {
+ToastBox toast_box(const Canvas& d, const char* header, const char* title, const char* detail, u32 points,
+                   const ToastImage* badge) {
   ToastBox b{};
   b.m = metrics(d);
   const Metrics& m = b.m;
   std::string head = title ? title : "";
   if (points) head += "  " + std::to_string(points) + "P";
   b.lines = 1 + (header && *header ? 1 : 0) + (detail && *detail ? 1 : 0);
+  // The badge is a square as tall as the text block, at the left; the text moves right of it.
+  b.badge = badge && badge->px && badge->w > 0 && badge->h > 0 ? b.lines * m.list_row_h : 0;
+  const int badge_span = b.badge ? b.badge + 2 * m.list_s : 0;
 
   // Wide enough for whatever it has to say, up to two thirds of the screen
   // (past that it starts hiding the game); truncated beyond that.
   const int want = std::max({text_width(m.list_s, head.c_str()),
                              header ? text_width(m.list_s, header) : 0,
-                             detail ? text_width(m.list_s, detail) : 0});
+                             detail ? text_width(m.list_s, detail) : 0}) + badge_span;
   const int cap = std::min(d.w - 2 * m.pad, d.w * 2 / 3);
   b.w = std::clamp(want + 6 * m.list_s, std::min(40 * m.list_s, cap), cap);
   b.h = 2 * m.list_s + b.lines * m.list_row_h + 2 * m.list_s;
@@ -592,21 +596,51 @@ ToastBox toast_box(const Canvas& d, const char* header, const char* title, const
 }
 } // namespace
 
-Rect toast_rect(const Canvas& d, const char* header, const char* title, const char* detail, u32 points) {
-  const ToastBox b = toast_box(d, header, title, detail, points);
+Rect toast_rect(const Canvas& d, const char* header, const char* title, const char* detail, u32 points,
+                const ToastImage* badge) {
+  const ToastBox b = toast_box(d, header, title, detail, points, badge);
   return Rect{b.x0, b.y0, b.w, b.h};
 }
 
-void draw_toast(const Canvas& d, const char* header, const char* title, const char* detail, u32 points) {
-  const ToastBox b = toast_box(d, header, title, detail, points);
+namespace {
+// `img` scaled (nearest neighbour) into the `side` square at (x, y), its alpha
+// composited over the panel colour.
+void blit_square(const Canvas& d, int x, int y, int side, const ToastImage& img) {
+  for (int yy = 0; yy < side; ++yy) {
+    const int dy = y + yy;
+    if (dy < 0 || dy >= d.h) continue;
+    u32* row = d.px + static_cast<size_t>(dy) * d.pitch;
+    const u32* src = img.px + static_cast<size_t>(yy * img.h / side) * img.w;
+    for (int xx = 0; xx < side; ++xx) {
+      const int dx = x + xx;
+      if (dx < 0 || dx >= d.w) continue;
+      const u32 p = src[xx * img.w / side];
+      const u32 a = p >> 24;
+      if (a == 0) continue;
+      if (a == 255) { row[dx] = p | 0xFF000000u; continue; }
+      const u32 q = kPanel;
+      const u32 r = ((p >> 16 & 0xFF) * a + (q >> 16 & 0xFF) * (255 - a)) / 255;
+      const u32 g = ((p >> 8 & 0xFF) * a + (q >> 8 & 0xFF) * (255 - a)) / 255;
+      const u32 bl = ((p & 0xFF) * a + (q & 0xFF) * (255 - a)) / 255;
+      row[dx] = 0xFF000000u | (r << 16) | (g << 8) | bl;
+    }
+  }
+}
+} // namespace
+
+void draw_toast(const Canvas& d, const char* header, const char* title, const char* detail, u32 points,
+                const ToastImage* badge) {
+  const ToastBox b = toast_box(d, header, title, detail, points, badge);
   const Metrics& m = b.m;
   panel(d, b.x0, b.y0, b.w, b.h);
   std::string head = title ? title : "";
   // Points only when there are any: 0-point achievements exist and "0P" reads like a bug.
   if (points) head += "  " + std::to_string(points) + "P";
-  const int avail = b.w - 4 * m.list_s;
-  const int x = b.x0 + 2 * m.list_s;
+  const int badge_span = b.badge ? b.badge + 2 * m.list_s : 0;
+  const int avail = b.w - 4 * m.list_s - badge_span;
+  const int x = b.x0 + 2 * m.list_s + badge_span;
   int y = b.y0 + 3 * m.list_s;
+  if (b.badge) blit_square(d, b.x0 + 2 * m.list_s, y, b.badge, *badge);
   if (header && *header) {
     draw_text(d, x, y, m.list_s, kEdgeText, fit(header, m.list_s, avail).c_str());
     y += m.list_row_h;

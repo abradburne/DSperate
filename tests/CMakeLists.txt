@@ -154,6 +154,11 @@ if(DSPERATE_CHEEVOS)
   add_executable(test_cheevos_client cheevos_client_test.cpp)
   target_link_libraries(test_cheevos_client PRIVATE dsperate_cheevos)
   add_test(NAME cheevos_client COMMAND test_cheevos_client)
+
+  # The badge PNG decoder (cheevos_png.cpp).
+  add_executable(test_cheevos_png cheevos_png_test.cpp)
+  target_link_libraries(test_cheevos_png PRIVATE dsperate_cheevos)
+  add_test(NAME cheevos_png COMMAND test_cheevos_png)
 endif()
 
 # The internet driver: the DNS rewrite's

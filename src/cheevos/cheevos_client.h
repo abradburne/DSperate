@@ -32,6 +32,14 @@ struct Message {
   std::string text;
   std::string detail;
   u32 points = 0;   // unlock value; 0 for non-unlocks and 0-point achievements
+  std::string badge;   // the achievement's badge name (Unlock only); fetch_badge() gets the image
+};
+
+// An achievement's badge, decoded (docs/retroachievements.md): 0xAARRGGBB, rows top to bottom.
+struct Badge {
+  std::string name;
+  int w = 0, h = 0;
+  std::vector<u32> px;
 };
 
 enum class State : u8 {
@@ -91,6 +99,12 @@ public:
 
   std::vector<Message> take_messages();
 
+  // The badge image for `name`, from the shared cache (~/.cache/retroachievements/badges)
+  // or the media host, fetched and decoded on the worker thread; it arrives through
+  // take_badges(). Nothing happens for a name already asked for this session.
+  void fetch_badge(const std::string& name);
+  std::vector<Badge> take_badges();
+
   struct Achievement {
     std::string title, description, progress;
     u32 id = 0, points = 0;
@@ -120,11 +134,13 @@ public:
 
 private:
   void worker_loop();
-  void post(Message::Kind kind, std::string text, std::string detail = {}, u32 points = 0);
+  void post(Message::Kind kind, std::string text, std::string detail = {}, u32 points = 0, std::string badge = {});
+  void fetch_badge_now(const std::string& name);
   void drain_completions();
 
   struct Job {
     Request req;
+    std::string badge;               // set: a badge fetch, not an rc_api request
     void* callback = nullptr;        // rc_client_server_callback_t
     void* callback_data = nullptr;
   };
@@ -148,6 +164,8 @@ private:
   std::deque<Job> jobs_;
   std::deque<Completion> done_;
   std::vector<Message> messages_;
+  std::vector<Badge> badges_;
+  std::vector<std::string> badges_asked_;
   bool stop_ = false;
 };
 
