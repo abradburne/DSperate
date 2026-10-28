@@ -2519,6 +2519,9 @@ sdl_ready:
       ds::sdl::Display::Target none[2] = {};
       set_scale_targets(none, false);
       nds.run_frame();
+#if DSPERATE_CHEEVOS
+      cheevos.frame(nds);   // every emulated frame, this one too (cheevos_session.h)
+#endif
       fb_current = true;
     }
     if (!save_state_file(nds, auto_state_path(nds, session.states_dir), display.current_layout())) return;
@@ -4142,6 +4145,9 @@ sdl_ready:
         nds.reset();          // clears power_off, and re-seeds the clock
         if (nds.dsi) nds.setup_direct_boot();   // the DSi boots from its NAND again
         mp_ever = false;
+#if DSPERATE_CHEEVOS
+        cheevos.after_reset();   // or rcheevos keeps counting the session the reset discarded
+#endif
       } else {
         nds.power_off = false;
       }
