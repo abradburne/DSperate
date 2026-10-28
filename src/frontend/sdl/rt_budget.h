@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "core/off_realtime.h"
+
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
@@ -75,37 +77,7 @@ private:
 #endif
 };
 
-// For as long as it lives, the calling thread is an ordinary task: for
-// one-shot work that may run longer than RLIMIT_RTTIME allows without a
-// sleep (a big zipped ROM inflates for longer than 200 ms on a Cortex-A55).
-// Threads started meanwhile inherit SCHED_OTHER too. On the way out the real-time
-// policy comes back and the thread naps once as a real-time thread, so the
-// count starts from nothing. Nests: an inner guard finds nothing to drop.
-class OffRealtime {
-public:
-  OffRealtime() {
-#if defined(__linux__)
-    if (pthread_getschedparam(pthread_self(), &policy_, &param_) != 0 || (policy_ != SCHED_RR && policy_ != SCHED_FIFO)) { policy_ = SCHED_OTHER; return; }
-    sched_param z{};
-    if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &z) != 0) policy_ = SCHED_OTHER;
-#endif
-  }
-  ~OffRealtime() {
-#if defined(__linux__)
-    if (policy_ == SCHED_OTHER) return;
-    if (pthread_setschedparam(pthread_self(), policy_, &param_) != 0) return;
-    timespec ts{0, 20000};
-    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {}
-#endif
-  }
-  OffRealtime(const OffRealtime&) = delete;
-  OffRealtime& operator=(const OffRealtime&) = delete;
-
-private:
-#if defined(__linux__)
-  int policy_ = SCHED_OTHER;
-  sched_param param_{};
-#endif
-};
+// OffRealtime is in core (core/off_realtime.h): the achievements code needs it too.
+using ds::OffRealtime;
 
 } // namespace ds::sdl

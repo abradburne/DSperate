@@ -23,6 +23,7 @@
 #include "cheevos/cheevos_memory.h"
 #include "cheevos/cheevos_outbox.h"
 #include "core/nds.h"
+#include "core/off_realtime.h"
 #include "rc_api_runtime.h"
 #include "rc_client.h"
 
@@ -363,7 +364,15 @@ void Client::Impl::settle_award(const Job& job, const Response& res) {
   if (job.replay) WLOG("sent the unlock of achievement %u earned offline (status %d)\n", job.award, res.status);
 }
 
+// Runs rcheevos' handling of each answer, on the emulation thread. A big set takes
+// rcheevos longer than RLIMIT_RTTIME allows a real-time thread (Bubble Bobble Double
+// Shot's 446 KB on a Cortex-A55), so any answers are handled as an ordinary task.
 void Client::Impl::drain_completions() {
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    if (done.empty()) return;
+  }
+  const OffRealtime off_rt;
   for (;;) {
     Completion d;
     {
