@@ -87,4 +87,17 @@ bool rom_hash(const cart::RomSource& src, const std::string& name,
   return true;
 }
 
+bool gba_rom_hash(const u8* rom, size_t size, std::string& out, std::string& err) {
+  out.clear();
+  err.clear();
+  if (!rom || size < 0xC0) { err = "too small to be a GBA ROM"; return false; }
+  char hash[33] = {};
+  if (!rc_hash_generate_from_buffer(hash, RC_CONSOLE_GAMEBOY_ADVANCE, rom, size) || hash[0] == '\0') {
+    err = "rcheevos could not hash the GBA ROM";
+    return false;
+  }
+  out.assign(hash);
+  return true;
+}
+
 } // namespace ds::cheevos

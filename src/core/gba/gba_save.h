@@ -36,6 +36,11 @@ public:
   // EEPROM, one bit per halfword access (bit 0).
   u16  eeprom_read();
   void eeprom_write(u16 v);
+  // What the bus shows at 0x0E000000 + offset (below 64 KB), the chip untouched:
+  // SRAM mirrored, Flash's current bank (its stored bytes, not its ID). Returns
+  // how many of the n bytes the chip backs: none for an EEPROM or no chip, which
+  // read as zero. For RetroAchievements (cheevos_memory.h).
+  u32  peek(u32 offset, u8* dst, u32 n) const;
   // A DMA of `count` halfwords to the EEPROM sets its size if unknown.
   void eeprom_dma(u32 count);
 

@@ -75,6 +75,16 @@ u8 Save::read8(u32 addr) {
   }
 }
 
+u32 Save::peek(u32 offset, u8* dst, u32 n) const {
+  const bool flash = type_ == Type::Flash64 || type_ == Type::Flash128;
+  if (type_ != Type::Sram && !flash) { std::memset(dst, 0, n); return 0; }
+  for (u32 i = 0; i < n; ++i) {
+    const u32 a = (offset + i) & 0xFFFF;
+    dst[i] = flash ? mem_[bank_ * 0x10000 + a] : mem_[a & 0x7FFF];
+  }
+  return n;
+}
+
 void Save::write8(u32 addr, u8 v) {
   const u32 a = addr & 0xFFFF;
   if (type_ == Type::Sram) { mem_[addr & 0x7FFF] = v; touch(); return; }

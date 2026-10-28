@@ -12,6 +12,8 @@ approved the emulator.
 | --- | --- |
 | `cheevos_identity` | the name DSperate gives the server (below) |
 | `cheevos_client` | `rc_client` over the vendored rcheevos 12.4, behind a pimpl: sign-in, the set, per-frame evaluation, typed `Event`s out |
+| `cheevos_memory` | RetroAchievements' address space over the machine's memory, a map per core: DS, DSi, GBA (unit-tested) |
+| `cheevos_hash` | the game's identity, rcheevos' hash of the ROM: DS and GBA (unit-tested) |
 | `cheevos_session` | one run as a frontend drives it: the sign-in at start and who keeps it, the game's identity, the set asked for once signed in, a save state's progress held until the set is there, the account page's list |
 | `cheevos_credentials` | the sign-in files and which wins (unit-tested) |
 | `cheevos_outbox` | unlocks the server has not confirmed, on disk (unit-tested) |
@@ -39,8 +41,8 @@ not unique, and wants a numeric version that rises. DSperate sends
 the fork's commit count since upstream 7c1fb67, the same number as the package's pkgver
 (`0.r7c1fb67.<n>.<commit>`), so it rises with every commit and names the build; CMake takes it at
 configure time (`-DDSPERATE_CHEEVOS_VERSION=` overrides it). The `nds` segment is the core, as
-RetroAchievements advises for an emulator of more than one system (`gba` when GBA plays with
-achievements). The last clause is `rc_client_get_user_agent_clause`'s. The DSi TMD download sends
+RetroAchievements advises for an emulator of more than one system (`gba` for a GBA game in GBA
+mode). The last clause is `rc_client_get_user_agent_clause`'s. The DSi TMD download sends
 the product token alone.
 
 **Earlier identity, to disclose when applying:** until 0.r7c1fb67.225 this fork sent upstream
@@ -131,9 +133,39 @@ its verbose log too, and every request and response.
 
 ## GBA
 
-GBA games get no achievements yet. It would take `Memory::attach` for rcheevos' GBA map (32 KB
-IWRAM, 256 KB EWRAM, the cart's save RAM), the ROM's hash for `RC_CONSOLE_GAMEBOY_ADVANCE`,
-`Session::identify` and `frame` in the GBA mode's loop, and `Core::Gba` at load.
+GBA games earn achievements in DSperate's GBA mode through the same session, client and
+frontend paths as DS games: the Casual placard, unlock toasts with badges, the progress and
+challenge indicators, the outbox, progress in save states and the resume point. What differs is
+underneath:
+
+- **Identity.** rcheevos' rule for `RC_CONSOLE_GAMEBOY_ADVANCE` is a whole-file hash, the MD5 of
+  every byte of the ROM file. `Session::identify` hashes the image `NDS::load_gba` read
+  (`gba_rom_hash`, through `rc_hash_generate_from_buffer`): a zipped ROM's entry unzipped, the
+  `rom_size` bytes of the file and none of the open-bus pattern the cartridge space is padded
+  with. Nothing patches a GBA ROM, so these are the file's bytes. MD5 of a 32 MB cartridge runs
+  longer than a real-time thread may, so it runs under `OffRealtime`.
+- **Memory.** `cheevos_memory` builds a `MemoryMap` per core (`ds_map`, `gba_map`) and reads
+  both through one reader; `Memory::attach(nds)` takes the GBA's in GBA mode. rcheevos' GBA map:
+
+  | RetroAchievements | GBA | Backed by |
+  | --- | --- | --- |
+  | `0x000000-0x007FFF` | internal work RAM, `0x03000000` | `Gba::iwram` |
+  | `0x008000-0x047FFF` | on-board work RAM, `0x02000000` | `Gba::ewram` |
+  | `0x048000-0x057FFF` | cartridge save memory, `0x0E000000` | `Save::peek` |
+
+  The save memory is what the bus shows at `0x0E000000`, read without touching the chip: SRAM's
+  32 KB mirrored through the 64 KB, Flash's selected bank (its stored bytes even in ID mode). An
+  EEPROM is not on that bus and a cartridge without a save chip has nothing there: both read zero
+  and report themselves unbacked, so an achievement reading them is marked unsupported rather
+  than evaluated against nothing. It is read through the chip at each frame, not a pointer taken
+  at load, since a game with no save string that writes there gets SRAM then.
+- **The name.** The User-Agent's core segment is `gba` (`Core::Gba`), from the sign-in on: the
+  frontend sets `SessionOptions::core` from the mode the run starts in, and `identify` sets it
+  again for the game in the slot.
+
+`NDS::run_frame` runs one GBA frame in GBA mode, so the frontend's one `frame(nds)` after it is
+once per GBA frame, fast-forward included; GBA mode's resets and states go through the same
+`after_reset()` and `CHVO` chunk as the DS's.
 
 ## Unlock toast
 

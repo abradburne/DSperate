@@ -25,6 +25,7 @@ struct SessionOptions {
   std::string outbox_path;         // where unconfirmed unlocks wait; empty keeps none
   std::string launcher_name = "the launcher";   // named when the launcher keeps the sign-in
   bool hardcore_asked = false;     // RA_HARDCORE=1: noted; Casual is what is played
+  Core core = Core::Nds;           // the system the run starts in (GBA mode: Gba), for the sign-in's User-Agent
 };
 
 class Session {
@@ -39,12 +40,13 @@ public:
 
   // The game now in the slot: `name` is its path (rcheevos hashes some formats by
   // name), `fallback_hash` the identity of a DSiWare title taken when it was read
-  // (there is no cart to hash). Without a cart or a fallback, nothing is asked for.
+  // (there is no cart to hash). In GBA mode, the GBA cartridge, as a GBA game.
+  // Without a cart or a fallback, nothing is asked for.
   void identify(NDS& nds, const std::string& name, const std::string& fallback_hash = {});
   // Another game in the slot: the old set goes, the new one is asked for once signed in.
   void change_game(NDS& nds, const std::string& name, const std::string& fallback_hash = {});
 
-  // Once per emulated frame, right after NDS::run_frame(): exactly once, since rcheevos
+  // Once per emulated frame (a GBA frame in GBA mode), right after NDS::run_frame(): exactly once, since rcheevos
   // keeps a delta per memory reference and a missed frame or a second call breaks
   // single-frame edge triggers.
   void frame(NDS& nds);
@@ -97,6 +99,7 @@ private:
   SessionOptions opts_;
   CredentialSource source_ = CredentialSource::None;
   std::string hash_;           // the running game's identity; empty if it could not be hashed
+  Core core_ = Core::Nds;      // the system it is a game for
   bool set_asked_ = false;
   bool menu_sign_in_ = false;  // a password sign-in from the menu is under way
   Pending pending_;

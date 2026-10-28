@@ -182,6 +182,9 @@ const char* Client::transport_name() const { return impl_->http ? impl_->http->n
 const std::string& Client::unavailable_reason() const { return impl_->unavailable; }
 const std::string& Client::game_hash() const { return impl_->hash; }
 
+void Client::set_core(Core core) { impl_->core = core; }
+Core Client::core() const { return impl_->core; }
+
 void Client::set_encore(bool on) {
   impl_->encore = on;
   if (impl_->rc) rc_client_set_encore_mode_enabled(impl_->rc, on ? 1 : 0);

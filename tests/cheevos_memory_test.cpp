@@ -24,6 +24,7 @@
 #include "check.h"
 #include "cheevos/cheevos_identity.h"
 #include "cheevos/cheevos_memory.h"
+#include "core/gba/gba.h"
 #include "core/mem/bus.h"
 #include "core/nds.h"
 
@@ -251,6 +252,113 @@ void a_condition_over_the_hole_never_fires() {
 }
 
 // ---------------------------------------------------------------------------
+// GBA mode: rcheevos' GBA map. 32 KB of internal work RAM (0x03000000) first,
+// then 256 KB of on-board work RAM (0x02000000), then 64 KB of the cartridge's
+// save memory as the bus shows it at 0x0E000000.
+
+constexpr u32 RA_IWRAM = 0x000000, RA_EWRAM = 0x008000, RA_SAVE = 0x048000, RA_GBA_END = 0x057FFF;
+
+struct GbaFixture {
+  NDS nds;
+  cheevos::Memory mem;
+  GbaFixture() {
+    nds.gba = std::make_unique<gba::Gba>();
+    std::string err;
+    CHECK(mem.attach(nds, err));   // GBA mode: the machine's map is the GBA's
+    CHECK(err.empty());
+  }
+  gba::Gba& g() { return *nds.gba; }
+};
+
+void the_gba_map_is_the_one_we_expect() {
+  GbaFixture f;
+  CHECK(f.mem.max_address() == RA_GBA_END);
+  f.g().iwram.get()[0] = 0x11;
+  f.g().iwram.get()[gba::IWRAM_SIZE - 1] = 0x22;
+  f.g().ewram.get()[0] = 0x33;
+  f.g().ewram.get()[gba::EWRAM_SIZE - 1] = 0x44;
+  u8 b = 0;
+  CHECK(f.mem.read(RA_IWRAM, &b, 1) == 1 && b == 0x11);
+  CHECK(f.mem.read(RA_IWRAM + gba::IWRAM_SIZE - 1, &b, 1) == 1 && b == 0x22);
+  CHECK(f.mem.read(RA_EWRAM, &b, 1) == 1 && b == 0x33);
+  CHECK(f.mem.read(RA_EWRAM + gba::EWRAM_SIZE - 1, &b, 1) == 1 && b == 0x44);
+  CHECK(RA_EWRAM + gba::EWRAM_SIZE == RA_SAVE);
+
+  // A read across the two RAMs is whole, in address order.
+  f.g().iwram.get()[gba::IWRAM_SIZE - 2] = 0x78;
+  f.g().iwram.get()[gba::IWRAM_SIZE - 1] = 0x56;
+  f.g().ewram.get()[0] = 0x34;
+  f.g().ewram.get()[1] = 0x12;
+  CHECK(cheevos::Memory::peek(RA_EWRAM - 2, 4, &f.mem) == 0x12345678u);
+  CHECK(f.mem.supported(RA_IWRAM, gba::IWRAM_SIZE + gba::EWRAM_SIZE));
+
+  // Past the map: zero, and unbacked.
+  u8 past[4];
+  std::memset(past, 0xAA, sizeof past);
+  CHECK(f.mem.read(RA_GBA_END + 1, past, sizeof past) == 0);
+  for (u8 v : past) CHECK(v == 0);
+  CHECK(!f.mem.supported(RA_GBA_END + 1));
+  CHECK(cheevos::Memory::peek(0x02000000, 4, &f.mem) == 0);   // a bus address is not an RA one
+}
+
+// The save memory follows the chip: none (or an EEPROM, which is not on that bus)
+// reads zero and unbacked; SRAM's 32 KB mirror through the 64 KB; Flash shows the
+// bank the game has selected. Read without touching the chip's command state.
+void the_gba_save_memory_follows_the_chip() {
+  GbaFixture f;
+  gba::Save& s = f.g().save;
+  u8 b[2] = {0xAA, 0xAA};
+  CHECK(s.type() == gba::Save::Type::None);
+  CHECK(f.mem.read(RA_SAVE, b, 2) == 0 && b[0] == 0 && b[1] == 0);
+  CHECK(!f.mem.supported(RA_SAVE));
+  // A read from on-board RAM into it is partial: that is rcheevos' "unsupported".
+  CHECK(f.mem.read(RA_SAVE - 1, b, 2) == 1);
+
+  s.set_type(gba::Save::Type::EepromUnsized);
+  CHECK(!f.mem.supported(RA_SAVE));
+
+  s.set_type(gba::Save::Type::Sram);
+  s.write8(0x0E000010, 0x5A);
+  s.write8(0x0E007FFF, 0x6B);
+  CHECK(f.mem.supported(RA_SAVE, 0x10000));
+  CHECK(f.mem.read(RA_SAVE + 0x10, b, 1) == 1 && b[0] == 0x5A);
+  CHECK(f.mem.read(RA_SAVE + 0x8010, b, 1) == 1 && b[0] == 0x5A);   // the mirror
+  CHECK(f.mem.read(RA_SAVE + 0x7FFF, b, 1) == 1 && b[0] == 0x6B);
+  CHECK(f.mem.read(RA_SAVE + 0x11, b, 1) == 1 && b[0] == 0xFF);     // an unwritten SRAM byte
+
+  // Flash 128 KB: write a byte in each bank, then switch banks.
+  s.set_type(gba::Save::Type::Flash128);
+  auto cmd = [&s](u8 c) { s.write8(0x0E005555, 0xAA); s.write8(0x0E002AAA, 0x55); s.write8(0x0E005555, c); };
+  auto bank = [&](u8 n) { cmd(0xB0); s.write8(0x0E000000, n); };
+  auto program = [&](u32 a, u8 v) { cmd(0xA0); s.write8(0x0E000000 + a, v); };
+  bank(0); program(0x20, 0x01);
+  bank(1); program(0x20, 0x02);
+  CHECK(f.mem.read(RA_SAVE + 0x20, b, 1) == 1 && b[0] == 0x02);
+  bank(0);
+  CHECK(f.mem.read(RA_SAVE + 0x20, b, 1) == 1 && b[0] == 0x01);
+  // In ID mode the chip answers the bus with its ID; RetroAchievements still sees
+  // the stored bytes, and looking leaves the chip in ID mode.
+  cmd(0x90);
+  CHECK(f.mem.read(RA_SAVE, b, 1) == 1 && b[0] == 0xFF);
+  CHECK(s.read8(0x0E000000) == 0xC2);
+  cmd(0xF0);
+  CHECK(s.read8(0x0E000020) == 0x01);
+}
+
+// A condition over on-board work RAM fires, through the GBA map.
+void a_gba_trigger_fires() {
+  GbaFixture f;
+  Runtime r(f.mem);
+  r.activate(21, "0xH008010=5");   // EWRAM byte 0x10
+  f.g().ewram.get()[0x10] = 0;
+  r.frame();
+  CHECK(g_triggered == 0);
+  f.g().ewram.get()[0x10] = 5;
+  r.frame();
+  CHECK(g_triggered == 1 && g_triggered_id == 21);
+}
+
+// ---------------------------------------------------------------------------
 
 // The string the server decides whether to talk to us at all by.
 void the_user_agent_is_well_formed() {
@@ -321,6 +429,9 @@ int main() {
   a_trigger_can_read_data_tcm();
   hit_counts_follow_the_frame_count();
   a_condition_over_the_hole_never_fires();
+  the_gba_map_is_the_one_we_expect();
+  the_gba_save_memory_follows_the_chip();
+  a_gba_trigger_fires();
   the_user_agent_is_well_formed();
   std::printf("cheevos_memory: ok\n");
   return 0;

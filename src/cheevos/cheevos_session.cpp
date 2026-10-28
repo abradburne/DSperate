@@ -6,7 +6,9 @@
 #include <cstdlib>
 
 #include "cheevos/cheevos_hash.h"
+#include "core/gba/gba.h"
 #include "core/nds.h"
+#include "core/off_realtime.h"
 
 namespace ds::cheevos {
 namespace {
@@ -23,12 +25,14 @@ bool verbose() {
 
 bool Session::start(const SessionOptions& opts) {
   opts_ = opts;
+  core_ = opts_.core;
+  client_.set_core(core_);   // the sign-in names the system too
   std::string err;
   if (!client_.start(err, opts_.outbox_path)) {
     std::fprintf(stderr, "cheevos: %s\n", client_.unavailable_reason().c_str());
     return false;
   }
-  std::fprintf(stderr, "cheevos: user agent %s\n", user_agent());
+  std::fprintf(stderr, "cheevos: user agent %s\n", user_agent(core_));
   // Before anything loads: rcheevos evaluates encore at game load and ignores it afterwards.
   client_.set_encore(opts_.encore);
   if (opts_.hardcore_asked)
@@ -52,9 +56,20 @@ void Session::identify(NDS& nds, const std::string& name, const std::string& fal
   hash_.clear();
   set_asked_ = false;
   if (!running()) return;
+  core_ = nds.gba ? Core::Gba : Core::Nds;
+  client_.set_core(core_);
+  std::string err;
+  if (nds.gba) {
+    // The image load_gba read (unzipped, never patched): the file's bytes, as rcheevos hashes them.
+    const OffRealtime off_rt;
+    if (!gba_rom_hash(nds.gba->rom.get(), nds.gba->rom_size, hash_, err))
+      std::fprintf(stderr, "cheevos: cannot identify this GBA ROM: %s\n", err.c_str());
+    else if (verbose())
+      std::fprintf(stderr, "cheevos: GBA ROM hash %s\n", hash_.c_str());
+    return;
+  }
   if (!nds.cart) { hash_ = fallback_hash; return; }
   // Safe after Cart's secure-area rewrite: read_unpatched reads past it.
-  std::string err;
   if (!rom_hash(nds.cart->source(), name, hash_, err, nds.dsi))
     std::fprintf(stderr, "cheevos: cannot identify this ROM: %s\n", err.c_str());
 }
@@ -71,7 +86,7 @@ void Session::catch_up(NDS& nds) {
   if (set_asked_ || hash_.empty()) return;
   if (client_.state() != State::SignedIn) return;
   set_asked_ = true;
-  client_.load_game(nds, hash_, Core::Nds);
+  client_.load_game(nds, hash_, core_);
 }
 
 // A state's progress goes in once a set exists for it, before rc_client_do_frame,

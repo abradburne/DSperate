@@ -7,6 +7,12 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
 
 ### RetroAchievements
 
+- **GBA games earn achievements** in GBA mode, with everything DS games have: the Casual
+  placard, unlock toasts with badges, progress and challenge indicators, the offline outbox,
+  progress in save states and the resume point. The game is identified by rcheevos' GBA rule (the
+  MD5 of the whole ROM file, a zipped one's entry unzipped) and evaluated against rcheevos' GBA
+  map: internal work RAM, on-board work RAM and the cartridge's SRAM or Flash (an EEPROM's
+  achievements are unsupported). The User-Agent's core segment says `gba` in GBA mode.
 - **A name of its own.** The User-Agent is `DSperate-nibOS/0.<n> nds/0.<n> rcheevos/12.4`:
   RetroAchievements refuses a client name that is not unique, and the fork had been sending
   upstream's (`DSperate/3.0.5 rcheevos/12.4`). `<n>` is the package's pkgver count, so the

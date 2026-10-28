@@ -3383,6 +3383,7 @@ sdl_ready:
     opts.launcher_name = "DSlot";
     const char* hc = std::getenv("RA_HARDCORE");
     opts.hardcore_asked = hc && std::string(hc) == "1";
+    opts.core = nds.gba_mode() ? ds::cheevos::Core::Gba : ds::cheevos::Core::Nds;   // the sign-in's User-Agent
     // The loader cart is not a game and gets no identity; a DSiWare title run from
     // NAND has the one taken when it was read.
     if (cheevos.start(opts) && !launcher) cheevos.identify(nds, session.rom_path, dsi_title_cheevos_hash);

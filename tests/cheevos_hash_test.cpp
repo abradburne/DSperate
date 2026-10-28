@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
-// The RetroAchievements hash. The golden values below were computed
+// The RetroAchievements hash, DS and GBA. The DS golden values below were computed
 // independently of this code (a few lines of Python over the same synthetic
 // ROM, following the rule in rcheevos' hash_rom.c: MD5 of the 0x160-byte
 // header, then the ARM9 binary, then the ARM7 binary, then 0xA00 bytes of
@@ -23,6 +23,9 @@
 #include "check.h"
 #include "cheevos/cheevos_hash.h"
 #include "core/cart/rom_source.h"
+#include "core/cart/zip.h"
+#include "core/gba/gba.h"
+#include "core/nds.h"
 
 using ds::u8;
 using ds::u32;
@@ -132,6 +135,86 @@ void a_file_too_small_is_refused() {
   CHECK(!err.empty());
 }
 
+// ---------------------------------------------------------------------------
+// GBA. rcheevos' rule (rhash: RC_CONSOLE_GAMEBOY_ADVANCE is a whole-file hash) is
+// the MD5 of the file, every byte of it. The golden value is Python's hashlib over
+// the same bytes: hashlib.md5(bytes((i*29+11)&0xFF for i in range(0x30123))).
+
+constexpr u32 GBA_LEN = 0x30123;   // not a power of two: the image GBA mode pads past it must not count
+const char* GBA_HASH = "f8f464525b9a2c5b7336390aa0484e3d";
+
+std::vector<u8> synthetic_gba() {
+  std::vector<u8> b(GBA_LEN);
+  for (u32 i = 0; i < GBA_LEN; ++i) b[i] = static_cast<u8>((i * 29 + 11) & 0xFF);
+  return b;
+}
+
+std::string write_temp(const std::vector<u8>& bytes, const char* suffix) {
+  std::string path = std::string("/tmp/dsperate_cheevos_gba_XXXXXX") + suffix;
+  const int fd = mkstemps(path.data(), static_cast<int>(std::strlen(suffix)));
+  CHECK(fd >= 0);
+  CHECK(write(fd, bytes.data(), bytes.size()) == static_cast<ssize_t>(bytes.size()));
+  close(fd);
+  return path;
+}
+
+// One stored (method 0) entry: what a zipped GBA ROM is at its plainest.
+std::vector<u8> stored_zip(const std::string& name, const std::vector<u8>& data) {
+  std::vector<u8> z;
+  auto u16le = [&z](u32 v) { z.push_back(u8(v)); z.push_back(u8(v >> 8)); };
+  auto u32le = [&z](u32 v) { for (int i = 0; i < 4; ++i) z.push_back(u8(v >> (8 * i))); };
+  const u32 crc = ds::cart::crc32_update(0, data.data(), data.size());
+  const u32 n = static_cast<u32>(data.size());
+  u32le(0x04034B50); u16le(20); u16le(0); u16le(0); u16le(0); u16le(0);
+  u32le(crc); u32le(n); u32le(n); u16le(static_cast<u32>(name.size())); u16le(0);
+  z.insert(z.end(), name.begin(), name.end());
+  z.insert(z.end(), data.begin(), data.end());
+  const u32 cd = static_cast<u32>(z.size());
+  u32le(0x02014B50); u16le(20); u16le(20); u16le(0); u16le(0); u16le(0); u16le(0);
+  u32le(crc); u32le(n); u32le(n); u16le(static_cast<u32>(name.size()));
+  u16le(0); u16le(0); u16le(0); u16le(0); u32le(0); u32le(0);
+  z.insert(z.end(), name.begin(), name.end());
+  const u32 cd_len = static_cast<u32>(z.size()) - cd;
+  u32le(0x06054B50); u16le(0); u16le(0); u16le(1); u16le(1); u32le(cd_len); u32le(cd); u16le(0);
+  return z;
+}
+
+void the_gba_hash_is_the_whole_file() {
+  const std::vector<u8> rom = synthetic_gba();
+  std::string out, err;
+  CHECK(ds::cheevos::gba_rom_hash(rom.data(), rom.size(), out, err));
+  CHECK(err.empty());
+  CHECK(out == GBA_HASH);
+  // One byte more or less is another dump.
+  CHECK(ds::cheevos::gba_rom_hash(rom.data(), rom.size() - 1, out, err) && out != GBA_HASH);
+}
+
+// What the session hashes: the image GBA mode loaded, from a file and from a zip
+// alike, `rom_size` bytes of it and none of the open-bus pattern past the end.
+void a_loaded_gba_rom_hashes_as_its_file() {
+  const std::vector<u8> rom = synthetic_gba();
+  for (const bool zipped : {false, true}) {
+    const std::string path = zipped ? write_temp(stored_zip("game.gba", rom), ".zip") : write_temp(rom, ".gba");
+    ds::NDS nds;
+    std::string err;
+    const bool loaded = nds.load_gba(path, "", &err);
+    unlink(path.c_str());
+    CHECK(loaded);
+    CHECK(nds.gba && nds.gba->rom_size == GBA_LEN);
+    std::string out;
+    CHECK(ds::cheevos::gba_rom_hash(nds.gba->rom.get(), nds.gba->rom_size, out, err));
+    CHECK(out == GBA_HASH);
+  }
+}
+
+void a_gba_file_too_small_is_refused() {
+  const std::vector<u8> tiny(0x40, 0u);
+  std::string out = "untouched", err;
+  CHECK(!ds::cheevos::gba_rom_hash(tiny.data(), tiny.size(), out, err));
+  CHECK(out.empty());
+  CHECK(!err.empty());
+}
+
 } // namespace
 
 int main() {
@@ -140,6 +223,9 @@ int main() {
   hash_ignores_the_secure_area_rewrite();
   a_mapped_file_hashes_the_same();
   a_file_too_small_is_refused();
+  the_gba_hash_is_the_whole_file();
+  a_loaded_gba_rom_hashes_as_its_file();
+  a_gba_file_too_small_is_refused();
   std::printf("cheevos_hash: ok\n");
   return 0;
 }

@@ -85,6 +85,11 @@ public:
 
   State state() const;
 
+  // The system played, named in every request's User-Agent from then on: before
+  // start() for the sign-in to carry it. load_game() sets it too.
+  void set_core(Core core);
+  Core core() const;
+
   // Applies at next load_game(); call before it. rcheevos only reads it at load.
   void set_encore(bool on);
   bool encore() const;
@@ -98,14 +103,15 @@ public:
   std::string username() const;
   std::string token() const;
 
-  // Asynchronous.
+  // Asynchronous. Evaluates `nds`' memory as RetroAchievements maps `core`'s
+  // (cheevos_memory.h): the GBA's in GBA mode.
   void load_game(NDS& nds, const std::string& hash, Core core = Core::Nds);
   void unload_game();
   std::string game_title() const;
   u32 game_id() const;
   const std::string& game_hash() const;
 
-  // Call once per emulated frame, right after NDS::run_frame().
+  // Call once per emulated frame, right after NDS::run_frame() (a GBA frame in GBA mode).
   void frame();
   // Call instead of frame() while paused, at least once a second.
   void idle();
