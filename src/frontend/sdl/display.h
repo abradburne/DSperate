@@ -55,6 +55,11 @@ public:
   // and SDL_Renderer tiers only; false elsewhere, and nothing is drawn.
   bool draw_picture(const u8* rgba, int w, int h);
   bool picture_capable() const { return !gpu_ && !disp_ && (glp_ || ren_); }
+  // A picture over the screens at panel resolution until cleared (GLES
+  // present tier only; false elsewhere): GlPresent::set_overlay. `w` and `h`
+  // say the window's size in pixels, what (x, y) are in.
+  bool overlay_size(int& w, int& h) const { return glp_ && glp_->drawable_size(w, h); }
+  void set_overlay(const u8* rgba, int w, int h, int x, int y) { if (glp_) glp_->set_overlay(rgba, w, h, x, y); }
   // The renderer tier through a GLES context of its own (GlPresent) instead
   // of an SDL_Renderer: hi-res 3D, and 1x windows drawn on the present
   // thread (gl_frame_presenter.h). Set before open().

@@ -617,7 +617,7 @@ void Client::on_sign_in_failed(const std::string& why) {
 void Client::on_game_loaded(const std::string& title, u32 id) {
   state_ = State::Playing;
   post(Message::Kind::Info, title.empty() ? "Achievements loaded" : title,
-       "achievements active");
+       "Achievements active");
   CLOG("game %u loaded: %s\n", id, title.c_str());
 }
 
@@ -749,10 +749,10 @@ void Client::handle_event(const void* event_ptr) {
                  e->server_error && e->server_error->error_message ? e->server_error->error_message : "");
       break;
     case RC_CLIENT_EVENT_DISCONNECTED:
-      self->post(Message::Kind::Problem, "RetroAchievements offline", "unlocks will be sent when the connection returns");
+      self->post(Message::Kind::Problem, "RetroAchievements offline", "Unlocks will be sent when the connection returns");
       break;
     case RC_CLIENT_EVENT_RECONNECTED:
-      self->post(Message::Kind::Info, "RetroAchievements reconnected", "pending unlocks sent");
+      self->post(Message::Kind::Info, "RetroAchievements reconnected", "Pending unlocks sent");
       break;
     case RC_CLIENT_EVENT_RESET:
       CLOG("ignoring a reset event; hardcore is not supported\n");

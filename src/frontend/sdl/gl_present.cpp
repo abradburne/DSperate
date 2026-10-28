@@ -14,6 +14,8 @@ void GlPresent::close() {}
 void GlPresent::make_current() {}
 void GlPresent::draw(const frontend::View*, int, const u32* const[2]) {}
 void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
+void GlPresent::set_overlay(const u8*, int, int, int, int) {}
+bool GlPresent::drawable_size(int&, int&) const { return false; }
 } // namespace ds::sdl
 #else
 #include "frontend/sdl/debug_options.h"
@@ -22,6 +24,7 @@ void GlPresent::draw_now(const frontend::View*, int, const u32* const[2]) {}
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,6 +59,14 @@ in vec2 v_uv;
 uniform highp sampler2D u_tex;
 out vec4 o_col;
 void main() { o_col = vec4(texture(u_tex, v_uv).rgb, 1.0); }
+)";
+// The overlay keeps its alpha, for blending over the screens.
+const char* kOverlayFS = R"(#version 310 es
+precision highp float;
+in vec2 v_uv;
+uniform highp sampler2D u_tex;
+out vec4 o_col;
+void main() { o_col = texture(u_tex, v_uv); }
 )";
 
 GLuint prog(const char* fs) {
@@ -113,6 +124,12 @@ struct GlPresent::Impl {
   bool linear = false;
   GLuint p_fb = 0, p_tex = 0, vao = 0, fbtex[2][3] = {};
   GLuint pic_tex = 0; int pic_w = 0, pic_h = 0;   // draw_picture's, made on first use
+  // set_overlay's: what the frame loop handed over (under ov_mu, since a
+  // present may run on the present thread while the loop goes on), and the
+  // texture it is uploaded to at the next present.
+  std::mutex ov_mu;
+  std::vector<u8> ov_px; int ov_w = 0, ov_h = 0, ov_x = 0, ov_y = 0; bool ov_new = false;
+  GLuint p_ov = 0, ov_tex = 0; int ov_tw = 0, ov_th = 0; bool ov_on = false;
   int fb_k[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
   u32 presents = 0;         // present-ppm
@@ -142,9 +159,10 @@ bool GlPresent::open(SDL_Window* win, bool vsync, bool linear) {
   ++g_contexts;
   SDL_GL_MakeCurrent(win, d.ctx);
   SDL_GL_SetSwapInterval(vsync ? 1 : 0);
-  d.p_fb = prog(kFbFS); d.p_tex = prog(kTexFS);
+  d.p_fb = prog(kFbFS); d.p_tex = prog(kTexFS); d.p_ov = prog(kOverlayFS);
   glUseProgram(d.p_fb); glUniform1i(glGetUniformLocation(d.p_fb, "u_fb"), 0);
   glUseProgram(d.p_tex); glUniform1i(glGetUniformLocation(d.p_tex, "u_tex"), 0);
+  if (d.p_ov) { glUseProgram(d.p_ov); glUniform1i(glGetUniformLocation(d.p_ov, "u_tex"), 0); }
   glGenVertexArrays(1, &d.vao);
   for (auto& ring : d.fbtex) for (GLuint& t : ring) {
     glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
@@ -165,6 +183,8 @@ void GlPresent::close() {
   if (d.ctx) {
     SDL_GL_MakeCurrent(d.win, d.ctx);
     glDeleteTextures(6, &d.fbtex[0][0]); if (d.pic_tex) glDeleteTextures(1, &d.pic_tex); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
+    if (d.ov_tex) glDeleteTextures(1, &d.ov_tex);
+    if (d.p_ov) glDeleteProgram(d.p_ov);
     if (--g_contexts == 0) g_first = nullptr;
     SDL_GL_DeleteContext(d.ctx);
   }
@@ -172,6 +192,25 @@ void GlPresent::close() {
 }
 
 void GlPresent::make_current() { if (d_ && d_->ctx) SDL_GL_MakeCurrent(d_->win, d_->ctx); }
+
+void GlPresent::set_overlay(const u8* rgba, int w, int h, int x, int y) {
+  if (!d_) return;
+  Impl& d = *d_;
+  const std::lock_guard<std::mutex> lk(d.ov_mu);
+  if (rgba && w > 0 && h > 0) {
+    d.ov_px.assign(rgba, rgba + static_cast<size_t>(w) * h * 4);
+    d.ov_w = w; d.ov_h = h; d.ov_x = x; d.ov_y = y;
+  } else {
+    d.ov_px.clear(); d.ov_w = d.ov_h = 0;
+  }
+  d.ov_new = true;
+}
+
+bool GlPresent::drawable_size(int& w, int& h) const {
+  if (!d_ || !d_->win) return false;
+  SDL_GL_GetDrawableSize(d_->win, &w, &h);
+  return w > 0 && h > 0;
+}
 
 void GlPresent::draw(const frontend::View* views, int nviews, const u32* const fb[2]) {
   if (!d_) return;
@@ -182,7 +221,14 @@ void GlPresent::draw(const frontend::View* views, int nviews, const u32* const f
 void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* const fb[2]) {
   if (!d_) return;
   Impl& d = *d_;
-  if (may_skip_ && nviews == 1 && views[0].shown && !(hires_tex_ && views[0].screen == hires_screen_)) {
+  // The overlay handed over since the last present, if any: a change to it
+  // is a change to the picture, so no skipping it.
+  bool ov_changed = false;
+  {
+    const std::lock_guard<std::mutex> lk(d.ov_mu);
+    ov_changed = d.ov_new;
+  }
+  if (may_skip_ && !ov_changed && nviews == 1 && views[0].shown && !(hires_tex_ && views[0].screen == hires_screen_)) {
     const u32* px = fb[views[0].screen];
     if (d.shown_screen == views[0].screen && d.shown.size() == 256 * 192 && std::memcmp(d.shown.data(), px, 256 * 192 * 4) == 0) { hires_tex_ = 0; return; }
     d.shown.assign(px, px + 256 * 192); d.shown_screen = views[0].screen;
@@ -215,11 +261,39 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
   }
+  if (ov_changed && d.p_ov) {
+    const std::lock_guard<std::mutex> lk(d.ov_mu);
+    d.ov_new = false;
+    d.ov_on = !d.ov_px.empty();
+    if (d.ov_on) {
+      if (!d.ov_tex || d.ov_tw != d.ov_w || d.ov_th != d.ov_h) {
+        if (d.ov_tex) glDeleteTextures(1, &d.ov_tex);
+        glGenTextures(1, &d.ov_tex); glBindTexture(GL_TEXTURE_2D, d.ov_tex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, d.ov_w, d.ov_h);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        d.ov_tw = d.ov_w; d.ov_th = d.ov_h;
+      }
+      glBindTexture(GL_TEXTURE_2D, d.ov_tex);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, d.ov_w, d.ov_h, GL_RGBA, GL_UNSIGNED_BYTE, d.ov_px.data());
+    }
+  }
+  const bool overlaid = d.ov_on && d.ov_tex;
+  if (overlaid) {
+    // Its own pixels, 1:1, blended over what the screens left.
+    glViewport(d.ov_x, wh - d.ov_y - d.ov_th, d.ov_tw, d.ov_th);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+    glUseProgram(d.p_ov);
+    glBindTexture(GL_TEXTURE_2D, d.ov_tex);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
+  }
   glBindVertexArray(0);
   const int hires_shown = hires_tex_ ? hires_screen_ : -1;
   hires_tex_ = 0;
   // A window one 1x screen fills exactly must show it scaled by nearest neighbour.
-  const bool filled = nviews == 1 && views[0].shown && hires_shown != views[0].screen && views[0].rect.x == 0 && views[0].rect.y == 0 &&
+  const bool filled = !overlaid && nviews == 1 && views[0].shown && hires_shown != views[0].screen && views[0].rect.x == 0 && views[0].rect.y == 0 &&
                       views[0].rect.w == ww && views[0].rect.h == wh;
   hash_present(d.index, ww, wh, filled ? fb[views[0].screen] : nullptr);
   dump_present(d.index, ++d.presents, ww, wh);

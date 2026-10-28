@@ -81,7 +81,7 @@ if(DSPERATE_NIBKIT_MENU)
   set_target_properties(nibkit_menu PROPERTIES IMPORTED_LOCATION "${_nib_lib}"
                         INTERFACE_INCLUDE_DIRECTORIES "${DSPERATE_NIBKIT_MENU}/include")
   add_dependencies(nibkit_menu nibkit_menu_build)
-  target_sources(dsperate PRIVATE shelf_menu.cpp)
+  target_sources(dsperate PRIVATE shelf_menu.cpp nib_toast.cpp)
   target_link_libraries(dsperate PRIVATE nibkit_menu ${CMAKE_DL_LIBS} m)
   target_compile_definitions(dsperate PRIVATE DSPERATE_NIBKIT_MENU=1)
   message(STATUS "pause menu: nibkit's (${DSPERATE_NIBKIT_MENU})")

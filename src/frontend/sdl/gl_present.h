@@ -33,6 +33,14 @@ public:
   // top first): a menu drawn at the panel's own resolution. Shown and swapped
   // on the present thread, like draw().
   void draw_picture(const u8* rgba, int w, int h);
+  // A picture laid over the screens at every present until replaced or
+  // cleared (rgba NULL): RGBA bytes with straight alpha, rows top first,
+  // `w` x `h` window pixels at (x, y) from the window's top left, unscaled
+  // and blended by its alpha. A toast drawn at the panel's resolution. Copied
+  // here; uploaded once, on the present thread, at the next present.
+  void set_overlay(const u8* rgba, int w, int h, int x, int y);
+  // The window's size in pixels, what set_overlay's places are in.
+  bool drawable_size(int& w, int& h) const;
   // A window that may skip a frame identical to the one it shows (no upload,
   // draw or swap): never the one whose swap paces the frame loop.
   void set_may_skip(bool on) { may_skip_ = on; }

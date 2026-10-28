@@ -120,7 +120,8 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   `RA_TOKEN_FILE` in the environment: DSlot on nibOS), unlock toasts, an
   achievements list and account page in the pause menu, encore mode, and an
   optional screenshot on unlock. The unlock toast shows the achievement's
-  badge, fetched off the emulation thread into a cache shared with DSlot
+  badge, fetched off the emulation thread into a cache shared with DSlot, and
+  every toast is drawn in DSlot's style through nibkit where it is built in
   (docs/retroachievements.md). DS games and DSiWare, however they are
   started. Uses the system's libcurl at runtime.
 - **Firmware boot.** With no ROM the console boots its own DS menu with the
