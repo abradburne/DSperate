@@ -6,6 +6,7 @@
 // loses achievements rather than failing to start.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -22,13 +23,17 @@ struct Response {
   int status = 0;              // 0 = no status reached (DNS/connect/TLS); rcheevos retries
   std::string body;
   std::string error;           // transport-level reason when status == 0
+  bool cancelled = false;      // stopped by `cancel`, not by the network
 };
 
 // A blocking HTTP client. Call sites are on the worker thread only.
 class Backend {
 public:
   virtual ~Backend() = default;
-  virtual Response perform(const Request& req, const char* user_agent) = 0;
+  // `cancel`, when given, is watched during the transfer (about once a second, and on
+  // every byte that moves): set, it ends the request at once with `cancelled`.
+  virtual Response perform(const Request& req, const char* user_agent,
+                           const std::atomic<bool>* cancel = nullptr) = 0;
   virtual const char* name() const = 0;
 };
 

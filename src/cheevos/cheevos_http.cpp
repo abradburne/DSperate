@@ -17,10 +17,15 @@ namespace {
 using CURL = void;
 constexpr long CURL_GLOBAL_ALL = 3;
 constexpr int  CURLE_OK = 0;
+constexpr int  CURLE_ABORTED_BY_CALLBACK = 42;
+using curl_off_t = long long;
 
 enum CurlOpt : int {
   CURLOPT_WRITEDATA        = 10001,   // CBPOINT 1
   CURLOPT_URL              = 10002,   // STRINGPOINT 2
+  CURLOPT_XFERINFODATA     = 10057,   // CBPOINT 57
+  CURLOPT_XFERINFOFUNCTION = 20219,   // FUNCTIONPOINT 219
+  CURLOPT_NOPROGRESS       = 43,      // LONG 43
   CURLOPT_WRITEFUNCTION    = 20011,   // FUNCTIONPOINT 11
   CURLOPT_POSTFIELDS       = 10015,   // OBJECTPOINT 15
   CURLOPT_USERAGENT        = 10018,   // STRINGPOINT 18
@@ -78,6 +83,12 @@ size_t write_cb(char* data, size_t size, size_t nmemb, void* user) {
   return n;
 }
 
+// Polled by curl during a transfer, even an idle one; non-zero ends it.
+int xferinfo_cb(void* user, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+  const auto* cancel = static_cast<const std::atomic<bool>*>(user);
+  return cancel && cancel->load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 class CurlBackend final : public Backend {
 public:
   CurlBackend(void* handle, const Api& api, const char* from)
@@ -95,8 +106,10 @@ public:
 
   const char* name() const override { return name_.c_str(); }
 
-  Response perform(const Request& req, const char* user_agent) override {
+  Response perform(const Request& req, const char* user_agent,
+                   const std::atomic<bool>* cancel) override {
     Response res;
+    if (cancel && cancel->load()) { res.error = "cancelled"; res.cancelled = true; return res; }
     CURL* c = api_.easy_init();
     if (!c) { res.error = "curl_easy_init failed"; return res; }
 
@@ -112,6 +125,11 @@ public:
     api_.easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
     api_.easy_setopt(c, CURLOPT_TIMEOUT_MS, 30000L);
     if (!ca_.empty()) api_.easy_setopt(c, CURLOPT_CAINFO, ca_.c_str());
+    if (cancel) {
+      api_.easy_setopt(c, CURLOPT_XFERINFOFUNCTION, &xferinfo_cb);
+      api_.easy_setopt(c, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(cancel));
+      api_.easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    }
 
     curl_slist* headers = nullptr;
     if (!req.body.empty()) {
@@ -131,6 +149,9 @@ public:
       long status = 0;
       api_.easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
       res.status = static_cast<int>(status);
+    } else if (rc == CURLE_ABORTED_BY_CALLBACK) {
+      res.error = "cancelled";
+      res.cancelled = true;
     } else if (sink.overflowed) {
       res.error = "response larger than 8 MB";
     } else {
