@@ -15,8 +15,9 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
 - **The mode as a game starts**: *RetroAchievements: Casual*, the game, how many of its
   achievements are unlocked and how many are unsupported. Shown even with toasts off, as
   RetroAchievements requires.
-- **Progress and challenge toasts** from rcheevos' indicator events: measured progress, one at a
-  time and updated in place; a challenge announced as it starts and withdrawn when it ends.
+- **Progress and challenge indicators** from rcheevos' indicator events, kept on screen bottom
+  left while they last: the measured progress of one achievement, updated in place, above a row
+  of the badges of the challenges under way.
 - **Unlocks earned offline survive a quit**: each award is written to `<config>/cheevos.outbox`
   (0600, no token in it) before it is sent and struck off when the server settles it; the next
   sign-in sends what is left.
@@ -34,6 +35,9 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
 - Badge downloads wait behind unlocks, pings and sign-ins.
 - The pause menu's achievement switches read `yes`/`no` like every other setting, and the list is
   built once per refresh, not twice.
+- **Toasts through nibkit's shared queue** (nibkit-menu-c 0.1.2's `nib_toasts_*`): the order,
+  the times, the wait for a badge and the pictures every nibOS app has. Built without nibkit,
+  DSperate keeps its own queue and pixel toast.
 - Inside: `cheevos::Session` holds the run's RetroAchievements (out of `main.cpp`), the client
   keeps `rc_client` behind a pimpl and reports typed events, and the credentials, badges and
   outbox are modules of their own, the credentials' precedence and the outbox unit-tested.

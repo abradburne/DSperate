@@ -56,16 +56,21 @@ Every `Event` is logged (`cheevos: ...`) and, with `cheevos.toasts` on, shown:
   RetroAchievements requires the mode to be shown at game start in every mode, so this one is
   shown even with toasts off.
 - **An unlock**: *Achievement unlocked*, title, description, points, badge (below).
-- **Progress** (`RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*`): the achievement and its
-  measured progress ("5/10"). One at a time, updated in place, taken down when rcheevos says.
-- **A challenge** under way (`..._CHALLENGE_INDICATOR_SHOW`): the achievement, with its badge;
-  taken down (or never shown, if still waiting) when the challenge ends.
 - Sign-in, sign-out, a ROM RetroAchievements does not know, server errors, going offline and
   back, all achievements earned.
 
-The toast queue shows one at a time; a toast with a key (progress, a challenge) replaces the
-waiting or shown one with the same key. A challenge is therefore announced, not kept on screen
-while it lasts: that waits for nibkit's shared toast queue.
+Those are toasts, one at a time in turn (nibkit's queue, below). Two things are not, because
+they last: rcheevos' **indicators** (`cheevos_indicators.cpp`), kept on screen bottom left,
+opposite the toasts, while rcheevos says they are up:
+
+- **Progress** (`RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*`): a panel in the toasts'
+  style headed *Progress*, the achievement, its measured progress ("5/10") and badge. One at a
+  time, updated in place, taken down when rcheevos says.
+- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one's badge, in a
+  row under the progress panel, the newest at the right, a dim square while a badge is on its
+  way. Gone when the challenge ends, the game changes or the machine resets.
+
+They are drawn only where DSperate has nibkit; without it they are in the log alone.
 
 Leaderboards are submitted by `rc_client` as it finds them; nothing is drawn for them yet.
 
@@ -125,7 +130,7 @@ When `rc_client` fires `RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED`, the client posts
 type `Unlock`: the id, title, description, points, unlock time and the **badge name**
 (`rc_client_achievement_t::badge_name`). `cheevos_toast()` turns it into a `Toast`
 (*Achievement unlocked*, four seconds, bottom right of the panel) and asks the client for the
-badge image with `Client::fetch_badge(name)`; progress and challenge toasts ask for theirs too.
+badge image with `Client::fetch_badge(name)`; the indicators ask for theirs too.
 
 The badge is fetched and decoded **on the cheevos worker thread**, the one that already
 carries every HTTP request (SCHED_OTHER, nice 10), when it has no rcheevos request waiting:
@@ -141,31 +146,39 @@ The worker (`load_badge` in `cheevos_badges.cpp`):
    8-bit greyscale, RGB, palette, grey+alpha and RGBA, palette and grey at 1/2/4 bits too,
    filters 0–4, no interlace) into `0xAARRGGBB` pixels and queues a `Badge` for the frontend.
 
-`cheevos_show()` drains `take_badges()` into a map by name each frame (a move of a
-vector, nothing more). `toast_step()` holds an unlock toast back for up to 90 frames (1.5 s)
-while its badge is still on its way, then shows it with or without.
+`cheevos_show()` hands each badge from `take_badges()` to the toast queue (`ToastQueue::badge`),
+which gives it to nibkit's queue: an unlock waiting for its badge waits up to 1.5 s at the head
+of the queue, then shows without it, taking it if it comes later.
 
 ## How every toast is drawn
 
-Every toast (an unlock, the sign-in and the set loaded, a network note, the SD card and DSi DSP
-warnings, the NAND shortcuts) is drawn in **DSlot's style** where DSperate is built with nibkit
-(`DSPERATE_NIBKIT_MENU`, as nibOS's package is): `nib_toast.cpp` asks nibkit-menu-c's
-`nib_toast_render` for a picture of it, with DSlot's face (Roboto Condensed), panel colour and
-rounded corners, the heading gold for an unlock and red for a problem, the points in gold at the
-title's right and the badge at the left. The picture is RGBA with alpha, sized to the toast and
-drawn for the canvas's scale (its width over the screen's 1024 units). It is drawn **once** per
-toast and canvas size, as an ordinary task (`OffRealtime`, so the text rasterising never counts
-against `RLIMIT_RTTIME`), and kept. Where the output tier has a panel-resolution canvas each
-frame lays it over the canvas, bottom right, and tells the display what it covered. Where the
-screens are textures the GPU scales (the GLES present tier, which nibOS's RG DS+ uses) there is
-no such buffer: the picture goes to the presenter as an overlay (`Display::set_overlay`,
-`GlPresent::set_overlay`), uploaded once and blended over the screens at every present until the
-toast ends. `DS_VERBOSE` logs how long each one took to draw: about 3 ms on the RG DS+.
+Every toast (an unlock, the sign-in and the placard, a network note, the SD card and DSi DSP
+warnings, the NAND shortcuts) goes through `ToastQueue` (`toast_queue.cpp`). Where DSperate is
+built with nibkit (`DSPERATE_NIBKIT_MENU`, as nibOS's package is) that is **nibkit's queue**,
+`nib_toasts_*` from nibkit-menu-c, the one DSlot and every nibOS app use: its order, its times
+(an unlock 4 s, anything else 2.5 s, or the toast's own), its wait for a badge, and its
+pictures in DSlot's style: DSlot's face (Roboto Condensed), panel colour and rounded corners,
+the heading gold for an unlock and red for a problem, the points in gold at the title's right
+and the badge at the left, placed in the corner every app's toast sits in (bottom right, a
+margin in). Its clock is the frames played (`tick()` once per emulated frame, x 1000 / 60), so a
+toast waits while the game is paused.
 
-Without nibkit, or on a canvas below half the screen's size (the 256x192 scratch some output
-tiers draw into), `menu.cpp`'s `draw_toast` draws it in DSperate's own 5x7 face instead, which
-folds the words to capitals: the badge then sits at the left edge, nearest-neighbour scaled. The
-toasts' words are written in sentence case for the first and read the same in the second.
+A picture is RGBA with alpha, sized to the toast and drawn for the target's scale
+(`nib_menu_scale_for`). It is drawn **once** per toast and target size, as an ordinary task
+(`OffRealtime`, so the text rasterising never counts against `RLIMIT_RTTIME`), and kept. Where
+the output tier has a panel-resolution canvas each frame lays it over the canvas and tells the
+display what it covered. Where the screens are textures the GPU scales (the GLES present tier,
+which nibOS's RG DS+ uses) there is no such buffer: the picture goes to the presenter as an
+overlay (`Display::set_overlay`, `GlPresent::set_overlay`), uploaded once and blended over the
+screens at every present until it changes. The presenter has two overlay slots: the toast, and
+the indicators above. `DS_VERBOSE` logs how long each toast took to draw: about 3 ms on the RG DS+.
 
-Nothing here is configurable beyond the existing `cheevos.toasts` switch: with toasts off the
-badge is not fetched either.
+On a target below half the screen's scale (the 256x192 scratch some output tiers draw into),
+`menu.cpp`'s `draw_toast` draws the toast on show in DSperate's own 5x7 face instead, which folds
+the words to capitals; the badge then sits at the left edge, nearest-neighbour scaled. Built
+without nibkit (upstream's builds), `ToastQueue` is DSperate's own queue with the same rules
+counted in frames, and every toast is the pixel toast. The toasts' words are written in sentence
+case for the first and read the same in the second.
+
+Nothing here is configurable beyond the existing `cheevos.toasts` switch: with toasts off, the
+indicators are off too and no badge is fetched; the placard still shows.
