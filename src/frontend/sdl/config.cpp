@@ -97,13 +97,15 @@ double Config::real(const std::string& key, double def) const {
   return std::atof(it->second.c_str());
 }
 
-bool Config::flag(const std::string& key, bool def) const {
-  const auto it = kv_.find(key);
-  if (it == kv_.end()) return def;
-  const std::string& v = it->second;
+bool parse_flag(const std::string& v, bool def) {
   if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
   if (v == "0" || v == "false" || v == "no" || v == "off") return false;
   return def;
+}
+
+bool Config::flag(const std::string& key, bool def) const {
+  const auto it = kv_.find(key);
+  return it == kv_.end() ? def : parse_flag(it->second, def);
 }
 
 bool Config::store(const std::string& path, const std::string& key, const std::string& value) {
@@ -566,9 +568,13 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 [cheevos]
 # RetroAchievements, Casual mode (formerly Softcore). Hardcore is NOT supported!
 # enabled = false
-# username =                    # who to sign in as (--cheevos-user overrides it for one run). The password is never stored in plaintext;
-                                # a successful sign-in keeps the token RetroAchievements returns, in
-                                # <config>/cheevos.token, mode 0600
+# username =                    # who to sign in as (--cheevos-user overrides it for one run). The password is never stored;
+                                # a sign-in from the pause menu keeps the token RetroAchievements returns
+                                # in <config>/cheevos.token, mode 0600, and signing out removes it. Not
+                                # when a launcher passed its sign-in (RA_TOKEN_FILE): that file is the
+                                # launcher's, so the menu's sign-in and sign-out last for that run only.
+                                # Unlocks the server has not confirmed (earned offline) wait in
+                                # <config>/cheevos.outbox, mode 0600, and are sent at the next sign-in
 # token_file =                  # a token file another program wrote, in PPSSPP's format (the token
                                 # alone) or DSlot's (the username, then the token, one a line).
                                 # --cheevos-token sets this. It wins over the stored sign-in and is
@@ -579,7 +585,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # use_system_login = true       # when DSperate has no sign-in of its own, use the one the CFW's front
                                 # end already made.
 # toasts = true                 # show a panel at the bottom of the screen when an achievement unlocks,
-                                # and for sign-in and connection messages. Off leaves them in the log
+                                # for an achievement's progress and a challenge under way, and for
+                                # sign-in and connection messages. Off leaves them in the log; the
+                                # panel saying the mode (Casual) as a game starts is shown either way
 # encore = false                # allow achievements to be triggered again even if already achieved.
                                 # For replaying a game and watching the set unlock as it goes. Nothing
                                 # is credited twice, so this changes what DSperate shows, not what the

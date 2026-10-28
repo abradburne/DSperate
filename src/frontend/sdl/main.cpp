@@ -31,6 +31,8 @@
 #include "cheevos/cheevos_hash.h"
 #include "cheevos/cheevos_http.h"
 #include "cheevos/cheevos_identity.h"
+#include "cheevos/cheevos_session.h"
+#include "cheevos_menu.h"
 #endif
 #if DSPERATE_NET
 #include "net/lan_mp.h"
@@ -487,44 +489,39 @@ bool read_layout_chunk(ds::state::Reader& r, ds::sdl::Display::Layout& l) {
 
 // Achievement progress, riding after the layout. Needed since Casual mode
 // allows save states, so cheevos runtime state must travel with them.
-// File-scope hook (not a parameter) so no save/load call site can skip it.
-struct CheevosStateHook {
-  virtual ~CheevosStateHook() = default;
-  // False: nothing to carry, chunk not written.
-  virtual bool save(u32& game_id, std::vector<u8>& blob) = 0;
-};
-CheevosStateHook* g_cheevos_state = nullptr;
-
-// A state loaded before cheevos sign-in/fetch completes is held here and
-// applied once the set arrives; also covers an in-session load mid-fetch.
-struct PendingCheevosState {
-  bool waiting = false;      // state loaded, not yet accounted for
-  u32 game_id = 0;
-  std::vector<u8> blob;      // empty: state carried no progress, so reset
-} g_cheevos_pending;
+// File-scope (not a parameter) so no save/load call site can skip it; set for
+// the whole run, before any state is read (cheevos_session.h).
+#if DSPERATE_CHEEVOS
+ds::cheevos::Session* g_cheevos = nullptr;
+#endif
 
 void write_cheevos_chunk(ds::state::Writer& w) {
-  if (!g_cheevos_state) return;
+#if DSPERATE_CHEEVOS
   u32 game_id = 0;
   std::vector<u8> blob;
-  if (!g_cheevos_state->save(game_id, blob) || blob.empty()) return;
+  if (!g_cheevos || !g_cheevos->save_progress(game_id, blob) || blob.empty()) return;
   w.begin("CHVO");
   w.put(game_id);
   w.vec(blob);
   w.end();
+#else
+  (void)w;
+#endif
 }
 
 void read_cheevos_chunk(ds::state::Reader& r) {
-  // No hook check: the session doesn't exist yet at startup read time.
   // No chunk found: still reset the runtime, or it keeps counting stale progress.
-  if (r.at_end() || !r.begin("CHVO")) { g_cheevos_pending = {true, 0, {}}; return; }
   u32 game_id = 0;
   std::vector<u8> blob;
-  r.fields(game_id);
-  r.vec(blob);
-  r.end();
-  if (!r.ok() || blob.empty()) { g_cheevos_pending = {true, 0, {}}; return; }
-  g_cheevos_pending = {true, game_id, std::move(blob)};
+  if (!r.at_end() && r.begin("CHVO")) {
+    r.fields(game_id);
+    r.vec(blob);
+    r.end();
+    if (!r.ok()) { game_id = 0; blob.clear(); }
+  }
+#if DSPERATE_CHEEVOS
+  if (g_cheevos) g_cheevos->progress_loaded(game_id, std::move(blob));
+#endif
 }
 
 
@@ -1436,6 +1433,20 @@ static int run(int argc, char** argv) {
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "emu.frame_end", "emu.input_at", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
+#if DSPERATE_CHEEVOS
+  // RetroAchievements, Casual mode (started further down, when asked for). Declared
+  // before anything can load a state, whose progress it holds, or save one.
+  ds::cheevos::Session cheevos;
+  g_cheevos = &cheevos;
+  struct CheevosHookReset { ~CheevosHookReset() { g_cheevos = nullptr; } } cheevos_hook_reset;
+  // Off unless the config or the command line says; a launcher that passes a sign-in in
+  // the environment (DSlot's RA_TOKEN_FILE) turns it on when neither says anything.
+  // Asked again as the config grows (the per-game files).
+  const char* ra_token_env = std::getenv("RA_TOKEN_FILE");
+  auto cheevos_wanted = [&] {
+    return cfg.has("cheevos.enabled") ? cfg.flag("cheevos.enabled", false) : (ra_token_env && *ra_token_env);
+  };
+#endif
   // What this run was given, first: a journal with nothing else in it still
   // names the file. The size and the zip check come from the file itself.
   if (rom) {
@@ -1638,7 +1649,7 @@ static int run(int argc, char** argv) {
       if (!ds::io::read_dsiware(dsi_title, srl, &err, &embedded)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); return 2; }
 #if DSPERATE_CHEEVOS
       // Only for autoload: with --dsi-menu the player picks what runs.
-      if (cfg.flag("cheevos.enabled", false) && !dsi_menu) {
+      if (cheevos_wanted() && !dsi_menu) {
         const auto src = ds::cart::RomSource::from_memory(srl);
         std::string herr;
         if (!src || !ds::cheevos::rom_hash(*src, dsi_title, dsi_title_cheevos_hash, herr, true))
@@ -3048,6 +3059,7 @@ sdl_ready:
   struct Toast {
     const char* header = nullptr; std::string title, detail, badge; u32 points = 0; int frames = 0;
     ToastKind kind = ToastKind::Info; u64 serial = 0;
+    std::string key;   // set: replaces the toast with the same key, shown or waiting
   };
   u64 toast_serials = 0;
 #if DSPERATE_NIBKIT_MENU
@@ -3093,6 +3105,26 @@ sdl_ready:
     toast_left = toast_now.frames;
   };
   const auto toast_on = [&] { return toast_left > 0; };
+  // A toast with a key takes the place of the one with the same key, on screen or
+  // waiting (achievement progress: one indicator, updated in place); else it queues.
+  auto toast_put = [&](Toast t) {
+    if (!t.key.empty()) {
+      if (toast_on() && toast_now.key == t.key) {
+        toast_now = std::move(t);
+        toast_now.serial = ++toast_serials;
+        toast_left = toast_now.frames;
+        return;
+      }
+      for (Toast& q : toast_queue) if (q.key == t.key) { q = std::move(t); return; }
+    }
+    toast_queue.push_back(std::move(t));
+  };
+  // Takes a keyed toast down, or out of the queue before it shows.
+  auto toast_drop = [&](const std::string& key) {
+    toast_queue.erase(std::remove_if(toast_queue.begin(), toast_queue.end(), [&](const Toast& q) { return q.key == key; }),
+                      toast_queue.end());
+    if (toast_on() && toast_now.key == key) toast_left = 1;
+  };
   const auto toast_badge = [&]() -> const ds::sdl::ToastImage* {
     if (toast_now.badge.empty()) return nullptr;
     const auto it = toast_badges.find(toast_now.badge);
@@ -3130,14 +3162,8 @@ sdl_ready:
   };
 
 #if DSPERATE_CHEEVOS
-  // RetroAchievements, Casual mode. Off unless asked for; every failure is
-  // reported once and then ignored.
-  ds::cheevos::Client cheevos;
-  // Off unless the config or the command line says; a launcher that passes a sign-in in
-  // the environment (DSlot's RA_TOKEN_FILE) turns it on when neither says anything.
-  const char* ra_token_env = std::getenv("RA_TOKEN_FILE");
-  const bool cheevos_on = cfg.has("cheevos.enabled") ? cfg.flag("cheevos.enabled", false)
-                                                     : (ra_token_env && *ra_token_env);
+  // Every failure is reported once and then ignored.
+  const bool cheevos_on = cheevos_wanted();
 #endif
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
@@ -3311,250 +3337,118 @@ sdl_ready:
   if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
 #endif
 #if DSPERATE_CHEEVOS
-  std::string cheevos_hash;      // the running game's identity; empty if it could not be hashed
-  bool cheevos_set_asked = false;
-  // The cart's hash, or for a DSiWare title run from NAND, the one taken
-  // when read. The loader cart is not a game and gets none.
-  auto cheevos_identify = [&](const std::string& name) {
-    cheevos_hash.clear();
-    cheevos_set_asked = false;
-    std::string err;
-    if (!nds.cart) { cheevos_hash = dsi_title_cheevos_hash; return; }
-    if (!ds::cheevos::rom_hash(nds.cart->source(), name, cheevos_hash, err, nds.dsi))
-      std::fprintf(stderr, "cheevos: cannot identify this ROM: %s\n", err.c_str());
+  // What the player sees of RetroAchievements, by what happened (cheevos::Event): the
+  // one place it is decided.
+  auto cheevos_toast = [&](const ds::cheevos::Event& e) {
+    using T = ds::cheevos::Event::Type;
+    Toast t;
+    t.title = e.title;
+    t.detail = e.description;
+    t.frames = TOAST_INFO_FRAMES;
+    auto problem = [&](const char* title) {
+      t.kind = ToastKind::Problem;
+      t.header = "RetroAchievements";
+      t.title = title;
+    };
+    switch (e.type) {
+    case T::Unlock:
+      t.kind = ToastKind::Unlock;
+      t.header = "Achievement unlocked";
+      if (t.title.empty()) t.title = "Achievement unlocked";
+      t.points = e.points;
+      t.badge = e.badge;
+      t.frames = TOAST_FRAMES;
+      break;
+    case T::GameStarted: {
+      // The placard. RetroAchievements asks that the mode be shown as a game starts.
+      char line[96];
+      if (e.unsupported) std::snprintf(line, sizeof line, "%u of %u unlocked, %u unsupported", e.unlocked, e.total, e.unsupported);
+      else std::snprintf(line, sizeof line, "%u of %u unlocked", e.unlocked, e.total);
+      t.header = e.hardcore ? "RetroAchievements: Hardcore" : "RetroAchievements: Casual";
+      if (t.title.empty()) t.title = "Achievements active";
+      t.detail = line;
+      t.frames = TOAST_FRAMES;
+      break;
+    }
+    case T::Progress:
+      // One at a time, updated in place; rcheevos says when to take it down.
+      t.header = "Progress";
+      t.detail = e.progress;
+      t.badge = e.badge;
+      t.key = "progress";
+      break;
+    case T::ProgressHide:
+      toast_drop("progress");
+      return;
+    case T::ChallengeShow:
+      t.header = "Challenge";
+      t.badge = e.badge;
+      t.key = "challenge " + std::to_string(e.id);
+      break;
+    case T::ChallengeHide:
+      toast_drop("challenge " + std::to_string(e.id));
+      return;
+    case T::SignedIn:        t.title = "Signed in to RetroAchievements"; t.detail = e.title; break;
+    case T::SignedOut:       t.title = "Signed out of RetroAchievements"; break;
+    case T::Note:            t.header = "RetroAchievements"; break;
+    case T::GameCompleted:   t.title = "All achievements earned"; t.detail = e.title; break;
+    case T::SubsetCompleted: t.title = "Subset completed"; t.detail = e.title; break;
+    case T::Reconnected:     t.title = "RetroAchievements reconnected"; t.detail = "Pending unlocks sent"; break;
+    case T::SignInFailed:    problem("Sign-in failed"); break;
+    case T::Unavailable:     problem("Achievements unavailable"); break;
+    case T::LoadFailed:      problem("Could not load achievements"); break;
+    case T::ServerError:     problem("RetroAchievements error"); break;
+    case T::Disconnected:
+      problem("RetroAchievements offline");
+      t.detail = "Unlocks will be sent when the connection returns";
+      break;
+    case T::NoSet:
+      // Hash identifies a dump, not a game; a legit ROM can still fail to match.
+      problem("No achievements for this ROM");
+      t.detail = e.description.empty() ? "RetroAchievements does not recognise this dump"
+                                       : "RetroAchievements does not recognise this dump (hash " + e.description + ")";
+      break;
+    }
+    if (!t.badge.empty()) cheevos.client().fetch_badge(t.badge);   // the worker's, from the cache or the media host
+    toast_put(std::move(t));
   };
-
   auto cheevos_show = [&] {
     // Badges decoded by the worker: moved into the map, nothing else done here.
-    for (ds::cheevos::Badge& b : cheevos.take_badges()) {
+    for (ds::cheevos::Badge& b : cheevos.client().take_badges()) {
       std::vector<u32>& px = toast_badge_px[b.name];
       px = std::move(b.px);
       toast_badges[b.name] = ds::sdl::ToastImage{b.w, b.h, px.data()};
     }
-    for (const ds::cheevos::Message& m : cheevos.take_messages()) {
-      std::fprintf(stderr, "cheevos: %s%s%s\n", m.text.c_str(),
-                   m.detail.empty() ? "" : " -- ", m.detail.c_str());
+    for (const ds::cheevos::Event& e : cheevos.take_events()) {
       // Through shot_pending (hotkey's path): captures the game, not the
       // toast, which is drawn onto the canvas afterwards.
-      if (m.kind == ds::cheevos::Message::Kind::Unlock && cfg.flag("cheevos.auto_screenshot", false))
+      if (e.type == ds::cheevos::Event::Type::Unlock && cfg.flag("cheevos.auto_screenshot", false))
         shot_pending = true;
-      if (!cfg.flag("cheevos.toasts", true)) continue;
-      Toast t;
-      t.header = m.kind == ds::cheevos::Message::Kind::Unlock ? "Achievement unlocked"
-               : m.kind == ds::cheevos::Message::Kind::Problem ? "RetroAchievements" : nullptr;
-      t.kind = m.kind == ds::cheevos::Message::Kind::Unlock ? ToastKind::Unlock
-             : m.kind == ds::cheevos::Message::Kind::Problem ? ToastKind::Problem : ToastKind::Info;
-      t.title = m.text;
-      t.detail = m.detail;
-      t.points = m.points;
-      t.frames = m.kind == ds::cheevos::Message::Kind::Unlock ? TOAST_FRAMES : TOAST_INFO_FRAMES;
-      if (m.kind == ds::cheevos::Message::Kind::Unlock && !m.badge.empty()) {
-        t.badge = m.badge;
-        cheevos.fetch_badge(m.badge);   // on the worker thread, from the cache or the media host
-      }
-      toast_queue.push_back(std::move(t));
+      // Toasts off leaves the rest in the log; the mode at game start is always shown.
+      if (!cfg.flag("cheevos.toasts", true) && e.type != ds::cheevos::Event::Type::GameStarted) continue;
+      cheevos_toast(e);
     }
   };
-  // Cached rather than rebuilt per frame: rc_client_create_achievement_list allocates.
-  struct CheevosMenuHost final : ds::sdl::CheevosHost {
-    ds::cheevos::Client* c = nullptr;
-    std::vector<ds::cheevos::Client::Achievement> rows;
-    ds::cheevos::Client::Summary sum{};
-    void refresh() {
-      if (!c) return;
-      rows = c->achievements();
-      sum = c->summary();
-    }
-    std::string status() const override {
-      if (!c) return "NOT AVAILABLE IN THIS BUILD";
-      switch (c->state()) {
-      case ds::cheevos::State::Off:
-        return c->unavailable_reason().empty() ? "TURNED OFF" : c->unavailable_reason();
-      case ds::cheevos::State::SignedOut:   return "NOT SIGNED IN";
-      case ds::cheevos::State::SigningIn:   return "SIGNING IN...";
-      case ds::cheevos::State::SignedIn:    return "SIGNED IN AS " + c->username();
-      case ds::cheevos::State::LoadingGame: return "LOADING ACHIEVEMENTS...";
-      case ds::cheevos::State::Playing:     return "SIGNED IN AS " + c->username();
-      case ds::cheevos::State::EmptySet:
-        return "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET";
-      case ds::cheevos::State::NoSet:
-        return "NO ACHIEVEMENTS FOR THIS ROM - HASH " + c->game_hash();
-      }
-      return "";
-    }
-    std::string progress() const override {
-      if (!c || sum.total == 0) return {};
-      char buf[128];
-      // Encore explains why an already-earned achievement unlocks again.
-      std::snprintf(buf, sizeof buf, "%u/%u EARNED  %u/%u POINTS%s",
-                    sum.unlocked, sum.total, sum.points_earned, sum.points,
-                    c->encore() ? "  (ENCORE)" : "");
-      return buf;
-    }
-    bool signed_in() const override {
-      if (!c) return false;
-      const auto st = c->state();
-      return st == ds::cheevos::State::SignedIn || st == ds::cheevos::State::Playing ||
-             st == ds::cheevos::State::LoadingGame || st == ds::cheevos::State::NoSet ||
-             st == ds::cheevos::State::EmptySet;
-    }
-    bool has_set() const override { return !rows.empty(); }
-    int row_count() const override { return static_cast<int>(rows.size()); }
-    Row row(int i) const override {
-      Row r;
-      if (i < 0 || i >= static_cast<int>(rows.size())) return r;
-      const auto& a = rows[static_cast<size_t>(i)];
-      r.title = a.title;
-      r.detail = (!a.unlocked && !a.progress.empty()) ? a.progress + "   " + a.description
-                                                     : a.description;
-      r.points = a.points;
-      r.unlocked = a.unlocked;
-      r.unsupported = a.unsupported;
-      return r;
-    }
-    void sign_in(const std::string& user, const std::string& password) override {
-      if (c) c->sign_in(user, password);
-    }
-
-    ds::sdl::SettingsHost* settings = nullptr;
-    static const char* key_of(Option o) {
-      switch (o) {
-      case Option::Toasts:     return "cheevos.toasts";
-      case Option::Screenshot: return "cheevos.auto_screenshot";
-      case Option::Encore:     return "cheevos.encore";
-      }
-      return "";
-    }
-    bool option(Option o) const override {
-      if (!settings) return false;
-      const std::string v = settings->get(key_of(o));
-      if (v.empty()) return o == Option::Toasts;   // only toasts default on
-      return v == "true" || v == "1" || v == "on";
-    }
-    void set_option(Option o, bool on) override {
-      if (!settings) return;
-      settings->set(key_of(o), on ? "true" : "false");
-      // Encore is read at game load; tell the session now for next load.
-      if (o == Option::Encore && c) c->set_encore(on);
-    }
-    void sign_out() override {
-      if (c) c->sign_out();
-      rows.clear();
-      sum = {};
-    }
-  } cheevos_menu;
-  // Achievement progress in and out of save states.
-  struct CheevosState final : CheevosStateHook {
-    ds::cheevos::Client* c = nullptr;
-    bool save(u32& game_id, std::vector<u8>& blob) override {
-      if (!c) return false;
-      game_id = c->game_id();
-      return c->serialize_progress(blob);
-    }
-  } cheevos_state;
-
-  // Puts a state's achievement progress in once a set exists for it. Called
-  // before rc_client_do_frame, so the runtime never evaluates stale progress.
-  auto cheevos_apply_state = [&] {
-    if (!g_cheevos_pending.waiting) return;
-    if (cheevos.state() == ds::cheevos::State::LoadingGame ||
-        cheevos.state() == ds::cheevos::State::SigningIn) return;   // not yet; keep waiting
-    if (cheevos.state() != ds::cheevos::State::Playing) {
-      g_cheevos_pending = {};
-      return;
-    }
-    // Game id must match, or applying it is how a false unlock happens; a
-    // mismatch resets rather than guesses.
-    const bool ok = !g_cheevos_pending.blob.empty() && g_cheevos_pending.game_id != 0 &&
-                    g_cheevos_pending.game_id == cheevos.game_id() &&
-                    cheevos.deserialize_progress(g_cheevos_pending.blob.data(),
-                                                 g_cheevos_pending.blob.size());
-    if (!ok) cheevos.reset();
-    VLOG("cheevos: state progress %s\n", ok ? "restored" : "reset (none carried, or it did not apply)");
-    g_cheevos_pending = {};
-  };
-
+  ds::sdl::CheevosMenu cheevos_menu(cheevos, host);
+  // The menu recomposites only on a detected change: without this the account page
+  // sits on "SIGNING IN..." until the player presses something.
+  auto cheevos_menu_follow = [&] { if (cheevos.state_changed()) menu_dirty = true; };
   if (cheevos_on) {
-    cheevos_menu.c = &cheevos;
-    cheevos_menu.settings = &host;
     menu.set_cheevos_host(&cheevos_menu);
-    cheevos_state.c = &cheevos;
-    g_cheevos_state = &cheevos_state;
-  }
-
-  // Watches for the moment sign-in (asynchronous) completes, rather than
-  // asking for the set at boot and reporting a misleading "Login required".
-  // Also what lets signing in from the menu load the set for a running game.
-  // Without this the account page sits on "SIGNING IN..." until the player
-  // presses something, since the menu only recomposites on a detected change.
-  ds::cheevos::State cheevos_drawn_state = ds::cheevos::State::Off;
-  auto cheevos_menu_follow = [&] {
-    if (cheevos.state() == cheevos_drawn_state) return;
-    cheevos_drawn_state = cheevos.state();
-    cheevos_menu.refresh();   // the list and the counts move with it
-    menu_dirty = true;
-  };
-
-  auto cheevos_catch_up = [&] {
-    if (cheevos_set_asked || cheevos_hash.empty()) return;
-    if (cheevos.state() != ds::cheevos::State::SignedIn) return;
-    cheevos_set_asked = true;
-    cheevos.load_game(nds, cheevos_hash);
-  };
-  if (cheevos_on) {
-    std::string err;
-    if (!cheevos.start(err)) {
-      std::fprintf(stderr, "cheevos: %s\n", cheevos.unavailable_reason().c_str());
-    } else {
-      // Before anything loads: rcheevos evaluates encore at game load and
-      // ignores it afterwards.
-      cheevos.set_encore(cfg.flag("cheevos.encore", false));
-      // A password is never kept; an expired token fails and the player
-      // signs in again from the menu.
-      ds::cheevos::Credentials creds;
-      // A token file named on the command line overrides whatever is
-      // stored; nothing is written back, the file isn't ours.
-      // The launcher's sign-in (DSlot: RA_TOKEN_FILE, RA_USERNAME) stands in for one when the
-      // config names none; its hardcore wish is noted, since only Casual is played here.
-      std::string token_file = cfg.str("cheevos.token_file");
-      const bool from_launcher = token_file.empty() && ra_token_env && *ra_token_env;
-      if (from_launcher) token_file = ra_token_env;
-      if (const char* hc = std::getenv("RA_HARDCORE"); hc && std::string(hc) == "1")
-        std::fprintf(stderr, "cheevos: hardcore was asked for (RA_HARDCORE=1); DSperate plays Casual, hardcore is not supported yet\n");
-      if (!token_file.empty()) {
-        if (!ds::cheevos::read_token_file(token_file, creds, err)) {
-          std::fprintf(stderr, "cheevos: %s\n", err.c_str());
-        } else {
-          if (creds.username.empty() && from_launcher)
-            if (const char* u = std::getenv("RA_USERNAME"); u && *u) creds.username = u;
-          if (creds.username.empty()) creds.username = cfg.str("cheevos.username");
-          if (creds.username.empty()) {
-            std::fprintf(stderr, "cheevos: %s has a token but no username; pass --cheevos-user or set cheevos.username\n",
-                         token_file.c_str());
-            creds = ds::cheevos::Credentials{};
-          } else {
-            std::fprintf(stderr, "cheevos: using the token from %s%s\n", token_file.c_str(),
-                         from_launcher ? " (the launcher's sign-in)" : "");
-          }
-        }
-      }
-      if (creds.empty() &&
-          !ds::cheevos::load_credentials(ds::sdl::Config::dir(), creds, err) && !err.empty())
-        std::fprintf(stderr, "cheevos: %s\n", err.c_str());
-      // Failing that, the CFW front end's own sign-in: only the token is
-      // read, never the password. Ours wins once we have one.
-      if (creds.empty() && cfg.flag("cheevos.use_system_login", true)) {
-        std::string from;
-        if (ds::cheevos::import_cfw_credentials(creds, from))
-          std::fprintf(stderr, "cheevos: using the sign-in from %s\n", from.c_str());
-      }
-      if (!creds.empty()) cheevos.sign_in_with_token(creds.username, creds.token);
-      else std::fprintf(stderr, "cheevos: not signed in\n");
-
-      // Safe to hash the cart's source here: read_unpatched reads past the
-      // secure-area rewrite Cart has already done by this point.
-      if (!launcher) cheevos_identify(session.rom_path);
-    }
+    ds::cheevos::SessionOptions opts;
+    opts.credentials.token_file = cfg.str("cheevos.token_file");   // --cheevos-token
+    opts.credentials.username = cfg.str("cheevos.username");
+    opts.credentials.read_launcher_env();                          // DSlot: RA_TOKEN_FILE, RA_USERNAME
+    opts.credentials.config_dir = ds::sdl::Config::dir();
+    opts.credentials.use_system_login = cfg.flag("cheevos.use_system_login", true);
+    opts.encore = cfg.flag("cheevos.encore", false);
+    opts.outbox_path = ds::sdl::Config::dir() + "/cheevos.outbox";
+    opts.launcher_name = "DSlot";
+    const char* hc = std::getenv("RA_HARDCORE");
+    opts.hardcore_asked = hc && std::string(hc) == "1";
+    // The loader cart is not a game and gets no identity; a DSiWare title run from
+    // NAND has the one taken when it was read.
+    if (cheevos.start(opts) && !launcher) cheevos.identify(nds, session.rom_path, dsi_title_cheevos_hash);
     cheevos_show();
   }
 #endif
@@ -3665,7 +3559,7 @@ sdl_ready:
     from_list = true;
     session.open(nds, cfg, pick, nullptr);
 #if DSPERATE_CHEEVOS
-    if (cheevos_on) { cheevos.unload_game(); cheevos_identify(pick); }
+    if (cheevos_on) cheevos.change_game(nds, pick, dsi_title_cheevos_hash);
 #endif
     menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
     session.load_enabled(nds);
@@ -3774,7 +3668,7 @@ sdl_ready:
         if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
         mp_ever = false;
 #if DSPERATE_CHEEVOS
-        if (cheevos_on) cheevos.reset();
+        if (cheevos_on) cheevos.after_reset();
 #endif
         sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
         menu.set_open(false);
@@ -3994,7 +3888,7 @@ sdl_ready:
       }
 #if DSPERATE_CHEEVOS
       // Paused: no frame to evaluate, but idle() still works the queue (pending unlock, token refresh).
-      if (cheevos_on) { cheevos.idle(); cheevos_catch_up(); cheevos_show(); cheevos_menu_follow(); }
+      if (cheevos_on) { cheevos.idle(nds); cheevos_show(); cheevos_menu_follow(); }
 #endif
       SDL_Delay(10);
       continue;
@@ -4195,9 +4089,7 @@ sdl_ready:
     // reference, so a second call collapses delta onto current, stopping
     // single-frame edge triggers. Also drains HTTP completions.
     if (cheevos_on) {
-      cheevos_apply_state();
-      cheevos.frame();
-      cheevos_catch_up();
+      cheevos.frame(nds);
       cheevos_show();
       cheevos_menu_follow();
     }
@@ -4437,7 +4329,7 @@ sdl_ready:
         menu.set_slot(state_slot);
         refresh_slots();
 #if DSPERATE_CHEEVOS
-        if (cheevos_on) cheevos_menu.refresh();
+        if (cheevos_on) cheevos.refresh();
 #endif
         menu.set_open(true);
       }

@@ -7,6 +7,10 @@
 namespace ds::sdl {
 
 // INI-style settings ("section.key" -> value, strings typed at point of use).
+// A config value read as a switch: 1/true/yes/on, 0/false/no/off; anything else
+// (empty included) is `def`. Config::flag and every other reader of a switch.
+bool parse_flag(const std::string& v, bool def);
+
 // Later loads win: global file, then per-game override, then command line.
 class Config {
 public:

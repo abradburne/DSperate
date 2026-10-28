@@ -1,46 +1,61 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
-// RetroAchievements session: sign in, load a game's achievement set, evaluate
-// it as the emulator runs, report unlocks. Casual mode only.
+// RetroAchievements client: sign in, load a game's achievement set, evaluate
+// it as the emulator runs, report what happens as typed events. Casual mode only.
+// rc_client stays inside cheevos_client.cpp.
 //
 // Threading: rc_client and rcheevos callbacks run only on the frame() caller
-// (the emulation thread). HTTP runs on one worker thread; frame() drains
-// finished responses before calling rc_client_do_frame.
+// (the emulation thread). HTTP runs on one worker thread, rcheevos' requests
+// before badge downloads; frame() drains finished responses before calling
+// rc_client_do_frame.
 #pragma once
 
-#include <condition_variable>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "cheevos/cheevos_credentials.h"
-#include "cheevos/cheevos_http.h"
-#include "cheevos/cheevos_memory.h"
+#include "cheevos/cheevos_badges.h"
+#include "cheevos/cheevos_identity.h"
 #include "core/types.h"
 
 namespace ds { class NDS; }
 
 namespace ds::cheevos {
 
-// Something the player should be told about (frontend renders as a toast).
-struct Message {
-  enum class Kind : u8 { Unlock, Info, Problem, };
-  Kind kind = Kind::Info;
-  std::string text;
-  std::string detail;
-  u32 points = 0;   // unlock value; 0 for non-unlocks and 0-point achievements
-  std::string badge;   // the achievement's badge name (Unlock only); fetch_badge() gets the image
-};
-
-// An achievement's badge, decoded (docs/retroachievements.md): 0xAARRGGBB, rows top to bottom.
-struct Badge {
-  std::string name;
-  int w = 0, h = 0;
-  std::vector<u32> px;
+// Something that happened that the player may be told about; the frontend maps
+// each type to what it shows (a toast, mostly) in one place.
+struct Event {
+  enum class Type : u8 {
+    SignedIn,          // title: the display name
+    SignInFailed,      // description: why
+    SignedOut,
+    Note,              // title, description: something to tell the player (no failure)
+    Unavailable,       // title, description: achievements cannot run for this game
+    GameStarted,       // the placard: title, id (game), hardcore, unlocked/total/unsupported
+    NoSet,             // description: the dump's hash
+    LoadFailed,        // description: why
+    Unlock,            // id, title, description, points, badge, unlock_time
+    Progress,          // id, title, badge, progress: show the indicator, or update it
+    ProgressHide,
+    ChallengeShow,     // id, title, description, badge
+    ChallengeHide,     // id
+    GameCompleted,     // title: the game
+    SubsetCompleted,   // title: the subset
+    ServerError,       // title: the request, description: the server's words
+    Disconnected,      // unlocks are waiting for the network
+    Reconnected,       // and have been sent
+  };
+  Type type = Type::Note;
+  u32 id = 0;
+  std::string title;
+  std::string description;
+  u32 points = 0;
+  std::string badge;          // the achievement's badge name; fetch_badge() gets the picture
+  s64 unlock_time = 0;        // Unix seconds
+  std::string progress;       // measured progress, "5/10" or "50%"
+  bool hardcore = false;      // GameStarted: the mode the game plays in (Casual here, always)
+  u32 unlocked = 0, total = 0, unsupported = 0;   // GameStarted
 };
 
 enum class State : u8 {
@@ -62,18 +77,21 @@ public:
   Client& operator=(const Client&) = delete;
 
   // False with a reason in `err` when there is no usable libcurl; not fatal.
-  bool start(std::string& err);
+  // `outbox` is where unconfirmed unlocks wait (cheevos_outbox.h); empty keeps none.
+  bool start(std::string& err, const std::string& outbox = {});
+  // Abandons a request in flight (within about a second) and joins the worker;
+  // unlocks not yet confirmed stay in the outbox for the next start.
   void shutdown();
 
-  State state() const { return state_; }
+  State state() const;
 
   // Applies at next load_game(); call before it. rcheevos only reads it at load.
   void set_encore(bool on);
   bool encore() const;
   const char* transport_name() const;
-  const std::string& unavailable_reason() const { return unavailable_; }
+  const std::string& unavailable_reason() const;
 
-  // Asynchronous; watch state() and take_messages().
+  // Asynchronous; watch state() and take_events().
   void sign_in(const std::string& username, const std::string& password);
   void sign_in_with_token(const std::string& username, const std::string& token);
   void sign_out();
@@ -81,11 +99,11 @@ public:
   std::string token() const;
 
   // Asynchronous.
-  void load_game(NDS& nds, const std::string& hash);
+  void load_game(NDS& nds, const std::string& hash, Core core = Core::Nds);
   void unload_game();
   std::string game_title() const;
   u32 game_id() const;
-  const std::string& game_hash() const { return hash_; }
+  const std::string& game_hash() const;
 
   // Call once per emulated frame, right after NDS::run_frame().
   void frame();
@@ -98,10 +116,10 @@ public:
   bool deserialize_progress(const u8* data, size_t size);
   void reset();
 
-  std::vector<Message> take_messages();
+  std::vector<Event> take_events();
 
-  // The badge image for `name`, from the shared cache (~/.cache/retroachievements/badges)
-  // or the media host, fetched and decoded on the worker thread; it arrives through
+  // The badge image for `name`, from the shared cache or the media host, fetched and
+  // decoded on the worker thread when it has nothing else to do; it arrives through
   // take_badges(). Nothing happens for a name already asked for this session.
   void fetch_badge(const std::string& name);
   std::vector<Badge> take_badges();
@@ -118,56 +136,16 @@ public:
     u32 points = 0, points_earned = 0;
   };
   std::vector<Achievement> achievements() const;
-  Summary summary() const;
+  static Summary summarize(const std::vector<Achievement>& list);
+  Summary summary() const { return summarize(achievements()); }
 
-  // Called by rcheevos completion callbacks; public for that reason only.
-  void on_signed_in(const std::string& display_name);
-  void on_sign_in_failed(const std::string& why);
-  void on_game_loaded(const std::string& title, u32 id);
-  void on_no_set();
-  void on_empty_set(const std::string& title, u32 id);
-  void on_game_failed(const std::string& why);
+  // Unlocks earned but not yet confirmed by the server, this session's and earlier ones'.
+  size_t unconfirmed_unlocks() const;
 
-  // Called by the .cpp's free-function trampolines; public for that reason only.
-  void enqueue(Request req, void* callback, void* callback_data);
-  void handle_event(const void* event);
-  u32 read(u32 address, u8* buffer, u32 num_bytes);
+  struct Impl;
 
 private:
-  void worker_loop();
-  void post(Message::Kind kind, std::string text, std::string detail = {}, u32 points = 0, std::string badge = {});
-  void fetch_badge_now(const std::string& name);
-  void drain_completions();
-
-  struct Job {
-    Request req;
-    std::string badge;               // set: a badge fetch, not an rc_api request
-    void* callback = nullptr;        // rc_client_server_callback_t
-    void* callback_data = nullptr;
-  };
-  struct Completion {
-    Response res;
-    void* callback = nullptr;
-    void* callback_data = nullptr;
-  };
-
-  void* client_ = nullptr;           // rc_client_t*
-  std::unique_ptr<Backend> http_;
-  Memory mem_;
-  State state_ = State::Off;
-  bool encore_ = false;
-  std::string hash_;                 // the identity of the dump in the slot
-  std::string unavailable_;
-
-  std::thread worker_;
-  mutable std::mutex mu_;
-  std::condition_variable cv_;
-  std::deque<Job> jobs_;
-  std::deque<Completion> done_;
-  std::vector<Message> messages_;
-  std::vector<Badge> badges_;
-  std::vector<std::string> badges_asked_;
-  bool stop_ = false;
+  std::unique_ptr<Impl> impl_;
 };
 
 } // namespace ds::cheevos
