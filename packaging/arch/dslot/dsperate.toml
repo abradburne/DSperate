@@ -16,7 +16,7 @@ DS_DEBUG = "marks"
 # player's sign-in (RA_TOKEN_FILE, RA_USERNAME, RA_HARDCORE) to these systems' games only.
 # Casual only for now: DSperate forces hardcore off.
 [achievements]
-systems = ["NDS"]
+systems = ["NDS", "GBA"]
 hardcore = false
 
 # Put in place before a game starts when missing; never overwritten.
