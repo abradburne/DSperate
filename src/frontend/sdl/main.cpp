@@ -32,6 +32,7 @@
 #include "cheevos/cheevos_http.h"
 #include "cheevos/cheevos_identity.h"
 #include "cheevos/cheevos_session.h"
+#include "cheevos_indicators.h"
 #include "cheevos_menu.h"
 #endif
 #if DSPERATE_NET
@@ -49,8 +50,8 @@
 #include "lid.h"
 #include "loader_cart.h"
 #include "menu.h"
+#include "toast_queue.h"
 #if DSPERATE_NIBKIT_MENU
-#include "nib_toast.h"
 #include "shelf_menu.h"
 #include <nibkit_menu.h>
 #endif
@@ -3055,28 +3056,16 @@ sdl_ready:
     if (p) flush_save(); else { pacer.reset(); fs_debt_ms = 0; }
     VLOG("%s\n", p ? "paused" : "resumed");
   };
-  // A framed, four-second notice drawn over the game. One at a time. In DSlot's
-  // style where DSperate has nibkit (nib_toast.h), else menu.cpp's pixel toast,
-  // whose face folds the words to capitals. `kind` colours the heading.
-  enum class ToastKind : int { Info = 0, Unlock = 1, Problem = 2 };
-  struct Toast {
-    const char* header = nullptr; std::string title, detail, badge; u32 points = 0; int frames = 0;
-    ToastKind kind = ToastKind::Info; u64 serial = 0;
-    std::string key;   // set: replaces the toast with the same key, shown or waiting
-  };
-  u64 toast_serials = 0;
-#if DSPERATE_NIBKIT_MENU
-  ds::sdl::NibToastPainter nib_toast;
+  // A framed notice drawn over the game, one at a time, in turn (toast_queue.h):
+  // nibkit's queue in DSlot's style where DSperate has nibkit, else menu.cpp's
+  // pixel toast, whose face folds the words to capitals. `kind` colours the heading.
+  using ds::sdl::Toast;
+  using ds::sdl::ToastKind;
+  ds::sdl::ToastQueue toasts;
+#if DSPERATE_CHEEVOS
+  // RetroAchievements' progress and challenge indicators, on screen while they last.
+  ds::sdl::CheevosIndicators indicators;
 #endif
-  std::deque<Toast> toast_queue;
-  Toast toast_now;
-  int toast_left = 0;
-  // Badges by name, as the cheevos worker delivers them (docs/retroachievements.md); an
-  // unlock toast waits for its badge for up to TOAST_BADGE_WAIT frames.
-  std::map<std::string, ds::sdl::ToastImage> toast_badges;
-  std::map<std::string, std::vector<u32>> toast_badge_px;
-  int toast_wait = 0;
-  constexpr int TOAST_BADGE_WAIT = 90;
   ds::sdl::Rect toast_last{};          // what the canvas has to take back out
   constexpr int TOAST_FRAMES = 240;    // four seconds: long enough to read two lines
   constexpr int TOAST_INFO_FRAMES = 150;
@@ -3088,80 +3077,27 @@ sdl_ready:
     t.title = "Left out of the state";
     t.detail = nds.sd_card_note.find("without one") != std::string::npos ? "The state had no card" : "Its folder has changed";
     t.frames = TOAST_FRAMES * 2;
-    toast_queue.push_back(std::move(t));
+    toasts.push(std::move(t));
   };
   sd_note_toast();   // covers the state autoloaded at startup
   bool dsp_warned = false;   // the DSP warning below has been shown for this start
 
-  auto toast_step = [&] {
-    if (toast_left > 0) { --toast_left; return; }
-    if (toast_queue.empty()) return;
-    const Toast& next = toast_queue.front();
-    if (!next.badge.empty() && !toast_badges.count(next.badge) && toast_wait < TOAST_BADGE_WAIT) {
-      ++toast_wait;   // the badge is on its way: a moment more, then without it
-      return;
-    }
-    toast_wait = 0;
-    toast_now = std::move(toast_queue.front());
-    toast_queue.pop_front();
-    toast_now.serial = ++toast_serials;
-    toast_left = toast_now.frames;
-  };
-  const auto toast_on = [&] { return toast_left > 0; };
-  // A toast with a key takes the place of the one with the same key, on screen or
-  // waiting (achievement progress: one indicator, updated in place); else it queues.
-  auto toast_put = [&](Toast t) {
-    if (!t.key.empty()) {
-      if (toast_on() && toast_now.key == t.key) {
-        toast_now = std::move(t);
-        toast_now.serial = ++toast_serials;
-        toast_left = toast_now.frames;
-        return;
-      }
-      for (Toast& q : toast_queue) if (q.key == t.key) { q = std::move(t); return; }
-    }
-    toast_queue.push_back(std::move(t));
-  };
-  // Takes a keyed toast down, or out of the queue before it shows.
-  auto toast_drop = [&](const std::string& key) {
-    toast_queue.erase(std::remove_if(toast_queue.begin(), toast_queue.end(), [&](const Toast& q) { return q.key == key; }),
-                      toast_queue.end());
-    if (toast_on() && toast_now.key == key) toast_left = 1;
-  };
-  const auto toast_badge = [&]() -> const ds::sdl::ToastImage* {
-    if (toast_now.badge.empty()) return nullptr;
-    const auto it = toast_badges.find(toast_now.badge);
-    return it == toast_badges.end() ? nullptr : &it->second;
-  };
-#if DSPERATE_NIBKIT_MENU
-  // The toast's picture in DSlot's style for a target `w` x `h` pixels. Drawn
-  // once per toast and size (text rasterised: a few milliseconds) as an ordinary
-  // task, so it never counts against RLIMIT_RTTIME (rt_budget.h); kept after.
-  u64 toast_overlay_serial = 0;   // the toast the GLES presenter has as its overlay
-  auto nib_prepare = [&](int w, int h) -> bool {
-    const auto kind = static_cast<ds::sdl::NibToastPainter::Kind>(toast_now.kind);
-    if (nib_toast.prepared(toast_now.serial, w, h))
-      return nib_toast.prepare(toast_now.serial, w, h, kind, nullptr, nullptr, nullptr, 0, nullptr);
-    const auto t0 = std::chrono::steady_clock::now();
-    const ds::sdl::OffRealtime off_rt;
-    const bool ok = nib_toast.prepare(toast_now.serial, w, h, kind, toast_now.header, toast_now.title.c_str(),
-                                      toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
-                                      toast_now.points, toast_badge());
-    VLOG("toast %llu drawn for %dx%d in %.1f ms%s\n", static_cast<unsigned long long>(toast_now.serial), w, h,
-         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
-         ok ? "" : " (too small: the pixel toast instead)");
-    return ok;
-  };
-#endif
-  // Draws the toast on `c` and says what it covered.
+  // What the frame draws of them this frame: the toast and the indicators each go
+  // to the GLES presenter's overlay where there is one (set below), else here.
+  bool toast_here = false, indicators_here = false;
+  u64 toast_overlay_serial = 0, indicators_overlay_serial = 0;   // what the GLES presenter has in its slots
+  // Draws them on `c` and says what they covered.
   auto draw_toast_on = [&](const ds::sdl::Canvas& c) -> ds::sdl::Rect {
-    const char* detail = toast_now.detail.empty() ? nullptr : toast_now.detail.c_str();
-#if DSPERATE_NIBKIT_MENU
-    const bool nib_ready = nib_prepare(c.w, c.h);
-    if (nib_ready) return nib_toast.blit(c);
+    ds::sdl::Rect r = toast_here ? toasts.draw(c) : ds::sdl::Rect{};
+#if DSPERATE_CHEEVOS
+    const ds::sdl::Rect i = indicators_here ? indicators.draw(c, toasts) : ds::sdl::Rect{};
+    if (i.w && !r.w) r = i;
+    else if (i.w) {
+      const int x0 = std::min(r.x, i.x), y0 = std::min(r.y, i.y);
+      r = ds::sdl::Rect{x0, y0, std::max(r.x + r.w, i.x + i.w) - x0, std::max(r.y + r.h, i.y + i.h) - y0};
+    }
 #endif
-    ds::sdl::draw_toast(c, toast_now.header, toast_now.title.c_str(), detail, toast_now.points, toast_badge());
-    return ds::sdl::toast_rect(c, toast_now.header, toast_now.title.c_str(), detail, toast_now.points, toast_badge());
+    return r;
   };
 
 #if DSPERATE_CHEEVOS
@@ -3297,7 +3233,7 @@ sdl_ready:
     t.title = title;
     if (detail) t.detail = detail;
     t.frames = frames;
-    toast_queue.push_back(std::move(t));
+    toasts.push(std::move(t));
   };
   auto begin_guest_scan = [&] {
     guest_retry_armed = false;
@@ -3373,23 +3309,21 @@ sdl_ready:
       t.frames = TOAST_FRAMES;
       break;
     }
+    // The indicators: on screen while they last, not queued. Progress one at a
+    // time, updated in place; rcheevos says when each comes down.
     case T::Progress:
-      // One at a time, updated in place; rcheevos says when to take it down.
-      t.header = "Progress";
-      t.detail = e.progress;
-      t.badge = e.badge;
-      t.key = "progress";
-      break;
+      indicators.progress(e.id, e.title, e.progress, e.badge);
+      cheevos.client().fetch_badge(e.badge);
+      return;
     case T::ProgressHide:
-      toast_drop("progress");
+      indicators.hide_progress();
       return;
     case T::ChallengeShow:
-      t.header = "Challenge";
-      t.badge = e.badge;
-      t.key = "challenge " + std::to_string(e.id);
-      break;
+      indicators.challenge(e.id, e.badge);
+      cheevos.client().fetch_badge(e.badge);
+      return;
     case T::ChallengeHide:
-      toast_drop("challenge " + std::to_string(e.id));
+      indicators.end_challenge(e.id);
       return;
     case T::SignedIn:        t.title = "Signed in to RetroAchievements"; t.detail = e.title; break;
     case T::SignedOut:       t.title = "Signed out of RetroAchievements"; break;
@@ -3413,14 +3347,13 @@ sdl_ready:
       break;
     }
     if (!t.badge.empty()) cheevos.client().fetch_badge(t.badge);   // the worker's, from the cache or the media host
-    toast_put(std::move(t));
+    toasts.push(std::move(t));
   };
   auto cheevos_show = [&] {
     // Badges decoded by the worker: moved into the map, nothing else done here.
     for (ds::cheevos::Badge& b : cheevos.client().take_badges()) {
-      std::vector<u32>& px = toast_badge_px[b.name];
-      px = std::move(b.px);
-      toast_badges[b.name] = ds::sdl::ToastImage{b.w, b.h, px.data()};
+      toasts.badge(b.name, b.w, b.h, std::move(b.px));
+      indicators.badge_arrived(b.name);
     }
     for (const ds::cheevos::Event& e : cheevos.take_events()) {
       // Through shot_pending (hotkey's path): captures the game, not the
@@ -3562,7 +3495,7 @@ sdl_ready:
     from_list = true;
     session.open(nds, cfg, pick, nullptr);
 #if DSPERATE_CHEEVOS
-    if (cheevos_on) cheevos.change_game(nds, pick, dsi_title_cheevos_hash);
+    if (cheevos_on) { cheevos.change_game(nds, pick, dsi_title_cheevos_hash); indicators.clear(); }
 #endif
     menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
     session.load_enabled(nds);
@@ -3671,7 +3604,7 @@ sdl_ready:
         if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
         mp_ever = false;
 #if DSPERATE_CHEEVOS
-        if (cheevos_on) cheevos.after_reset();
+        if (cheevos_on) { cheevos.after_reset(); indicators.clear(); }
 #endif
         sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
         menu.set_open(false);
@@ -4097,14 +4030,14 @@ sdl_ready:
       cheevos_menu_follow();
     }
 #endif
-    toast_step();
+    toasts.tick();
 
     if (!shortcuts_note.empty()) {
       Toast t;
       t.header = "NAND shortcuts";
       t.title = std::move(shortcuts_note);
       t.frames = TOAST_INFO_FRAMES;
-      toast_queue.push_back(std::move(t));
+      toasts.push(std::move(t));
       shortcuts_note.clear();
     }
     // DSP is not emulated: say so on screen once per start.
@@ -4118,7 +4051,7 @@ sdl_ready:
         t.title = "This game likely won't work";
         t.detail = "The DSP is not emulated";
         t.frames = TOAST_FRAMES * 2;
-        toast_queue.push_back(std::move(t));
+        toasts.push(std::move(t));
       }
     }
 
@@ -4147,6 +4080,7 @@ sdl_ready:
         mp_ever = false;
 #if DSPERATE_CHEEVOS
         cheevos.after_reset();   // or rcheevos keeps counting the session the reset discarded
+        indicators.clear();
 #endif
       } else {
         nds.power_off = false;
@@ -4183,26 +4117,36 @@ sdl_ready:
       // tier), there is no panel-resolution buffer to draw a toast in: it goes
       // to the presenter as an overlay at the panel's resolution instead, and
       // the drawing below leaves it out.
-      bool toast_overlaid = false;
+      toast_here = toasts.on();
+#if DSPERATE_CHEEVOS
+      indicators_here = indicators.on();
+#endif
 #if DSPERATE_NIBKIT_MENU
       {
         int ow = 0, oh = 0;
         if (display.overlay_size(ow, oh)) {
-          if (toast_on() && nib_prepare(ow, oh)) {
-            if (toast_overlay_serial != toast_now.serial) {
-              const ds::sdl::Rect at = nib_toast.place();
-              display.set_overlay(nib_toast.rgba(), at.w, at.h, at.x, at.y);
-              toast_overlay_serial = toast_now.serial;
+          // A slot each, handed over when its picture changes, cleared when it goes.
+          const auto overlay = [&](int slot, bool drawn, const ds::sdl::ToastPicture& pic, u64& given) {
+            if (drawn) {
+              if (given != pic.serial) {
+                display.set_overlay(slot, pic.rgba.data(), pic.at.w, pic.at.h, pic.at.x, pic.at.y);
+                given = pic.serial;
+              }
+            } else if (given) {
+              display.set_overlay(slot, nullptr, 0, 0, 0, 0);
+              given = 0;
             }
-            toast_overlaid = true;
-          } else if (toast_overlay_serial) {
-            display.set_overlay(nullptr, 0, 0, 0, 0);
-            toast_overlay_serial = 0;
-          }
+            return drawn;
+          };
+          if (overlay(0, toast_here && toasts.picture(ow, oh), toasts.pic(), toast_overlay_serial)) toast_here = false;
+#if DSPERATE_CHEEVOS
+          if (overlay(1, indicators_here && indicators.picture(ow, oh, toasts), indicators.pic(), indicators_overlay_serial))
+            indicators_here = false;
+#endif
         }
       }
 #endif
-      const bool toast_here = toast_on() && !toast_overlaid;
+      const bool osd_toasts = toast_here || indicators_here;
       if (scaled) {
         // Crosshair first, still in DS pixels. Must go down before
         // finish_views(): a PiP-inset bottom screen's target is a side
@@ -4219,10 +4163,10 @@ sdl_ready:
           if (fps_field) note(draw_label(c, fps_text.c_str(), true));
           if (menu_over_live) { menu.draw(c); display.note_canvas_draw_all(); }
           // Toast's area must be handed back even the frame it stops drawing.
-          if (toast_here) toast_last = draw_toast_on(c);
+          if (osd_toasts) toast_last = draw_toast_on(c);
           if (toast_last.w) {
             note(toast_last);
-            if (!toast_here) toast_last = {};
+            if (!osd_toasts) toast_last = {};
           }
           if (flash_alpha) {
             draw_flash(c, flash_alpha);
@@ -4241,7 +4185,7 @@ sdl_ready:
           if (slot_osd) draw_label(c, slot_text.c_str(), false);
           if (fps_field) draw_label(c, fps_text.c_str(), true);
           if (menu_over_live) menu.draw(c);
-          if (toast_here) draw_toast_on(c);
+          if (osd_toasts) draw_toast_on(c);
           if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(tgt_canvas(target[i]), flash_alpha);
         }
         display.present();
@@ -4256,14 +4200,14 @@ sdl_ready:
         // Overlay layer where there is one: labels go on the panel's own
         // pixels. Flash stays below: on the overlay it'd upload every frame.
         ds::sdl::Display::CanvasView ocv;
-        const bool want_osd = slot_osd || fps_field || toast_here || menu_over_live;
+        const bool want_osd = slot_osd || fps_field || osd_toasts || menu_over_live;
         const bool osd_on_canvas = display.canvas_capable() && want_osd && display.canvas(ocv);
         if (osd_on_canvas) {
           const ds::sdl::Canvas c{ocv.px, ocv.pitch, ocv.w, ocv.h};
           const auto note = [&](const ds::sdl::Rect& r) { display.note_canvas_draw(r.x, r.y, r.w, r.h); };
           if (slot_osd) note(draw_label(c, slot_text.c_str(), false));
           if (fps_field) note(draw_label(c, fps_text.c_str(), true));
-          if (toast_here) { draw_toast_on(c); display.note_canvas_draw_all(); }
+          if (osd_toasts) { draw_toast_on(c); display.note_canvas_draw_all(); }
           if (menu_over_live) { menu.draw(c); display.note_canvas_draw_all(); }
         }
         // After the cursor, so overlays on the bottom screen keep the crosshair.
@@ -4272,7 +4216,7 @@ sdl_ready:
           const ds::sdl::Canvas od = ds_canvas(osd_fb.data());
           if (slot_osd) draw_label(od, slot_text.c_str(), false);
           if (fps_field) draw_label(od, fps_text.c_str(), true);
-          if (toast_here) draw_toast_on(od);
+          if (osd_toasts) draw_toast_on(od);
           if (menu_over_live) menu.draw(od);
           fb[osd_screen] = osd_fb.data();
         }

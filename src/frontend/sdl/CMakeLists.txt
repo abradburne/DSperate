@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
+add_executable(dsperate main.cpp toast_queue.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
   display_drm.cpp display_disp.cpp display_fbdev.cpp)
 # Required on older glibc toolchains where pthread symbols are not in libc.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -37,7 +37,7 @@ add_custom_target(dsperate_version
 target_sources(dsperate PRIVATE ${_ds_version_cpp})
 add_dependencies(dsperate dsperate_version)
 if(DSPERATE_CHEEVOS)
-  target_sources(dsperate PRIVATE cheevos_menu.cpp)
+  target_sources(dsperate PRIVATE cheevos_menu.cpp cheevos_indicators.cpp)
   target_link_libraries(dsperate PRIVATE dsperate_cheevos)
   target_compile_definitions(dsperate PRIVATE DSPERATE_CHEEVOS=1)
 endif()
@@ -82,7 +82,7 @@ if(DSPERATE_NIBKIT_MENU)
   set_target_properties(nibkit_menu PROPERTIES IMPORTED_LOCATION "${_nib_lib}"
                         INTERFACE_INCLUDE_DIRECTORIES "${DSPERATE_NIBKIT_MENU}/include")
   add_dependencies(nibkit_menu nibkit_menu_build)
-  target_sources(dsperate PRIVATE shelf_menu.cpp nib_toast.cpp)
+  target_sources(dsperate PRIVATE shelf_menu.cpp)
   target_link_libraries(dsperate PRIVATE nibkit_menu ${CMAKE_DL_LIBS} m)
   target_compile_definitions(dsperate PRIVATE DSPERATE_NIBKIT_MENU=1)
   message(STATUS "pause menu: nibkit's (${DSPERATE_NIBKIT_MENU})")

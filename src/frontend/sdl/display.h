@@ -59,7 +59,7 @@ public:
   // present tier only; false elsewhere): GlPresent::set_overlay. `w` and `h`
   // say the window's size in pixels, what (x, y) are in.
   bool overlay_size(int& w, int& h) const { return glp_ && glp_->drawable_size(w, h); }
-  void set_overlay(const u8* rgba, int w, int h, int x, int y) { if (glp_) glp_->set_overlay(rgba, w, h, x, y); }
+  void set_overlay(int slot, const u8* rgba, int w, int h, int x, int y) { if (glp_) glp_->set_overlay(slot, rgba, w, h, x, y); }
   // The renderer tier through a GLES context of its own (GlPresent) instead
   // of an SDL_Renderer: hi-res 3D, and 1x windows drawn on the present
   // thread (gl_frame_presenter.h). Set before open().
