@@ -5,9 +5,9 @@
 // queued as toasts. They are nibkit's (nib_indicators_*, the same in every
 // nibOS emulator): the progress of the achievement being measured (one at a
 // time, updated in place, until rcheevos takes it down) as a panel headed
-// "Progress", and each challenge under way as a panel of its own headed
-// "Challenge", its badge in a gold ring that pulses slowly; a challenge for the
-// achievement whose progress is shown is one panel. Stacked bottom left,
+// "Progress", and each challenge under way as an icon in a row under it: its
+// badge alone, 60% opaque, in a gold ring that pulses slowly; a challenge for
+// the achievement whose progress is shown is shown in that panel. Bottom left,
 // opposite the toasts. Not drawn without nibkit (the log has them).
 //
 // The panels are drawn once each time what they say changes; while a ring

@@ -67,15 +67,16 @@ while rcheevos says they are up:
 - **Progress** (`RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*`): a panel in the toasts'
   style headed *Progress*, the achievement, its measured progress ("5/10") and badge. One at a
   time, updated in place, taken down when rcheevos says. At the top of the corner.
-- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one a panel of its
-  own under the progress, headed *Challenge* in gold, its badge at full size (56 units) in a gold
-  ring that pulses slowly (every 1.8 s) so it reads as live, and its title; the newest last.
-  A challenge for the achievement whose progress is shown is one panel, headed *Challenge*,
-  the progress under its title. Gone when the challenge ends, the game changes or the machine
-  resets. When more are up than fit on the screen, the oldest challenges are left out.
+- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one just its badge,
+  an icon (56 units, rounded corners) in a gold ring that pulses slowly (every 1.8 s) so it
+  reads as live, the whole icon 60% opaque so the game shows through; in a row under the
+  progress, the newest at the right. A challenge for the achievement whose progress is shown is
+  no icon: the progress panel shows it, headed *Challenge*, its badge ringed. Gone when the
+  challenge ends, the game changes or the machine resets. When more are up than fit across the
+  screen, the oldest are left out.
 
-A panel whose badge is on its way waits for it up to 1.5 s, as an unlock does, then shows
-without it. The panels are drawn once each time what they say changes (as an ordinary task, off
+A panel or icon whose badge is on its way waits for it up to 1.5 s, as an unlock does, then
+shows without it (an icon as a dark square). The panel and icons are drawn once each time what they say changes (as an ordinary task, off
 the real-time class); while a ring pulses only the ring is painted again, 16 times a second, and
 handed to the GLES presenter's overlay slot then, not every frame. The clock is the frames
 played, so a pulse stops while the game is paused.
