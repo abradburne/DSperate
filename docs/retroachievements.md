@@ -60,15 +60,25 @@ Every `Event` is logged (`cheevos: ...`) and, with `cheevos.toasts` on, shown:
   back, all achievements earned.
 
 Those are toasts, one at a time in turn (nibkit's queue, below). Two things are not, because
-they last: rcheevos' **indicators** (`cheevos_indicators.cpp`), kept on screen bottom left,
-opposite the toasts, while rcheevos says they are up:
+they last: rcheevos' **indicators** (`cheevos_indicators.cpp`), nibkit's panels
+(`nib_indicators_*`, the same as inkdot's), kept on screen bottom left, opposite the toasts,
+while rcheevos says they are up:
 
 - **Progress** (`RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*`): a panel in the toasts'
   style headed *Progress*, the achievement, its measured progress ("5/10") and badge. One at a
-  time, updated in place, taken down when rcheevos says.
-- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one's badge, small
-  (40 units), rounded and three quarters opaque, in a row under the progress panel, the newest
-  at the right; nothing in its place until its badge has come. Gone when the challenge ends, the game changes or the machine resets.
+  time, updated in place, taken down when rcheevos says. At the top of the corner.
+- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one a panel of its
+  own under the progress, headed *Challenge* in gold, its badge at full size (56 units) in a gold
+  ring that pulses slowly (every 1.8 s) so it reads as live, and its title; the newest last.
+  A challenge for the achievement whose progress is shown is one panel, headed *Challenge*,
+  the progress under its title. Gone when the challenge ends, the game changes or the machine
+  resets. When more are up than fit on the screen, the oldest challenges are left out.
+
+A panel whose badge is on its way waits for it up to 1.5 s, as an unlock does, then shows
+without it. The panels are drawn once each time what they say changes (as an ordinary task, off
+the real-time class); while a ring pulses only the ring is painted again, 16 times a second, and
+handed to the GLES presenter's overlay slot then, not every frame. The clock is the frames
+played, so a pulse stops while the game is paused.
 
 They are drawn only where DSperate has nibkit; without it they are in the log alone.
 

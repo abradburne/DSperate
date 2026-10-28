@@ -16,8 +16,10 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
   achievements are unlocked and how many are unsupported. Shown even with toasts off, as
   RetroAchievements requires.
 - **Progress and challenge indicators** from rcheevos' indicator events, kept on screen bottom
-  left while they last: the measured progress of one achievement, updated in place, above a row
-  of the badges of the challenges under way.
+  left while they last, nibkit's panels (the same as inkdot's): the measured progress of one
+  achievement, updated in place, above a panel for each challenge under way, headed
+  *Challenge*, its badge in a slowly pulsing gold ring; a challenge for the achievement in
+  progress is one panel with it.
 - **Unlocks earned offline survive a quit**: each award is written to `<config>/cheevos.outbox`
   (0600, no token in it) before it is sent and struck off when the server settles it; the next
   sign-in sends what is left.

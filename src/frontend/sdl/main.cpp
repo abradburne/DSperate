@@ -3090,7 +3090,7 @@ sdl_ready:
   auto draw_toast_on = [&](const ds::sdl::Canvas& c) -> ds::sdl::Rect {
     ds::sdl::Rect r = toast_here ? toasts.draw(c) : ds::sdl::Rect{};
 #if DSPERATE_CHEEVOS
-    const ds::sdl::Rect i = indicators_here ? indicators.draw(c, toasts) : ds::sdl::Rect{};
+    const ds::sdl::Rect i = indicators_here ? indicators.draw(c) : ds::sdl::Rect{};
     if (i.w && !r.w) r = i;
     else if (i.w) {
       const int x0 = std::min(r.x, i.x), y0 = std::min(r.y, i.y);
@@ -3309,17 +3309,18 @@ sdl_ready:
       t.frames = TOAST_FRAMES;
       break;
     }
-    // The indicators: on screen while they last, not queued. Progress one at a
-    // time, updated in place; rcheevos says when each comes down.
+    // The indicators: on screen while they last, not queued (nibkit's panels,
+    // bottom left). Progress one at a time, updated in place; a challenge each;
+    // rcheevos says when each comes down.
     case T::Progress:
-      indicators.progress(e.id, e.title, e.progress, e.badge);
+      indicators.progress(e.id, e.title, e.progress, e.badge, toasts);
       cheevos.client().fetch_badge(e.badge);
       return;
     case T::ProgressHide:
       indicators.hide_progress();
       return;
     case T::ChallengeShow:
-      indicators.challenge(e.id, e.badge);
+      indicators.challenge(e.id, e.title, e.badge, toasts);
       cheevos.client().fetch_badge(e.badge);
       return;
     case T::ChallengeHide:
@@ -3353,7 +3354,7 @@ sdl_ready:
     // Badges decoded by the worker: moved into the map, nothing else done here.
     for (ds::cheevos::Badge& b : cheevos.client().take_badges()) {
       toasts.badge(b.name, b.w, b.h, std::move(b.px));
-      indicators.badge_arrived(b.name);
+      indicators.badge_arrived(b.name, toasts);
     }
     for (const ds::cheevos::Event& e : cheevos.take_events()) {
       // Through shot_pending (hotkey's path): captures the game, not the
@@ -4031,6 +4032,9 @@ sdl_ready:
     }
 #endif
     toasts.tick();
+#if DSPERATE_CHEEVOS
+    indicators.tick();
+#endif
 
     if (!shortcuts_note.empty()) {
       Toast t;
@@ -4140,7 +4144,7 @@ sdl_ready:
           };
           if (overlay(0, toast_here && toasts.picture(ow, oh), toasts.pic(), toast_overlay_serial)) toast_here = false;
 #if DSPERATE_CHEEVOS
-          if (overlay(1, indicators_here && indicators.picture(ow, oh, toasts), indicators.pic(), indicators_overlay_serial))
+          if (overlay(1, indicators_here && indicators.picture(ow, oh), indicators.pic(), indicators_overlay_serial))
             indicators_here = false;
 #endif
         }
