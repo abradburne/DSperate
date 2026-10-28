@@ -44,8 +44,4 @@ private:
   u32 max_address_ = 0;
 };
 
-// Product token sent to the RetroAchievements server. A malformed value gets
-// every endpoint refused with 403 unsupported_client.
-const char* user_agent();
-
 } // namespace ds::cheevos

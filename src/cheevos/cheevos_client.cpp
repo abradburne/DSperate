@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "cheevos/cheevos_identity.h"
 #include "cheevos/cheevos_png.h"
 #include "core/nds.h"
 #include "rc_client.h"

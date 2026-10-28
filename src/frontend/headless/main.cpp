@@ -15,6 +15,7 @@
 #include "core/io/dsi_nand_launch.h"
 #if DSPERATE_CHEEVOS
 #include "cheevos/cheevos_http.h"
+#include "cheevos/cheevos_identity.h"
 #endif
 #include "core/cpu/interp/interp.h"
 #include "core/input/input_log.h"
@@ -463,7 +464,7 @@ int main(int argc, char** argv) {
         std::string http_err;
         std::shared_ptr<ds::cheevos::Backend> http = dsi_offline ? nullptr : std::shared_ptr<ds::cheevos::Backend>(ds::cheevos::make_curl_backend(http_err));
         if (http) fetch = [http](const std::string& url, std::vector<ds::u8>& body) {
-          const ds::cheevos::Response resp = http->perform({url, {}, {}}, "DSperate");
+          const ds::cheevos::Response resp = http->perform({url, {}, {}}, ds::cheevos::product_token());
           if (resp.status != 200) return false;
           body.assign(resp.body.begin(), resp.body.end());
           return true;

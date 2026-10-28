@@ -22,6 +22,7 @@
 #include <string>
 
 #include "check.h"
+#include "cheevos/cheevos_identity.h"
 #include "cheevos/cheevos_memory.h"
 #include "core/mem/bus.h"
 #include "core/nds.h"
@@ -253,22 +254,34 @@ void a_condition_over_the_hole_never_fires() {
 
 // The string the server decides whether to talk to us at all by.
 void the_user_agent_is_well_formed() {
-  const std::string ua = cheevos::user_agent();
-  // A product token with no spaces in the product name, then rcheevos' clause:
-  // "DSperate/<version> rcheevos/<version>". RetroAchievements answers anything
-  // it cannot recognise with 403 unsupported_client.
-  CHECK(ua.rfind("DSperate/", 0) == 0);
-  const size_t sp = ua.find(' ');
-  CHECK(sp != std::string::npos);                        // there is a second clause
-  CHECK(ua.find(' ', sp + 1) == std::string::npos);      // and only one space
-  CHECK(ua.find(" rcheevos/") == sp);
+  // "DSperate-nibOS/<version> nds/<version> rcheevos/<version>": a product name of our
+  // own with no spaces (RetroAchievements refuses one that is not unique, and upstream's
+  // is "DSperate"), a core segment, then rcheevos' clause.
+  for (const cheevos::Core core : {cheevos::Core::Nds, cheevos::Core::Gba}) {
+    const std::string ua = cheevos::user_agent(core);
+    const std::string product = std::string(cheevos::kClientName) + "/";
+    CHECK(ua.rfind(product, 0) == 0);
+    CHECK(std::string(cheevos::kClientName) != "DSperate");
+    CHECK(std::string(cheevos::kClientName).find(' ') == std::string::npos);
+    CHECK(ua.rfind(cheevos::product_token(), 0) == 0);
 
-  // The version is numeric and non-empty, so the server can compare it.
-  const std::string version = ua.substr(9, sp - 9);
-  CHECK(!version.empty());
-  for (char c : version) CHECK((c >= '0' && c <= '9') || c == '.');
-  CHECK(version.find('.') != std::string::npos);
-  std::printf("cheevos_memory: user agent %s\n", ua.c_str());
+    const size_t sp1 = ua.find(' ');
+    CHECK(sp1 != std::string::npos);
+    const size_t sp2 = ua.find(' ', sp1 + 1);
+    CHECK(sp2 != std::string::npos);
+    CHECK(ua.find(' ', sp2 + 1) == std::string::npos);   // three clauses, no more
+    const std::string core_clause = ua.substr(sp1 + 1, sp2 - sp1 - 1);
+    CHECK(core_clause == std::string(core == cheevos::Core::Gba ? "gba/" : "nds/") + cheevos::client_version());
+    CHECK(ua.compare(sp2 + 1, 9, "rcheevos/") == 0);
+
+    // The version is numeric, dotted and non-empty, so the server can compare it.
+    const std::string version = ua.substr(product.size(), sp1 - product.size());
+    CHECK(version == cheevos::client_version());
+    CHECK(!version.empty());
+    for (char c : version) CHECK((c >= '0' && c <= '9') || c == '.');
+    CHECK(version.find('.') != std::string::npos);
+    std::printf("cheevos_memory: user agent %s\n", ua.c_str());
+  }
 }
 
 } // namespace

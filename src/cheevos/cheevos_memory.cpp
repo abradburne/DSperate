@@ -7,16 +7,8 @@
 #include "core/mem/bus.h"
 #include "core/nds.h"
 #include "rc_consoles.h"
-#include "rc_version.h"
 
 namespace ds::cheevos {
-
-const char* user_agent() {
-  // "DSperate/<tag> rcheevos/<ver>"
-  static const std::string ua = std::string("DSperate/") + DSPERATE_CHEEVOS_VERSION +
-                                " rcheevos/" + RCHEEVOS_VERSION_STRING;
-  return ua.c_str();
-}
 
 bool Memory::attach(NDS& nds, std::string& err) {
   err.clear();

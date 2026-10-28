@@ -21,6 +21,7 @@ add_library(dsperate_cheevos STATIC
   cheevos_http.cpp
   cheevos_client.cpp
   cheevos_png.cpp
+  cheevos_identity.cpp
   ${RC_DIR}/src/rc_client.c
   ${RC_API_SOURCES}
   ${RC_RUNTIME_SOURCES}
@@ -44,23 +45,26 @@ target_compile_definitions(dsperate_cheevos PRIVATE
   RC_HASH_NO_DISC RC_HASH_NO_ENCRYPTED RC_HASH_NO_ZIP RC_DISABLE_LUA)
 target_include_directories(dsperate_cheevos PRIVATE ${RC_DIR}/src/rapi)
 
-# User-Agent version DSperate reports (load-bearing, see cheevos_memory.h).
-# Taken from the latest git tag; the literal below is the fallback for a
-# tarball build or a checkout with no tags.
-set(DSPERATE_CHEEVOS_VERSION "" CACHE STRING "Version DSperate reports to RetroAchievements (default: latest git tag)")
-if(NOT DSPERATE_CHEEVOS_VERSION)
-  execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} describe --tags --abbrev=0
-                  OUTPUT_VARIABLE _ds_tag OUTPUT_STRIP_TRAILING_WHITESPACE
-                  ERROR_QUIET RESULT_VARIABLE _ds_tag_rc)
-  if(_ds_tag_rc EQUAL 0 AND _ds_tag MATCHES "^v?([0-9]+\\.[0-9]+(\\.[0-9]+)?)$")
-    set(DSPERATE_CHEEVOS_VERSION "${CMAKE_MATCH_1}")
+# The version in DSperate's User-Agent (cheevos_identity.h): "0.<n>", n the fork's commit
+# count since upstream 7c1fb67, the number in the package's pkgver (packaging/arch/PKGBUILD).
+# RetroAchievements wants a numeric version that increases; upstream's tags do not follow
+# this fork. Taken at configure time; a tree without git history reports 0.0.
+set(DSPERATE_CHEEVOS_VERSION "" CACHE STRING "Version DSperate reports to RetroAchievements (default: 0.<commits since 7c1fb67>)")
+set(_ds_ra_version "${DSPERATE_CHEEVOS_VERSION}")
+if(NOT _ds_ra_version)
+  execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-list --count 7c1fb67..HEAD
+                  OUTPUT_VARIABLE _ds_count OUTPUT_STRIP_TRAILING_WHITESPACE
+                  ERROR_QUIET RESULT_VARIABLE _ds_count_rc)
+  if(_ds_count_rc EQUAL 0 AND _ds_count MATCHES "^[0-9]+$")
+    set(_ds_ra_version "0.${_ds_count}")
   else()
-    set(DSPERATE_CHEEVOS_VERSION "1.13.1")
+    set(_ds_ra_version "0.0")
+    message(WARNING "DSperate: no git history to count; RetroAchievements will see version 0.0")
   endif()
 endif()
-message(STATUS "DSperate: RetroAchievements client version ${DSPERATE_CHEEVOS_VERSION}")
+message(STATUS "DSperate: RetroAchievements client version ${_ds_ra_version}")
 target_compile_definitions(dsperate_cheevos PRIVATE
-  DSPERATE_CHEEVOS_VERSION="${DSPERATE_CHEEVOS_VERSION}")
+  DSPERATE_CHEEVOS_VERSION="${_ds_ra_version}")
 
 # dsperate_core knows nothing about achievements; the dependency runs this way.
 target_link_libraries(dsperate_cheevos PUBLIC dsperate_core ${CMAKE_DL_LIBS})
