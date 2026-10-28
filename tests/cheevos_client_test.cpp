@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
-// The credential sidecar. No
+// The credential files and which one wins. No
 // network: what is tested is that the token is stored the way a credential has
 // to be, because the token alone is enough to act as the player on
 // RetroAchievements.
@@ -13,7 +13,7 @@
 #include <unistd.h>
 
 #include "check.h"
-#include "cheevos/cheevos_client.h"
+#include "cheevos/cheevos_credentials.h"
 
 using namespace ds;
 
@@ -244,6 +244,91 @@ void a_token_file_is_read() {
   remove_dir(dir);
 }
 
+// Which sign-in wins (cheevos_credentials.h): the player's token file, the launcher's,
+// DSperate's own, the system's, in that order; one that cannot be used is reported and
+// the next tried.
+void the_sign_in_precedence_holds() {
+  const std::string dir = make_dir();
+  // No real system sign-in may leak in: HOME and the CFW override point into the scratch dir.
+  const char* old_home = std::getenv("HOME");
+  const std::string saved_home = old_home ? old_home : "";
+  ::setenv("HOME", dir.c_str(), 1);
+  ::setenv("DS_CHEEVOS_CFW_CONFIG", (dir + "/system.cfg").c_str(), 1);
+
+  auto write = [&](const std::string& name, const char* body) {
+    std::FILE* f = std::fopen((dir + "/" + name).c_str(), "w");
+    CHECK(f != nullptr);
+    std::fputs(body, f);
+    std::fclose(f);
+    return dir + "/" + name;
+  };
+  const std::string player = write("player.token", "playertoken");
+  const std::string dslot = write("dslot.token", "dslotuser\ndslottoken\n");
+  const std::string bare = write("bare.token", "baretoken");
+  write("system.cfg", "cheevos_username = \"sysuser\"\ncheevos_token = \"systoken\"\n");
+  std::string err;
+  CHECK(cheevos::save_credentials(dir, {"ownuser", "owntoken"}, err));
+
+  cheevos::CredentialInputs in;
+  in.config_dir = dir;
+  in.username = "cfguser";
+
+  // The player's token file, with the configured username, wins over the launcher's.
+  in.token_file = player;
+  in.launcher_token_file = dslot;
+  CHECK(!in.launcher_owned());
+  cheevos::ResolvedCredentials r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::TokenFile);
+  CHECK(r.creds.username == "cfguser" && r.creds.token == "playertoken");
+
+  // No token file named: the launcher's sign-in, which the launcher owns.
+  in.token_file.clear();
+  CHECK(in.launcher_owned());
+  r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::Launcher);
+  CHECK(r.creds.username == "dslotuser" && r.creds.token == "dslottoken");
+  CHECK(r.from == dslot);
+
+  // A bare token from the launcher takes RA_USERNAME before the config's username.
+  in.launcher_token_file = bare;
+  in.launcher_username = "envuser";
+  r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::Launcher);
+  CHECK(r.creds.username == "envuser" && r.creds.token == "baretoken");
+
+  // An unreadable launcher file: reported, and DSperate's own sign-in is used.
+  in.launcher_token_file = dir + "/gone.token";
+  r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::Own);
+  CHECK(r.creds.username == "ownuser" && r.creds.token == "owntoken");
+  CHECK(r.problems.find("gone.token") != std::string::npos);
+
+  // A bare token with no username from anywhere is not usable.
+  in.launcher_token_file.clear();
+  in.launcher_username.clear();
+  in.token_file = bare;
+  in.username.clear();
+  r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::Own);
+  CHECK(r.problems.find("no username") != std::string::npos);
+
+  // Nothing of DSperate's own: the system's, unless that is turned off.
+  in.token_file.clear();
+  cheevos::clear_credentials(dir);
+  r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::System);
+  CHECK(r.creds.username == "sysuser" && r.creds.token == "systoken");
+  in.use_system_login = false;
+  r = cheevos::resolve_credentials(in);
+  CHECK(r.source == cheevos::CredentialSource::None);
+  CHECK(r.creds.empty());
+
+  ::unsetenv("DS_CHEEVOS_CFW_CONFIG");
+  if (old_home) ::setenv("HOME", saved_home.c_str(), 1); else ::unsetenv("HOME");
+  for (const char* n : {"player.token", "dslot.token", "bare.token", "system.cfg"}) ::unlink((dir + "/" + n).c_str());
+  remove_dir(dir);
+}
+
 } // namespace
 
 int main() {
@@ -256,6 +341,7 @@ int main() {
   an_incomplete_file_is_rejected();
   the_cfw_sign_in_is_imported();
   a_token_file_is_read();
+  the_sign_in_precedence_holds();
   std::printf("cheevos_client: ok\n");
   return 0;
 }

@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "cheevos/cheevos_credentials.h"
 #include "cheevos/cheevos_http.h"
 #include "cheevos/cheevos_memory.h"
 #include "core/types.h"
@@ -168,30 +169,5 @@ private:
   std::vector<std::string> badges_asked_;
   bool stop_ = false;
 };
-
-// Credential file is mode 0600: the token alone is enough to act as the
-// player. Password is never stored.
-struct Credentials {
-  std::string username;
-  std::string token;
-  bool empty() const { return username.empty() || token.empty(); }
-};
-// `dir` is the config directory. A missing file yields empty credentials, not an error.
-bool load_credentials(const std::string& dir, Credentials& out, std::string& err);
-bool save_credentials(const std::string& dir, const Credentials& in, std::string& err);
-void clear_credentials(const std::string& dir);
-
-// Credentials the CFW already holds from its own sign-in (ROCKNIX
-// system.cfg, RetroArch retroarch.cfg). Only the token is read; the
-// cleartext password in these files is never touched. Never writes.
-// read_cfw_credentials parses one file; import_cfw_credentials walks the
-// known locations, reporting which one it used in `source`.
-
-// Token file named via --cheevos-token: PPSSPP's token-only format, or our
-// own "username\ntoken" format.
-bool read_token_file(const std::string& path, Credentials& out, std::string& err);
-
-bool read_cfw_credentials(const std::string& path, Credentials& out);
-bool import_cfw_credentials(Credentials& out, std::string& source);
 
 } // namespace ds::cheevos
