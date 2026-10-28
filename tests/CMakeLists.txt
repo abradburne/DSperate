@@ -155,6 +155,12 @@ if(DSPERATE_CHEEVOS)
   target_link_libraries(test_cheevos_client PRIVATE dsperate_cheevos)
   add_test(NAME cheevos_client COMMAND test_cheevos_client)
 
+  # The outbox of unconfirmed unlocks (cheevos_outbox.cpp), against rcheevos' own requests.
+  add_executable(test_cheevos_outbox cheevos_outbox_test.cpp)
+  target_link_libraries(test_cheevos_outbox PRIVATE dsperate_cheevos)
+  target_include_directories(test_cheevos_outbox PRIVATE ${CMAKE_SOURCE_DIR}/src/cheevos/rcheevos/include)
+  add_test(NAME cheevos_outbox COMMAND test_cheevos_outbox)
+
   # The badge PNG decoder (cheevos_png.cpp).
   add_executable(test_cheevos_png cheevos_png_test.cpp)
   target_link_libraries(test_cheevos_png PRIVATE dsperate_cheevos)
