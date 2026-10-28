@@ -12,6 +12,13 @@ GBA = ["/usr/bin/dsperate", "--gba", "{options}", "--saves", "{saves}", "--state
 [env]
 DS_DEBUG = "marks"
 
+# Where playing earns RetroAchievements (nibkit 0.2.0's [achievements]): DSlot passes the
+# player's sign-in (RA_TOKEN_FILE, RA_USERNAME, RA_HARDCORE) to these systems' games only.
+# Casual only for now: DSperate forces hardcore off.
+[achievements]
+systems = ["NDS"]
+hardcore = false
+
 # Put in place before a game starts when missing; never overwritten.
 [[seed]]
 from = "/usr/share/dsperate/dslot/dsperate.ini"
