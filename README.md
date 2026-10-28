@@ -117,9 +117,11 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   code and header checksum, toggled per game from the pause menu.
 - **RetroAchievements** (Casual mode only, no Hardcore) via rcheevos: sign in
   with a username or a token the CFW already holds (or the launcher's sign-in,
-  `RA_TOKEN_FILE` in the environment: DSlot on nibOS), unlock toasts, an
-  achievements list and account page in the pause menu, encore mode, and an
-  optional screenshot on unlock. The unlock toast shows the achievement's
+  `RA_TOKEN_FILE` in the environment: DSlot on nibOS), the mode and the count
+  shown as a game starts, unlock, progress and challenge toasts, unlocks earned
+  offline kept until the server has them (across a quit too), an achievements
+  list and account page in the pause menu, encore mode, and an optional
+  screenshot on unlock. It calls itself `DSperate-nibOS` to the server. The unlock toast shows the achievement's
   badge, fetched off the emulation thread into a cache shared with DSlot, and
   every toast is drawn in DSlot's style through nibkit where it is built in
   (docs/retroachievements.md). DS games and DSiWare, however they are

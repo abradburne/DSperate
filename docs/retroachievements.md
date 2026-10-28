@@ -1,20 +1,136 @@
 # RetroAchievements in DSperate
 
-How the RetroAchievements pieces fit the frontend. The client itself (`src/cheevos/`,
-`rc_client` over the vendored rcheevos, libcurl through `dlopen`) is described in the source;
-this page covers what the player sees and what runs where.
+How the RetroAchievements pieces fit together, what the player sees and what runs where.
+DSperate plays **Casual** (softcore) only: hardcore stays off until RetroAchievements has
+approved the emulator.
+
+## The pieces
+
+`src/cheevos/` is a library of its own (`dsperate_cheevos`), with no screen in it:
+
+| File | What it is |
+| --- | --- |
+| `cheevos_identity` | the name DSperate gives the server (below) |
+| `cheevos_client` | `rc_client` over the vendored rcheevos 12.4, behind a pimpl: sign-in, the set, per-frame evaluation, typed `Event`s out |
+| `cheevos_session` | one run as a frontend drives it: the sign-in at start and who keeps it, the game's identity, the set asked for once signed in, a save state's progress held until the set is there, the account page's list |
+| `cheevos_credentials` | the sign-in files and which wins (unit-tested) |
+| `cheevos_outbox` | unlocks the server has not confirmed, on disk (unit-tested) |
+| `cheevos_badges` | the badge cache shared with DSlot, and the media host behind it |
+| `cheevos_http` | libcurl through `dlopen`, abortable |
+
+The credentials, the outbox and the badges sit behind small interfaces of their own so they
+can move into a library DSlot and the other emulators share.
+
+The SDL frontend holds one `cheevos::Session` for the run (declared before any state can load,
+so a state's progress is never lost), calls `frame(nds)` once per emulated frame (the extra frame
+an autosave runs for its thumbnail included) and `idle(nds)` while paused, `after_reset()` on
+every reset (the menu's and the firmware's power-off reboot), and maps each `Event` to a toast in
+one place, `cheevos_toast` in `main.cpp`. The pause menu's pages read the session through
+`cheevos_menu.cpp`.
+
+## The name on the wire
+
+RetroAchievements tells clients apart by the User-Agent's product token, refuses one that is
+not unique, and wants a numeric version that rises. DSperate sends
+
+    DSperate-nibOS/0.<n> nds/0.<n> rcheevos/12.4
+
+`DSperate-nibOS` is `kClientName` in `cheevos_identity.h`, the one place it is spelled. `<n>` is
+the fork's commit count since upstream 7c1fb67, the same number as the package's pkgver
+(`0.r7c1fb67.<n>.<commit>`), so it rises with every commit and names the build; CMake takes it at
+configure time (`-DDSPERATE_CHEEVOS_VERSION=` overrides it). The `nds` segment is the core, as
+RetroAchievements advises for an emulator of more than one system (`gba` when GBA plays with
+achievements). The last clause is `rc_client_get_user_agent_clause`'s. The DSi TMD download sends
+the product token alone.
+
+**Earlier identity, to disclose when applying:** until 0.r7c1fb67.225 this fork sent upstream
+beebono/DSperate's User-Agent unchanged, `DSperate/<upstream's latest tag> rcheevos/12.4`
+(`DSperate/3.0.5 rcheevos/12.4` in the builds that went out, `DSperate/1.13.1` without tags).
+
+## What the player is told
+
+Every `Event` is logged (`cheevos: ...`) and, with `cheevos.toasts` on, shown:
+
+- **The placard**, as a game's set loads: *RetroAchievements: Casual*, the game, "12 of 40
+  unlocked" and how many are unsupported (a condition reads memory DSperate does not map).
+  RetroAchievements requires the mode to be shown at game start in every mode, so this one is
+  shown even with toasts off.
+- **An unlock**: *Achievement unlocked*, title, description, points, badge (below).
+- **Progress** (`RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*`): the achievement and its
+  measured progress ("5/10"). One at a time, updated in place, taken down when rcheevos says.
+- **A challenge** under way (`..._CHALLENGE_INDICATOR_SHOW`): the achievement, with its badge;
+  taken down (or never shown, if still waiting) when the challenge ends.
+- Sign-in, sign-out, a ROM RetroAchievements does not know, server errors, going offline and
+  back, all achievements earned.
+
+The toast queue shows one at a time; a toast with a key (progress, a challenge) replaces the
+waiting or shown one with the same key. A challenge is therefore announced, not kept on screen
+while it lasts: that waits for nibkit's shared toast queue.
+
+Leaderboards are submitted by `rc_client` as it finds them; nothing is drawn for them yet.
+
+## Sign-in: who keeps it
+
+Tried in order (`resolve_credentials`): a token file the player named (`cheevos.token_file`,
+`--cheevos-token`), the launcher's (`RA_TOKEN_FILE`, `RA_USERNAME`), DSperate's own
+`<config>/cheevos.token`, the CFW front end's (`cheevos.use_system_login`). The first that gives
+a username and a token is used; the others that failed are logged.
+
+**Started by DSlot** (`RA_TOKEN_FILE` set): DSlot owns `~/.config/dslot/retroachievements.token`.
+Signing in or out from DSperate's pause menu lasts for that run and writes nothing; a toast says
+to sign in or out in DSlot to keep it. **Run on its own**: a password sign-in from the menu keeps
+the token in `<config>/cheevos.token` (0600; the password is never stored), and signing out
+removes that file. A token file the player named, or the CFW's, is never written or removed.
+
+`RA_HARDCORE=1` is noted in the log; Casual is what is played.
+
+## Unlocks earned offline
+
+When `rc_client` asks to award an achievement, the request is parsed (`parse_award_request`) and
+the unlock written to `<config>/cheevos.outbox` (0600, renamed into place) before it is sent: the
+user, the achievement, the game's hash and when it was earned, never the token. The server's answer
+strikes it off once it settles the award (any answer but none at all, a 5xx, 401, 403, 408 or 429).
+While the run lasts, `rc_client` retries on its own (*RetroAchievements offline* ... *reconnected*).
+If DSperate quits first, the next sign-in as the same user sends what is left, signed with that
+day's token and saying how long ago each was earned (`seconds_since_unlock`); a reconnect sends
+them again if they failed.
+
+A request that never reached the server (DNS, connect, TLS, a timeout) goes back to rcheevos as
+`RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR` with curl's error as the body, which rcheevos
+retries and logs.
+
+## Threads and quitting
+
+`rc_client` and every callback run on the emulation thread. One worker thread (SCHED_OTHER,
+nice 10) carries the HTTP: rcheevos' requests (sign-in, the set, unlocks, pings) always first,
+badge downloads in a lane of their own behind them. Quitting sets a stop flag that libcurl's
+progress callback (`CURLOPT_XFERINFOFUNCTION`) checks about once a second, so a request in flight
+is abandoned instead of waited out (up to 40 s before); whatever was unconfirmed stays in the
+outbox.
+
+## Logging
+
+rcheevos' warnings and errors are always logged (`cheevos: rc: ...`); with `DS_CHEEVOS_VERBOSE=1`
+its verbose log too, and every request and response.
+
+## GBA
+
+GBA games get no achievements yet. It would take `Memory::attach` for rcheevos' GBA map (32 KB
+IWRAM, 256 KB EWRAM, the cart's save RAM), the ROM's hash for `RC_CONSOLE_GAMEBOY_ADVANCE`,
+`Session::identify` and `frame` in the GBA mode's loop, and `Core::Gba` at load.
 
 ## Unlock toast
 
-When `rc_client` fires `RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED`, the client posts a
-`Message` of kind `Unlock`: the title, the description, the points and the **badge name**
-(`rc_client_achievement_t::badge_name`). The frontend's `cheevos_show()` turns it into a
-`Toast` (*Achievement unlocked*, four seconds, bottom right of the panel) and asks the client
-for the badge image with `Client::fetch_badge(name)`.
+When `rc_client` fires `RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED`, the client posts an `Event` of
+type `Unlock`: the id, title, description, points, unlock time and the **badge name**
+(`rc_client_achievement_t::badge_name`). `cheevos_toast()` turns it into a `Toast`
+(*Achievement unlocked*, four seconds, bottom right of the panel) and asks the client for the
+badge image with `Client::fetch_badge(name)`; progress and challenge toasts ask for theirs too.
 
 The badge is fetched and decoded **on the cheevos worker thread**, the one that already
-carries every HTTP request (SCHED_OTHER, nice 10): nothing of it touches the emulation thread,
-the real-time budget (`rt_budget.h`) or a frame. The worker:
+carries every HTTP request (SCHED_OTHER, nice 10), when it has no rcheevos request waiting:
+nothing of it touches the emulation thread, the real-time budget (`rt_budget.h`) or a frame.
+The worker (`load_badge` in `cheevos_badges.cpp`):
 
 1. looks for `<cache>/retroachievements/badges/<name>.png`, where `<cache>` is
    `$XDG_CACHE_HOME` or `~/.cache`. This folder is **shared with DSlot**, which writes the same
@@ -25,7 +141,7 @@ the real-time budget (`rt_budget.h`) or a frame. The worker:
    8-bit greyscale, RGB, palette, grey+alpha and RGBA, palette and grey at 1/2/4 bits too,
    filters 0–4, no interlace) into `0xAARRGGBB` pixels and queues a `Badge` for the frontend.
 
-`cheevos_show()` drains `Client::take_badges()` into a map by name each frame (a move of a
+`cheevos_show()` drains `take_badges()` into a map by name each frame (a move of a
 vector, nothing more). `toast_step()` holds an unlock toast back for up to 90 frames (1.5 s)
 while its badge is still on its way, then shows it with or without.
 
