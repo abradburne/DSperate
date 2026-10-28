@@ -21,6 +21,7 @@ add_library(dsperate_cheevos STATIC
   cheevos_http.cpp
   cheevos_client.cpp
   cheevos_credentials.cpp
+  cheevos_badges.cpp
   cheevos_outbox.cpp
   cheevos_png.cpp
   cheevos_identity.cpp
