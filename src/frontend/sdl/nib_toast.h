@@ -34,7 +34,8 @@ public:
   // Whether prepare() has been asked for toast `serial` on a canvas of `c`'s
   // size already (made or not): then it only answers.
   bool prepared(u64 serial, int cw, int ch) const { return serial == serial_ && cw == cw_ && ch == ch_; }
-  // Where the prepared picture goes on its target: bottom right.
+  // Where the prepared picture goes on its target: nibkit's place for a toast
+  // (nib_toast_place), bottom right a margin in.
   Rect place() const;
   // Its pixels: RGBA bytes with straight alpha, rows top first, place()'s size.
   const u8* rgba() const { return ok_ ? rgba_.data() : nullptr; }
@@ -44,7 +45,8 @@ public:
 private:
   NibToast* t_ = nullptr;
   u64 serial_ = ~u64{0};
-  int cw_ = 0, ch_ = 0, w_ = 0, h_ = 0, margin_ = 0;
+  int cw_ = 0, ch_ = 0, w_ = 0, h_ = 0;
+  float scale_ = 1.0f;
   bool ok_ = false;
   std::vector<u32> px_;   // 0xAARRGGBB, straight alpha
   std::vector<u8> rgba_;  // the same as nibkit drew it

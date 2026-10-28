@@ -12,7 +12,6 @@ namespace {
 // The face is drawn for the screen's 1024 units; below half that it is too
 // small to read, and the pixel toast reads better.
 constexpr float kLeastScale = 0.5f;
-constexpr float kMarginUnits = 24.0f;
 } // namespace
 
 NibToastPainter::NibToastPainter() : t_(nib_toast_new()) {}
@@ -27,6 +26,7 @@ bool NibToastPainter::prepare(u64 serial, int cw, int ch, Kind kind, const char*
   ch_ = ch;
   ok_ = false;
   const float scale = std::min(cw / 1024.0f, ch / 768.0f);
+  scale_ = scale;
   if (!t_ || scale < kLeastScale) return false;
   const u8* rgba = nullptr;
   if (badge && badge->px && badge->w > 0 && badge->h > 0) {
@@ -49,7 +49,6 @@ bool NibToastPainter::prepare(u64 serial, int cw, int ch, Kind kind, const char*
   rgba_.assign(out, out + static_cast<size_t>(w) * h * 4);
   w_ = w;
   h_ = h;
-  margin_ = static_cast<int>(kMarginUnits * scale + 0.5f);
   px_.resize(static_cast<size_t>(w) * h);
   for (size_t i = 0; i < px_.size(); ++i) {
     const u8* p = out + i * 4;
@@ -61,7 +60,9 @@ bool NibToastPainter::prepare(u64 serial, int cw, int ch, Kind kind, const char*
 
 Rect NibToastPainter::place() const {
   if (!ok_) return {};
-  return Rect{std::max(0, cw_ - w_ - margin_), std::max(0, ch_ - h_ - margin_), w_, h_};
+  int x = 0, y = 0;
+  nib_toast_place(cw_, ch_, scale_, w_, h_, &x, &y);   // nibkit's corner, every app's
+  return Rect{x, y, w_, h_};
 }
 
 Rect NibToastPainter::blit(const Canvas& c) const {
