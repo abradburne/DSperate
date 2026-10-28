@@ -4,7 +4,8 @@
 // RetroAchievements' indicators, kept on screen while they last rather than
 // queued as toasts: the progress of the achievement being measured (one at a
 // time, updated in place, until rcheevos takes it down) above the badges of the
-// challenges under way. Bottom left, opposite the toasts. Drawn in DSlot's style
+// challenges under way (small, rounded, a little see-through; drawn once each badge
+// has come). Bottom left, opposite the toasts. Drawn in DSlot's style
 // where DSperate is built with nibkit; not drawn without it (the log has them).
 #include "core/types.h"
 #include "frontend/sdl/toast_queue.h"

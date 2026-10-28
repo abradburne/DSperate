@@ -14,6 +14,12 @@
 namespace ds::sdl {
 
 #if DSPERATE_NIBKIT_MENU
+// A challenge's badge, in nibkit's units (a 1024-wide screen): about a third the size
+// of the toast's height, corners like the menu's, three quarters opaque.
+constexpr float kChallengeTile = 40.0f;
+constexpr float kChallengeRadius = 6.0f;
+constexpr float kChallengeAlpha = 192.0f;
+
 struct CheevosIndicators::Nib {
   NibToast* t = nib_toast_new();
   ~Nib() { nib_toast_free(t); }
@@ -93,10 +99,16 @@ bool CheevosIndicators::picture(int w, int h, const ToastQueue& badges) {
   // nibkit's corner margin, mirrored to the left; 16 units without a panel to measure.
   const int margin = panel ? std::max(0, w - px - pw) : static_cast<int>(std::lround(16.0f * scale));
 
-  // The challenges: their badges in a row, the newest at the right.
-  const int tile = std::max(8, static_cast<int>(std::lround(56.0f * scale)));
-  const int gap = std::max(2, static_cast<int>(std::lround(8.0f * scale)));
-  const int n = static_cast<int>(challenges_.size());
+  // The challenges: their badges in a row, the newest at the right, small, rounded and a
+  // little see-through so they sit over the game without shouting. One whose badge hasn't
+  // come yet isn't drawn (its place stays empty until it does).
+  std::vector<const ToastImage*> shown;
+  for (const Challenge& c : challenges_)
+    if (const ToastImage* img = badges.badge_image(c.badge); img && img->px) shown.push_back(img);
+  const int tile = std::max(8, static_cast<int>(std::lround(kChallengeTile * scale)));
+  const int gap = std::max(2, static_cast<int>(std::lround(6.0f * scale)));
+  const float radius = kChallengeRadius * scale;
+  const int n = static_cast<int>(shown.size());
   const int row_w = n ? n * tile + (n - 1) * gap : 0;
   const int pic_w = std::max(pw, row_w);
   const int pic_h = ph + (panel && n ? gap : 0) + (n ? tile : 0);
@@ -105,18 +117,24 @@ bool CheevosIndicators::picture(int w, int h, const ToastQueue& badges) {
   std::vector<u8> out(static_cast<size_t>(pic_w) * pic_h * 4, 0);
   for (int y = 0; y < ph; ++y)
     std::copy_n(panel + static_cast<size_t>(y) * pw * 4, static_cast<size_t>(pw) * 4, out.data() + static_cast<size_t>(y) * pic_w * 4);
+  // How much of the pixel at (x, y) is inside a tile with rounded corners: 0 outside the
+  // corner's arc, 1 inside, a little of both along it.
+  auto inside = [&](int x, int y) {
+    const float cx = std::clamp(x + 0.5f, radius, tile - radius), cy = std::clamp(y + 0.5f, radius, tile - radius);
+    const float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+    return std::clamp(radius + 0.5f - std::sqrt(dx * dx + dy * dy), 0.0f, 1.0f);
+  };
   for (int i = 0; i < n; ++i) {
     const int x0 = i * (tile + gap), y0 = pic_h - tile;
-    const ToastImage* img = badges.badge_image(challenges_[static_cast<size_t>(i)].badge);
+    const ToastImage* img = shown[static_cast<size_t>(i)];
     for (int y = 0; y < tile; ++y) {
       u8* d = out.data() + (static_cast<size_t>(y0 + y) * pic_w + x0) * 4;
       for (int x = 0; x < tile; ++x, d += 4) {
-        u32 p = 0xB0202020u;   // the badge still on its way: a dim square in its place
-        if (img && img->px) p = img->px[(y * img->h / tile) * img->w + x * img->w / tile] | 0xFF000000u;
+        const u32 p = img->px[(y * img->h / tile) * img->w + x * img->w / tile];
         d[0] = static_cast<u8>(p >> 16);
         d[1] = static_cast<u8>(p >> 8);
         d[2] = static_cast<u8>(p);
-        d[3] = static_cast<u8>(p >> 24);
+        d[3] = static_cast<u8>(std::lround(kChallengeAlpha * inside(x, y)));
       }
     }
   }

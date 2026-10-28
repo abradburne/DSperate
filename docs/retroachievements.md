@@ -66,9 +66,9 @@ opposite the toasts, while rcheevos says they are up:
 - **Progress** (`RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*`): a panel in the toasts'
   style headed *Progress*, the achievement, its measured progress ("5/10") and badge. One at a
   time, updated in place, taken down when rcheevos says.
-- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one's badge, in a
-  row under the progress panel, the newest at the right, a dim square while a badge is on its
-  way. Gone when the challenge ends, the game changes or the machine resets.
+- **Challenges** under way (`..._CHALLENGE_INDICATOR_SHOW` / `_HIDE`): each one's badge, small
+  (40 units), rounded and three quarters opaque, in a row under the progress panel, the newest
+  at the right; nothing in its place until its badge has come. Gone when the challenge ends, the game changes or the machine resets.
 
 They are drawn only where DSperate has nibkit; without it they are in the log alone.
 
