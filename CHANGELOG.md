@@ -5,6 +5,13 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
 
 ## Unreleased
 
+### Volume and brightness
+
+- **The volume and brightness indicator** (nibkit-menu-c 0.2.3's `nib_levels_*`): when the volume
+  keys or Menu + volume change a level, nibkit's panel shows at the bottom right of the top
+  screen, in DS and GBA mode, and fades 1.5 s after the last press; a toast in that corner moves
+  up above it. Built against an older nibkit-menu-c, or run with one, DSperate shows none.
+
 ### RetroAchievements
 
 - **GBA games earn achievements** in GBA mode, with everything DS games have: the Casual
