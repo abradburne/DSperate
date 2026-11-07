@@ -51,6 +51,7 @@
 #include "loader_cart.h"
 #include "menu.h"
 #include "toast_queue.h"
+#include "level_indicator.h"
 #if DSPERATE_NIBKIT_MENU
 #include "shelf_menu.h"
 #include <nibkit_menu.h>
@@ -3086,9 +3087,23 @@ sdl_ready:
   // to the GLES presenter's overlay where there is one (set below), else here.
   bool toast_here = false, indicators_here = false;
   u64 toast_overlay_serial = 0, indicators_overlay_serial = 0;   // what the GLES presenter has in its slots
+  // The volume and brightness indicator (level_indicator.h): bottom right, the
+  // toast moved up above it while both show.
+  ds::sdl::LevelIndicator levels;
+  bool levels_here = false;
+  u64 levels_overlay_serial = 0;
+  int toast_overlay_lift = 0;   // how far up the toast in its slot was handed over
   // Draws them on `c` and says what they covered.
   auto draw_toast_on = [&](const ds::sdl::Canvas& c) -> ds::sdl::Rect {
     ds::sdl::Rect r = toast_here ? toasts.draw(c) : ds::sdl::Rect{};
+    if (levels_here) {
+      const ds::sdl::Rect l = levels.draw(c);
+      if (l.w && !r.w) r = l;
+      else if (l.w) {
+        const int x0 = std::min(r.x, l.x), y0 = std::min(r.y, l.y);
+        r = ds::sdl::Rect{x0, y0, std::max(r.x + r.w, l.x + l.w) - x0, std::max(r.y + r.h, l.y + l.h) - y0};
+      }
+    }
 #if DSPERATE_CHEEVOS
     const ds::sdl::Rect i = indicators_here ? indicators.draw(c) : ds::sdl::Rect{};
     if (i.w && !r.w) r = i;
@@ -4126,16 +4141,21 @@ sdl_ready:
 #if DSPERATE_CHEEVOS
       indicators_here = indicators.on();
 #endif
+      levels.tick();
+      levels_here = levels.on();
 #if DSPERATE_NIBKIT_MENU
       {
         int ow = 0, oh = 0;
         if (display.overlay_size(ow, oh)) {
           // A slot each, handed over when its picture changes, cleared when it goes.
-          const auto overlay = [&](int slot, bool drawn, const ds::sdl::ToastPicture& pic, u64& given) {
+          // `lift`: how far up from its place it goes (the toast, over the level indicator).
+          const auto overlay = [&](int slot, bool drawn, const ds::sdl::ToastPicture& pic, u64& given, int lift = 0,
+                                   int* lift_given = nullptr) {
             if (drawn) {
-              if (given != pic.serial) {
-                display.set_overlay(slot, pic.rgba.data(), pic.at.w, pic.at.h, pic.at.x, pic.at.y);
+              if (given != pic.serial || (lift_given && *lift_given != lift)) {
+                display.set_overlay(slot, pic.rgba.data(), pic.at.w, pic.at.h, pic.at.x, std::max(0, pic.at.y - lift));
                 given = pic.serial;
+                if (lift_given) *lift_given = lift;
               }
             } else if (given) {
               display.set_overlay(slot, nullptr, 0, 0, 0, 0);
@@ -4143,7 +4163,10 @@ sdl_ready:
             }
             return drawn;
           };
-          if (overlay(0, toast_here && toasts.picture(ow, oh), toasts.pic(), toast_overlay_serial)) toast_here = false;
+          if (overlay(2, levels_here && levels.picture(ow, oh), levels.pic(), levels_overlay_serial)) levels_here = false;
+          if (overlay(0, toast_here && toasts.picture(ow, oh), toasts.pic(), toast_overlay_serial, levels.lift(ow, oh),
+                      &toast_overlay_lift))
+            toast_here = false;
 #if DSPERATE_CHEEVOS
           if (overlay(1, indicators_here && indicators.picture(ow, oh), indicators.pic(), indicators_overlay_serial))
             indicators_here = false;
@@ -4151,7 +4174,7 @@ sdl_ready:
         }
       }
 #endif
-      const bool osd_toasts = toast_here || indicators_here;
+      const bool osd_toasts = toast_here || indicators_here || levels_here;
       if (scaled) {
         // Crosshair first, still in DS pixels. Must go down before
         // finish_views(): a PiP-inset bottom screen's target is a side
