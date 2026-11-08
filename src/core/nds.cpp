@@ -490,23 +490,32 @@ static void run_gba_frame(NDS& nds) {
 
 void NDS::run_frame() {
   if (gba) { run_gba_frame(*this); return; }
-  if (frame_in_slices) { sched.run_until_frame(); frame_in_slices = false; ++frame_count; return; }   // finish a sliced frame
+  if (io.sleeping) { io.run_sleep(CYCLES_PER_FRAME); ++frame_count; return; }
+  if (frame_in_slices) { sched.run_until_frame(); if (io.sleeping) gpu.quiesce(); frame_in_slices = false; ++frame_count; return; }   // finish a sliced frame
   if (!gpu.frame_begun()) gpu.begin_frame();   // first frame after reset/direct boot starts at line 0 without a line-0 event
   frame_ready = false;
   sched.run_until_frame();   // one entry into the slice loop per frame, not per event
+  if (io.sleeping) gpu.quiesce();   // STOP can return before the line-0 worker join
   ++frame_count;
   if (bus.arena_) bus.fastmem_flush();
 }
 
 bool NDS::run_frame_slice(u64 cycles) {
   if (gba) { run_gba_frame(*this); return true; }
+  if (io.sleeping) {
+    if (!io.run_sleep(cycles)) return false;
+    frame_in_slices = false;
+    ++frame_count;
+    return true;
+  }
   if (!frame_in_slices) {
     if (!gpu.frame_begun()) gpu.begin_frame();
     frame_ready = false;
     frame_in_slices = true;
   }
   sched.run_until_or_frame(sched.now() + cycles);
-  if (!frame_ready) return false;
+  if (!frame_ready && !io.sleeping) return false;
+  if (io.sleeping) gpu.quiesce();
   frame_in_slices = false;
   ++frame_count;
   if (bus.arena_) bus.fastmem_flush();
@@ -588,7 +597,7 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   }
   if (!cart && !dsi) { err = "no cartridge"; return false; }
   if (dsi && dsi_nand.write_through()) { err = "the NAND is written through to its file, which a state cannot carry"; return false; }
-  if (!sched.at_slice_boundary() || gpu.line() != 0 || !gpu.at_line_start()) { err = "not at a frame boundary"; return false; }
+  if (!sched.at_slice_boundary() || (!io.sleeping && (gpu.line() != 0 || !gpu.at_line_start()))) { err = "not at a frame boundary"; return false; }
   // Quiesce: nothing here changes what the guest observes.
   gpu.quiesce();
   gpu3d.sync_raster();
