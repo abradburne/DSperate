@@ -128,7 +128,11 @@ void main() {
   uint id = g0 >> 18;
   if (id == 0u) discard;   // no opaque polygon: the clear stays
   uint g1 = texelFetch(u_g1, px, 0).r;
-  uvec4 p = polys[2u * (id - 1u)], q = polys[2u * (id - 1u) + 1u];
+  // The index clamped, not only guarded by the discard: Panfrost's compiler
+  // issues the load before the discard takes effect, and id 0 read 32 bytes
+  // in front of the buffer (a GPU page fault whenever that page is unmapped).
+  uint pi = 2u * (max(id, 1u) - 1u);
+  uvec4 p = polys[pi], q = polys[pi + 1u];
   uint attr = p.x;
   uvec4 c = shade(attr, p.y, p.z, p.w, q.x, (g0 >> 12) & 0x3Fu, (g0 >> 6) & 0x3Fu, g0 & 0x3Fu, int(g1 << 16) >> 16, int(g1) >> 16);
   uint r = c.x, g = c.y, b = c.z, a = c.w;
@@ -160,7 +164,9 @@ void main() {
   if (u_split != 0 && ((a == 31u) != (u_split == 1))) discard;
   if (u_shadow != 0) {
     uint w = texelFetch(u_win, ivec2(gl_FragCoord.xy), 0).r >> 18;
-    if (w != 0u && ((polys_t[(w - 1u) * 2u].x >> 24) & 0x3Fu) == ((attr >> 24) & 0x3Fu)) discard;
+    // Clamped as the resolve's: the load may run before the w != 0 test.
+    uint wa = polys_t[(max(w, 1u) - 1u) * 2u].x;
+    if (w != 0u && ((wa >> 24) & 0x3Fu) == ((attr >> 24) & 0x3Fu)) discard;
   }
 #endif
 #endif
