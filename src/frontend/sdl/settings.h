@@ -19,6 +19,7 @@ enum Flag : u8 {
   FlagLive    = 0,        // takes effect as soon as it is set
   FlagDeferred = 1u << 0, // applied when the menu closes, not per-step (layout changes)
   FlagRestart = 1u << 1,  // only read at startup; the row says so
+  FlagVerbatim = 1u << 2, // choice labels are names, not translated (the menu language row; its AUTO is)
 };
 
 // Why a row might be switched off; the menu asks the host rather than
@@ -43,10 +44,16 @@ enum class Dep : u8 {
   // a peer or server instead of the emulator.
   NetSession,
   ShortcutsPath,      // a folder for NAND title shortcuts: paths.dsi_games, else paths.games
+  Slot2Link,          // the game reads GBA games (slot2/compat.h), and paths.gba_games is set
+  RumblePak,          // the Rumble Pak is in slot 2 this session
+  SolarSensor,        // a Boktai cartridge is in slot 2
 };
 
 struct Setting {
   const char* key;                 // "video.linear"
+  // Label, choice labels, sentinel label and note are English, marked N_()
+  // and translated where drawn; a choice marked NC_(key, ...) takes the key
+  // as its context. Keys, values and suffixes (units) are not translated.
   const char* label;               // "BILINEAR"
   enum class Type : u8 { Bool, Pick, Int, Percent, Text } type;   // Text: `lo` is max chars kept
   const Choice* choices; u8 nchoices;
@@ -73,7 +80,7 @@ struct SettingsHost {
   // A host keeping nothing apart from its own file may leave it as set().
   virtual void apply_now(const char* key, const std::string& value) { set(key, value); }
   virtual bool enabled(const Setting& s) const = 0;
-  virtual const char* disabled_reason(const Setting& s) const = 0;   // "" when enabled
+  virtual const char* disabled_reason(const Setting& s) const = 0;   // "" when enabled; already translated
   // Whether a choice is offered at all, e.g. the display-engine tier can only
   // do the mean of chunky cells, so the others aren't shown rather than shown and ignored.
   virtual bool value_allowed(const Setting& s, const char* value) const = 0;
@@ -111,10 +118,18 @@ constexpr const char* kLayoutCyclePrefix = "video.layout_cycle.";
 
 // The pages. Each is terminated by a row with a null key.
 extern const Setting kEmuSettings[];
+extern const Setting kAnalogSettings[];
 extern const Setting kVideoSettings[];
 extern const Setting kLayoutSettings[];
 extern const Setting kUserSettings[];
 int settings_count(const Setting* table);
+
+// The MENU LANGUAGE row's choices are the languages found at startup (built
+// in, plus the user's lang directory): AUTO, then each by its own name.
+// Slots past the last stay empty and are never offered.
+constexpr int kMaxUiLanguages = 32;
+struct UiLanguage { std::string code, name; };
+void set_ui_languages(const std::vector<UiLanguage>& languages);
 
 std::string display_value(const Setting& s, const std::string& value);
 // Value one step in `dir`: clamped at the ends for numbers, wraps for choices.

@@ -223,6 +223,17 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
 // `moved_2d`: engines whose read views this remap actually moves. CENSUS
 // ONLY for now -- the catch-up below is still unconditional.
 bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
+  // LCDC (bit 2) is an engine A view only while A displays a VRAM bank or
+  // a capture writes one; otherwise a bank entering or leaving it changes
+  // nothing the 2D render reads, and the remap needs no catch-up or join
+  // (the trap, if armed, is re-applied by the bus over the remapped pages).
+  // Dragon Quest IX streams textures by flipping banks through LCDC hundreds
+  // of times a frame.
+  if (moved_2d & 4) {
+    const bool lcdc_read = ((engine[0].dispcnt() >> 16) & 3) == 2 || capture_on_ || capture_render_;
+    moved_2d = (moved_2d & 3) | (lcdc_read ? 1u : 0u);
+  }
+  if (!moved_2d) { prof::add(prof::C_VRAM_REMAP_2D_STILL, 1); return trap_armed_; }
   // A job in flight keeps rendering against its snapshot; the live map may
   // change under it as long as the write trap still covers every bank it
   // reads at the bank's new address: an engine window that is trapped, or
@@ -295,17 +306,17 @@ bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
   catch_up(3);
   join_worker(JoinSite::Remap);
   engine[0].vram_remapped(); engine[1].vram_remapped();
-  const bool was = trap_armed_;
-  if (was) disarm_trap();
-  return was;
+  // The trap stays armed across the remap: the bus re-applies it over the
+  // pages it rewrites (the rest keep theirs), and vram_remap_end's arm_trap
+  // only redoes the windows if the arming itself changed.
+  return trap_armed_;
 }
 void Gpu::vram_remap_end(bool trapped) {
   if (trapped) { arm_trap(); return; }
-  // Kept armed across the remap (a job in flight on its snapshot): the page
-  // table just rebuilt dropped the trap bits of every page it touched. The
-  // capture read trap comes back in its generic form, over every page the
-  // bank backs now -- the guest reads it through the new mapping otherwise.
-  if (trap_armed_) nds_.bus.set_vram_trap(true, trap_lcdc_, trap_mask_);
+  // Kept armed across the remap (a job in flight on its snapshot); the bus
+  // re-applied the trap over the pages it rewrote. The capture read trap
+  // comes back in its generic form, over every page the bank backs now --
+  // the guest reads it through the new mapping otherwise.
   if (read_trap_reapply_) {
     read_trap_reapply_ = false;
     if (read_trap_bank_ >= 0) { nds_.bus.set_bank_read_trap(read_trap_bank_, true); read_trap_generic_ = true; }
@@ -807,7 +818,7 @@ void Gpu::step_engine(int e, u32 line) {
   const bool draw = !skip_frame_ && !(e == 1 && !screen_visible_[en.screen()]);
   if (!draw) skipped_[e] = true; else if (skipped_[e]) { skipped_[e] = false; en.render_sprites(line); }
   // Reading the 3D line joins the raster bands: skip it when the raster never ran.
-  if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
+  if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); en.set_3d_edges(edge_export_ ? nds_.gpu3d.edge_line(ref3d_, line) : nullptr); }
   if (draw) { en.render_line(line); output_engine(e, line); }
   if (e == 0 && line == SCREEN_H - 1) { shown_a_mode_ = (en.dispcnt() >> 16) & 3; shown_a_bank_ = (en.dispcnt() >> 18) & 3; shown_a_screen_ = en.screen(); }
   if (e == 0 && draw && !hires_lines_.empty() && line < SCREEN_H) {   // hi-res 3D: the line as engine A composited it, before master brightness
@@ -835,6 +846,90 @@ void Gpu::set_hires(bool on) {
   engine[0].set_hires_export(on ? hires_lines_.data() : nullptr);
 }
 
+void Gpu::set_edge_export(bool on) {
+  if (on == edge_export_) return;
+  nds_.gpu3d.sync_raster();   // no band still drawing with the old setting
+  edge_export_ = on;
+  nds_.gpu3d.renderer().set_edge_export(on);
+  for (int s = 0; s < 2; ++s) {
+    edge_fb_[s].fill(0); edge_rows_[s][0] = edge_rows_[s][1] = edge_rows_[s][2] = 0;
+    if (on) { prev_fb_[s].assign(SCREEN_W * SCREEN_H, 0); prev_edge_[s].assign(SCREEN_W * SCREEN_H, 0); }
+    else { prev_fb_[s].clear(); prev_fb_[s].shrink_to_fit(); prev_edge_[s].clear(); prev_edge_[s].shrink_to_fit(); }
+  }
+  if (on) edge_vram_.assign(4 * 65536, 0); else { edge_vram_.clear(); edge_vram_.shrink_to_fit(); }
+  for (Engine2D& en : engine) en.set_edge_vram(on ? edge_vram_.data() : nullptr);
+}
+
+// The edge plane's line: the edge pixels that show on it, through the
+// output stage's master brightness and expansion like the frame. Display
+// mode 1 composes them (Engine2D::edge_compose: the 3D layer's, a captured
+// image's on a bitmap layer); mode 2 shows a VRAM bank with the edge bytes
+// a capture left beside it. A line shown again unchanged keeps last frame's
+// edges (a game copying its captured frame to the other screen with the
+// CPU, as Golden Sun: Dark Dawn does): the edges are a function of the picture.
+void Gpu::output_edges(const Engine2D& en, int screen, u32 line, const u32* shown) {
+  u32* const dst = edge_fb_[screen].data() + line * SCREEN_W;
+  u64& row = edge_rows_[screen][line >> 6];
+  const u64 bit = u64{1} << (line & 63);
+  bool any = false;
+  if (screens_on_) {
+    const u32 mode = &en == &engine[0] ? (en.dispcnt() >> 16) & 3 : (en.dispcnt() >> 16) & 1;
+    alignas(16) Pixel own[256];
+    alignas(16) u8 bytes[256];
+    if (mode == 1 && en.edge_compose(own, bytes)) {
+      alignas(16) u32 out[256];
+      kern::active::output_line(own, en.master_bright(), out);
+      if (colour_lut_ && colour_cpu_) {   // as the shown line; only the (few) edge pixels
+        for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (kern::colour_pixel(*colour_lut_, out[x]) & 0x00FFFFFF) : 0;
+      } else
+        for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
+      any = true;
+    } else if (mode == 2) {
+      const u32 bank = (en.dispcnt() >> 18) & 3;
+      if (lcdc_mask_render_ & (1u << bank)) {
+        const u8* const eb = edge_vram_.data() + bank * 65536 + line * 256;
+        u32 nz = 0;
+        for (u32 x = 0; x < 256; ++x) { dst[x] = eb[x] ? (static_cast<u32>(eb[x]) << 24) | (shown[x] & 0x00FFFFFF) : 0; nz |= eb[x]; }
+        any = nz != 0;
+      }
+    }
+  }
+  u32* const pfb = prev_fb_[screen].data() + line * SCREEN_W;
+  u32* const ped = prev_edge_[screen].data() + line * SCREEN_W;
+  const u64 prev_bit = prev_rows_[screen][line >> 6] & bit;
+  if (!any && prev_bit && std::memcmp(shown, pfb, SCREEN_W * sizeof(u32)) == 0) { std::memcpy(dst, ped, SCREEN_W * sizeof(u32)); any = true; }
+  if (!any && (row & bit)) std::memset(dst, 0, SCREEN_W * sizeof(u32));
+  std::memcpy(pfb, shown, SCREEN_W * sizeof(u32));
+  if (any) { std::memcpy(ped, dst, SCREEN_W * sizeof(u32)); row |= bit; prev_rows_[screen][line >> 6] |= bit; }
+  else { row &= ~bit; prev_rows_[screen][line >> 6] &= ~bit; }
+}
+
+// The edge bytes of a captured line beside the colour (edge_vram_): source
+// A's (the 3D layer's, or engine A's composed line), source B's (the
+// bank's own), or for a blend the stronger source's.
+void Gpu::capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc) {
+  u8* const edst = edge_vram_.data() + dst_bank * 65536 + (((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF);
+  alignas(16) u8 ea[256] = {};
+  if (cnt & (1 << 24)) {
+    if (const u32* w = nds_.gpu3d.edge_line(ref3d_, line)) for (u32 x = 0; x < 256; ++x) ea[x] = static_cast<u8>(w[x] >> 24);
+  } else { alignas(16) Pixel own[256]; engine[0].edge_compose(own, ea); }
+  const u8* eb = nullptr;
+  if (!(cnt & (1 << 25))) {
+    const u32 dispcnt = engine[0].dispcnt();
+    const u32 src_bank = (dispcnt >> 18) & 3;
+    if (lcdc & (1u << src_bank)) {
+      u32 off = line * 256;
+      if (((dispcnt >> 16) & 3) != 2) off += ((cnt >> 26) & 3) << 14;
+      eb = edge_vram_.data() + src_bank * 65536 + (off & 0xFFFF);
+    }
+  }
+  const u32 mode = (cnt >> 29) & 3;
+  const u32 eva = std::min<u32>(cnt & 0x1F, 16), evb = std::min<u32>((cnt >> 8) & 0x1F, 16);
+  const u8* pick = mode == 0 ? ea : mode == 1 ? eb : (eva >= evb ? ea : eb);
+  if (!pick) std::memset(edst, 0, width);
+  else if (pick != edst) std::memmove(edst, pick, width);
+}
+
 void Gpu::output_engine(int e, u32 line) {
   prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];
@@ -852,6 +947,12 @@ void Gpu::output_engine(int e, u32 line) {
       else { output_b(dst); expand_colours(dst); }
     }
   } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
+  if (raw_active_ && raw_lines_[e] < SCREEN_H && (raw_lines_[e] != 0 || line == 0)) {
+    std::memcpy(raw_fb_[screen].data() + line * SCREEN_W, dst, SCREEN_W * sizeof(u32));
+    ++raw_lines_[e];
+  }
+  if (colour_lut_ && colour_cpu_ && screens_on_) kern::active::colour_correct(*colour_lut_, dst);   // the panel's black stays black when the LCDs are off
+  if (edge_export_ && !scaled) output_edges(en, screen, line, dst);
   if (scaled) {
     if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
       StashedLine& st = bscale_[bscale_n_++];
@@ -1255,6 +1356,7 @@ void Gpu::capture(u32 line) {
     }
   }
 
+  if (edge_export_) capture_edges(cnt, line, width, dst_bank, lcdc);
   switch ((cnt >> 29) & 3) {
   case 0:
     kern::active::capture_a15(src_a, width, dst);
@@ -1275,6 +1377,31 @@ void Gpu::capture(u32 line) {
   }
 }
 
+
+void Gpu::set_colour_profile(ColourProfile p) {
+  if (p == colour_) return;
+  quiesce();   // the worker reads the tables
+  if (p == ColourProfile::Off) colour_lut_.reset();
+  else {
+    auto lut = std::make_shared<kern::ColourLut>();
+    build_colour_lut(p, *lut);
+    colour_lut_ = std::move(lut);
+  }
+  colour_ = p;
+}
+
+void Gpu::set_colour_on_cpu(bool on) {
+  if (on == colour_cpu_) return;
+  quiesce();   // every line of a frame one way or the other
+  colour_cpu_ = on;
+}
+
+void Gpu::request_raw_frame() {
+  quiesce();   // no line of the frame before may land after this
+  for (auto& f : raw_fb_) f.assign(SCREEN_W * SCREEN_H, 0xFF000000);
+  raw_lines_[0] = raw_lines_[1] = 0;
+  raw_active_ = true;
+}
 
 void Gpu::apply_master_brightness(u16 reg, u32* dst) { kern::active::master_brightness(reg, dst); }
 

@@ -235,17 +235,27 @@ bool Display::open_kms(int rot) {
   return true;
 }
 
-// The scanline path's pixels in a CMA dma-buf instead of the shm surface.
-// Needs the window surface first (the size it's configured at), and falls
-// back to it if the dma-buf is lost later.
+// The scanline path's pixels in a dma-buf instead of the shm surface.
+// Sized from the window, never from SDL's window surface: asking for that
+// builds a GL framebuffer on the same wl_surface, and where GL is Zink that
+// is a Vulkan swapchain with an explicit-sync (drm_syncobj) surface, which
+// our plain attaches then violate (the compositor disconnects us). SDL has
+// the configured size by now: its Wayland window waits for the first
+// configure before CreateWindow returns. The shm surface is only fetched
+// if the dma-buf is lost later.
 bool Display::open_dmabuf(int rot) {
-  if (!open_surface_scaling(rot)) return false;
+  scaled_ = true;
+  rot_ = rot;
   int ow = 0, oh = 0;
-  output_size(ow, oh);   // the presented size, whatever the rotation
+  SDL_GetWindowSize(win_, &ow, &oh);   // the presented size, whatever the rotation
+  if (ow <= 0 || oh <= 0) { scaled_ = false; rot_ = 0; return false; }
   auto dm = std::make_unique<DmabufOut>();
   if (gpu_wanted_) dm->set_bufs(DmabufOut::DEFAULT_BUFS + 1);
-  if (!dm->open(win_, ow, oh, only_screen_ >= 0 ? display_index_ : -1)) return false;
+  if (!dm->open(win_, ow, oh, only_screen_ >= 0 ? display_index_ : -1)) { scaled_ = false; rot_ = 0; return false; }
   out_ = std::move(dm);
+  layout();
+  build_scale();
+  if (!scaled_) { out_->close(); out_.reset(); rot_ = 0; return false; }
   SDL_GetWindowSize(win_, &open_w_, &open_h_);
   if (try_gpu_present()) return true;
   std::fprintf(stderr, "video: dmabuf, %s driver, scanline scaling, rot %d\n", SDL_GetCurrentVideoDriver(), rot_);
@@ -337,6 +347,30 @@ void Display::close() {
 
 // Screen rects for the current mode: aspect preserved, centred.
 void Display::layout() {
+  layout_views();
+  refresh_source();
+}
+
+// A GPU presenter with chunky on (and bilinear off, which takes precedence):
+// the cells at 1:1 into src_side_, as on the display-engine tier.
+void Display::refresh_source() {
+  src_gpu_ = gpu_ && chunky_ && !linear_;
+  if (!src_gpu_) return;
+  build_source_scale();
+  scaled_ = false;   // the presenter scales; begin_frame() stays out of it
+}
+
+bool Display::source_targets(Target out[SCREENS]) {
+  if (!src_gpu_) return false;
+  sync();
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
+    out[v.screen] = Target{src_side_[v.screen].data(), SCREEN_W, SCREEN_H, xrun_[v.screen].data(), seam_w_[v.screen].data(), nullptr, nullptr, false, xrun_plain_[v.screen].data()};
+  }
+  return true;
+}
+
+void Display::layout_views() {
   if (disp_) { int cw = 0, ch = 0; natural_size(layout_, 1.0, cw, ch); disp_->set_canvas(cw, ch); }
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
@@ -382,7 +416,7 @@ bool Display::settle_step(const u32* const blank[SCREENS]) {
   // Commit a frame: the surface maps on its first buffer, and the compositor
   // sends the fullscreen configure after that. Drawing at the new size is
   // what makes the buffers follow it.
-  if (gpu_) draw_gpu(blank);
+  if (gpu_) draw_gpu(blank, nullptr);
   else {
     Target t[SCREENS] = {};
     if (begin_frame(t)) present();
@@ -397,6 +431,7 @@ bool Display::drop_gpu_present(const char* why) {
   if (!gpu_) return false;
   std::fprintf(stderr, "video: GPU present %s; scanline scaling from here\n", why);
   gpu_.reset();
+  src_gpu_ = false;
   scaled_ = true;
   margins_dirty_ = true;
   layout();
@@ -427,6 +462,8 @@ bool Display::prepare_gpu(GpuFrame& f) {
   for (int i = 0; i < nviews_; ++i) f.v[i] = FramePresenter::View{views_[i].screen, views_[i].rect, views_[i].shown, !views_[i].direct, grid_on(views_[i].screen)};
   f.n = nviews_;
   p.rot = rot_; p.inset_alpha = inset_alpha_; p.linear = linear_;
+  p.seam_blend = src_gpu_ ? 0 : seam_blend_;   // cells at source: their seams were the core's to draw
+  p.colour = gpu_->kind() == FramePresenter::Kind::Vulkan ? colour_ : nullptr;
   p.drawn = frontend::Rect{canvas_drawn_.x, canvas_drawn_.y, canvas_drawn_.w, canvas_drawn_.h};
   p.grid = grid_strength_ > 0.0 ? static_cast<u32>(std::lround((1.0 - grid_strength_) * 256.0)) : 256u;
   canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
@@ -434,16 +471,20 @@ bool Display::prepare_gpu(GpuFrame& f) {
   return true;
 }
 
-void Display::draw_gpu(const u32* const fb[SCREENS]) {
+void Display::draw_gpu(const u32* const fb[SCREENS], const EdgePlanes* edges) {
   GpuFrame f;
-  if (prepare_gpu(f)) f.p->present(fb, f.v, f.n, f.params);
+  if (!prepare_gpu(f)) return;
+  if (edges) f.params.edges = *edges;
+  f.p->present(fb, f.v, f.n, f.params);
 }
 
-void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS]) {
+void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const EdgePlanes* edges) {
   // One copy of the frame for every window: the core writes the next frame
   // into fb while the present thread reads this one. Reused once the job
   // that read it is done.
   static std::vector<u32> stage[SCREENS];
+  static std::vector<u32> estage[SCREENS];   // the edge planes' marked lines (the others are never read)
+  static u64 erows[SCREENS][3];
   static u64 stage_job = 0;
   // A frame reaches the sink at the next present, when its fence has long
   // signalled: on the Mali-G52 a present's compute takes ~5 ms from submit
@@ -456,7 +497,7 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
   for (int i = 0; i < n && i < 2; ++i) {
     Display& d = *ds[i];
     d.sync();
-    if (!d.gpu_) { d.draw(fb); continue; }
+    if (!d.gpu_) { d.draw(fb, edges); continue; }
     if (d.prepare_gpu(frames[nf])) owners[nf++] = &d;
   }
   if (!nf) return;
@@ -466,6 +507,16 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     stage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
     std::memcpy(stage[s].data(), fb[s], stage[s].size() * sizeof(u32));
   }
+  EdgePlanes staged;
+  if (edges)
+    for (int s = 0; s < SCREENS; ++s) {
+      if (!edges->plane[s] || !edges->rows[s]) continue;
+      estage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
+      copy_edge_rows(estage[s].data(), *edges, s, fb[s]);
+      for (int k = 0; k < 3; ++k) erows[s][k] = edges->rows[s][k];
+      staged.plane[s] = estage[s].data(); staged.rows[s] = erows[s];
+    }
+  for (int k = 0; k < nf; ++k) frames[k].params.edges = staged;
   stage_job = pt.post([frames, nf] {
     const u32* const sfb[SCREENS] = {stage[0].data(), stage[1].data()};
     for (int k = 0; k < nf; ++k) {
@@ -499,9 +550,9 @@ bool Display::draw_picture(const u8* rgba, int w, int h) {
   return true;
 }
 
-void Display::draw(const u32* const fb[SCREENS]) {
+void Display::draw(const u32* const fb[SCREENS], const EdgePlanes* edges) {
   sync();
-  if (gpu_) { draw_gpu(fb); return; }
+  if (gpu_) { draw_gpu(fb, edges); return; }
   if (disp_) {
     if (disp_->overlay_available()) { disp_->overlay_changed(canvas_taken_); canvas_taken_ = false; }
     const u32* slots[DispOut::VIEWS] = {nullptr, nullptr};
@@ -617,7 +668,7 @@ bool Display::out_size(int& w, int& h) const {
 // 1:1 into src_side_, which end_frame hands to the layer instead of the
 // core's framebuffer.
 void Display::build_source_scale() {
-  const double s = disp_ ? disp_->fit_scale() : 0.0;
+  const double s = disp_ ? disp_->fit_scale() : 1.0;   // a GPU presenter: views are in panel pixels
   // First the cell each view would get, and whether the scaler can draw them.
   u32 D_hw = 0;
   bool hw = disp_ != nullptr && chunky_cell_ != 0 && s > 0.0;

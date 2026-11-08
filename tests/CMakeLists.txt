@@ -35,6 +35,10 @@ add_executable(test_cart_save cart_save_test.cpp)
 target_link_libraries(test_cart_save PRIVATE dsperate_core)
 add_test(NAME cart_save COMMAND test_cart_save)
 
+add_executable(test_slot2 slot2_test.cpp)
+target_link_libraries(test_slot2 PRIVATE dsperate_core)
+add_test(NAME slot2 COMMAND test_slot2)
+
 add_executable(test_gpu3d gpu3d_test.cpp)
 target_link_libraries(test_gpu3d PRIVATE dsperate_core)
 add_test(NAME gpu3d COMMAND test_gpu3d)
@@ -91,8 +95,8 @@ add_test(NAME texcache COMMAND test_texcache)
 # The pause menu is frontend code; the test links the one translation unit it
 # needs rather than the SDL frontend (which is an executable, and needs a
 # display to do anything).
-add_executable(test_menu menu_test.cpp ../src/frontend/sdl/menu.cpp ../src/frontend/sdl/settings.cpp)
-target_link_libraries(test_menu PRIVATE dsperate_core)
+add_executable(test_menu menu_test.cpp ../src/frontend/sdl/menu.cpp ../src/frontend/sdl/ui_font.cpp ../src/frontend/sdl/settings.cpp)
+target_link_libraries(test_menu PRIVATE dsperate_core dsperate_i18n)
 add_test(NAME menu COMMAND test_menu)
 
 # The settings file, likewise frontend code: the menu and the layout hotkeys
@@ -107,7 +111,7 @@ add_test(NAME config COMMAND test_config)
 # the core tests do not.
 if(DSPERATE_SDL)
   add_executable(test_input input_test.cpp ../src/frontend/sdl/input.cpp ../src/frontend/sdl/pad_faces.cpp ../src/frontend/sdl/config.cpp)
-  target_link_libraries(test_input PRIVATE dsperate_core ${SDL2_LIBRARIES})
+  target_link_libraries(test_input PRIVATE dsperate_core dsperate_i18n ${SDL2_LIBRARIES})
   target_include_directories(test_input PRIVATE ${SDL2_INCLUDE_DIRS})
   add_test(NAME input COMMAND test_input)
 endif()
@@ -193,24 +197,40 @@ if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE)   # the headers may be missing o
 endif()
 
 # RGA probe (gpu-raster branch): times the Rockchip 2D scaler (V4L2 mem2mem) on a dma-buf frame. Device-only, not a test.
+include(CheckIncludeFileCXX)
+check_include_file_cxx(linux/dma-buf.h DSPERATE_HAVE_DMABUF_H)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_executable(rga_probe rga_probe.cpp)
+  add_executable(rga_probe rga_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
+  target_include_directories(rga_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  # Per-source costs of the scanout dma-bufs (every /dev/dma_heap/*, udmabuf, DRM dumb): allocation, CPU
+  # writes, cache sync, KMS import. Device-only, not a test.
+  add_executable(dmabuf_probe dmabuf_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
+  target_include_directories(dmabuf_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
   # Integer nearest scaling from 1:1 RGA jobs (stride and rotation tricks); --sim checks the geometry anywhere.
-  add_executable(rga_nearest_probe rga_nearest_probe.cpp)
+  # Wants the dma-buf UAPI header, which the A30's sysroot (glibc 2.23) lacks: skipped there (the present probes too).
+  if(DSPERATE_HAVE_DMABUF_H)
+    add_executable(rga_nearest_probe rga_nearest_probe.cpp)
+  endif()
 endif()
 
 # GPU present probe: the fragment present against a nearest blit into imported dma-bufs. Device-only, not a test.
-if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_executable(vk_present_probe vk_present_probe.cpp)
+if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND DSPERATE_HAVE_DMABUF_H)
+  add_executable(vk_present_probe vk_present_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_link_libraries(vk_present_probe PRIVATE dsperate_core ${CMAKE_DL_LIBS})
   target_include_directories(vk_present_probe PRIVATE ${DSPERATE_VULKAN_INCLUDE})
   target_compile_definitions(vk_present_probe PRIVATE DSPERATE_PRESENT_SHADER_DIR="${PROJECT_SOURCE_DIR}/src/frontend/sdl/shaders")
 endif()
 
 # GpuPresent end to end into dma-heap buffers, against a CPU model of the compute present it replaced. Device-only, not a test.
-if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND SDL2_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_executable(gpu_present_probe gpu_present_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/gpu_present.cpp)
+if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND SDL2_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND DSPERATE_HAVE_DMABUF_H)
+  add_executable(gpu_present_probe gpu_present_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/gpu_present.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_link_libraries(gpu_present_probe PRIVATE dsperate_core ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS})
   target_include_directories(gpu_present_probe PRIVATE ${DSPERATE_VULKAN_INCLUDE} ${SDL2_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR})
   target_compile_definitions(gpu_present_probe PRIVATE DSPERATE_PRESENT_SHADER_DIR="${PROJECT_SOURCE_DIR}/src/frontend/sdl/shaders")
 endif()
+
+# The frontend's translations: the .po reader, locale names, user catalogs,
+# and every built-in po/*.po loading cleanly.
+add_executable(test_i18n i18n_test.cpp)
+target_link_libraries(test_i18n PRIVATE dsperate_i18n)
+add_test(NAME i18n COMMAND test_i18n)

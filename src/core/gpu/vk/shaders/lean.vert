@@ -27,20 +27,32 @@ void main() {
   uint vi = k == 0u ? 0u : tri + k;
   GpuVert vt = verts[p.first_vert + vi];
   float w = max(float(vt.w), 1.0);
-  // The DS floors its positions and lights the pixel a vertex lands in; a
-  // quarter-pixel pull back towards that measured closest to its edges.
-  float sxf = float(vt.fx) / 16.0 - 0.25, syf = float(vt.fy) / 16.0 - 0.25;
+  // The DS floors its positions and lights the pixel a vertex lands in; with
+  // one sample at the pixel centre a quarter-pixel pull back towards that
+  // measured closest to its edges. Under MSAA the vertices stay on their
+  // 28.4 positions: the pull put every integer-aligned edge a quarter pixel
+  // inside its pixel row/column, where the standard 4x pattern (samples at
+  // 1/8 .. 7/8) gave the neighbouring column 25% coverage and the edge's own
+  // 75%: a tinted line beside every sprite that shifted with the camera,
+  // and the screen's last column and row left translucent. On the grid an
+  // edge at x covers [x, x1) exactly, whatever the pattern.
+  float pull = (pc.f.flags2 & DS_FF2_MSAA) != 0u ? 0.0 : 0.25;
+  float sxf = float(vt.fx) / 16.0 - pull, syf = float(vt.fy) / 16.0 - pull;
   // Each polygon grows 1/16 px outward from its centre: a T-junction vertex
   // sits on its neighbour's edge only to the 28.4 grid, and the hairline
   // left over showed whatever lay behind (bright terrain under a black
   // horizon wall) as specks. The DS's inclusive spans never leave one.
+  // (The attributes the fragment stage reads for a pixel come from the span
+  // table, the DS's own; these varyings are its fallback.)
+  vec2 grow = vec2(0.0);
   {
     vec2 c = vec2(0.0);
     for (uint j = 0u; j < p.nverts; ++j) c += vec2(float(verts[p.first_vert + j].fx), float(verts[p.first_vert + j].fy));
     vec2 dv = vec2(float(vt.fx), float(vt.fy)) - c / float(p.nverts);
     float len = length(dv);
-    if (len > 0.0) { sxf += dv.x / len * 0.0625; syf += dv.y / len * 0.0625; }
+    if (len > 0.0) grow = dv / len * 0.0625;
   }
+  sxf += grow.x; syf += grow.y;
   float ox = 0.0, oy = 0.0;
   // A zero-width/height polygon is a line to the DS but zero area here:
   // give it one pixel via the second/third vertex.

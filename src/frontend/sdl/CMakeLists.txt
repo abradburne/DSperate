@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-add_executable(dsperate main.cpp toast_queue.cpp level_indicator.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
+add_executable(dsperate main.cpp toast_queue.cpp level_indicator.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp ui_font.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
   display_drm.cpp display_disp.cpp display_fbdev.cpp)
 # Required on older glibc toolchains where pthread symbols are not in libc.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
-target_link_libraries(dsperate PRIVATE dsperate_core dsperate_frontend_video ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(dsperate PRIVATE dsperate_core dsperate_frontend_video dsperate_i18n ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads)
 # video.hires3d: the hi-res 3D (gl_hires.cpp, a library of its own so the
 # tests can drive it, with the GL helpers and DS_DEBUG's options) and the
 # GLES present (gl_present.cpp). Without GLES headers both compile as stubs
@@ -24,11 +24,6 @@ else()
 endif()
 target_sources(dsperate PRIVATE gl_present.cpp gl_frame_presenter.cpp gba_frontend.cpp)
 target_link_libraries(dsperate PRIVATE dsperate_gles)
-# GCC < 9 requires a separate library for C++17 std::filesystem.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
-    target_link_libraries(dsperate PRIVATE stdc++fs)
-endif()
 # Restamped on every build; its own translation unit so a commit recompiles nothing else.
 set(_ds_version_cpp ${CMAKE_CURRENT_BINARY_DIR}/version.cpp)
 add_custom_target(dsperate_version

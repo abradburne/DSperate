@@ -45,7 +45,10 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   AArch64 and ARMv7, DS and DSi alike.
 - **Retail cartridges.** KEY1/KEY2 protocol, direct boot, per-title save-chip
   database (EEPROM and FLASH variants), and IR-cart pass-through for the
-  Pokémon titles that need it. The GBA slot is empty.
+  Pokémon titles that need it.
+- **Slot 2.** A GBA game for the DS games that read one (Pal Park, unlocks),
+  including a Boktai cartridge's solar sensor at a light level you set; the
+  Rumble Pak; and the Guitar Grip that Guitar Hero: On Tour and Band Hero need.
 - **Zipped ROMs.** `.zip` files holding an `.nds` load directly (detected by
   magic, not extension), with an on-disk unpack cache. No zip64, 7z or rar.
 - **2D.** Both engines complete: every BG mode, sprites, windows, mosaic,
@@ -58,14 +61,16 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   pixel. Runs asynchronously on three worker threads with a decoded-texture
   cache and a skip for resubmitted frames.
 - **GPU 3D** (`video.gpu3d`, `--gpu3d`, the GPU 3D menu row, off by default):
-  the same polygon lists drawn by Vulkan instead, at the DS's resolution with
-  4x MSAA, the DS's depth, stencil, shadow and translucency rules on the
-  hardware pipeline, and the finished layer read back for the 2D compositor.
-  The frame may be one behind under load (never on a frame the game captures).
-  The software rasteriser stays the exact reference and the fallback: what the
-  GPU draws may differ from it within reason, never in what is on screen. On
-  the RG DS Plus it takes the heaviest scenes (Golden Sun: Dark Dawn, Spirit
-  Tracks) from a few hundred frames over budget per minute to a handful.
+  the same polygon lists drawn by Vulkan instead (OpenGL ES 3.1 on a device
+  without Vulkan), at the DS's resolution, with the DS's depth, stencil, shadow
+  and translucency rules on the hardware pipeline, and the finished layer read
+  back for the 2D compositor. The frame may be one behind under load (never on
+  a frame the game captures). Colours and texture coordinates are interpolated
+  in float, so a texel step can land a pixel early or late against the
+  hardware. Compiled Vulkan pipelines are cached on disk, so later starts and
+  AA switches are quick. The software rasteriser stays the exact reference and
+  the fallback: what the GPU draws may differ from it within reason, never in
+  what is on screen.
 - **Sound.** All sixteen SPU channels (PCM8/16, ADPCM, PSG, noise) and capture
   units, mixed at the console's real 32728.5 Hz. The frontend paces from its own
   frame limiter at the console's rate, not from the audio queue, and keeps the
@@ -115,6 +120,11 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   controls, DS settings), achievements, resume and quit.
 - **Action Replay cheats** from a `usrcheat.dat` database, matched by game
   code and header checksum, toggled per game from the pause menu.
+- **Analog controls** for about 70 games through shocoman's Circle Pad
+  patches, built in: enable the game's `CPAD` code under Options > Analog and
+  the sticks steer (and, with two, the camera and ZL/ZR). A
+  `usrcheat-analog.dat` of your own extends the built-in set game by game. See
+  [docs/techniques/07](docs/techniques/07-3ds-circle-pad-cheats.md).
 - **RetroAchievements** (Casual mode only, no Hardcore) via rcheevos: sign in
   with a username or a token the CFW already holds (or the launcher's sign-in,
   `RA_TOKEN_FILE` in the environment: DSlot on nibOS), the mode and the count
@@ -131,8 +141,11 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   file so the dump is never written to. A built-in loader cart in the slot
   raises a game picker from `[paths] games`; the chosen game is direct-booted.
 - **Fast forward** (held or toggled, optionally capped) and **frameskip**
-  (adaptive or fixed) that skips only drawing, so the emulation stays exact.
-  Skipping runs in whole display periods for games that alternate screens.
+  (adaptive or fixed) that skips only drawing, so the game runs as usual. By
+  default frames the game display-captures are skipped too, so a
+  capture-driven effect can lag a frame (`emu.frameskip_capture = false` for
+  exactness). Skipping runs in whole display periods for games that alternate
+  screens.
 - **Input recording and replay.** A played session becomes a deterministic,
   reproducible benchmark; [scenes/](scenes/) holds the ones used in the docs.
 - **Microphone and lid.** Real ALSA capture (DC-blocked and noise-gated) or a
@@ -157,11 +170,23 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   fills what is left. Hotkeys cycle layouts and swap screens, remembered per game.
 - **Scaling filters** applied per scanline straight into the presented buffer:
   nearest, bilinear, LCD grid, box-filter seams (sharp, shimmer-free), and
-  chunky 2x2 cells; optional integer scaling (letterbox or crop).
+  chunky cells; optional integer scaling (letterbox or crop).
 - **3D anti-aliasing** (`video.aa`, `--aa`, the ANTI-ALIASING menu row): the
   hardware's own edge blend on the software rasteriser (pixel-exact with
-  melonDS), 4x MSAA on the GPU one, which also smooths the creases and cut-out
-  edges the DS leaves stepped.
+  melonDS), and 4x MSAA on the Vulkan GPU raster, which also smooths the
+  creases and cut-out edges the DS leaves stepped (the OpenGL ES raster has
+  none). `enhanced` (`--aa-enhanced`) on the GPU raster with the Vulkan
+  present cuts polygon edges at panel density instead: the raster places each
+  edge line from the polygons' sub-pixel geometry and the present blends
+  across it, a band one DS pixel wide, texture cut-outs included. It is
+  sharper than 4x but costs more CPU per frame.
+- **Colour correction** (`video.colour`, `--colour`, the COLOUR menu row):
+  `nds` gives the picture the original DS's colours (hunterk and Pokefan531's
+  nds-color, as ROCKNIX's `lcd1x-nds-color` shader has it), `nds_lite` the
+  DS Lite's brighter ones (after the minui DSperate pak's `ds_lite` tone). It
+  works at DS resolution on every route to the panel: with the Vulkan present
+  on the present thread as the frames are uploaded (free for the emulation),
+  elsewhere in the core's output stage. Screenshots keep the game's own colours.
 - **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
   pixels between the two screens of a stacked, side-by-side or dominant pair,
   or `auto`, which pushes them to the panel's edges when the fit leaves room.
@@ -171,15 +196,13 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
   flips under KMSDRM, and SDL's renderer only where nothing else applies.
 - **Scaling off the CPU** (`video.gpu_present`, on by default where it works):
   the DS-resolution frames are scaled and laid out into the scanout buffer by
-  the Rockchip RGA (the RK3566's 2D accelerator, through V4L2) where the
-  device has one, else by a Vulkan compute pass. The RGA leaves the GPU to the
-  3D layer alone. With bilinear off, whole-number scales are exact nearest
-  neighbour (the CPU repeats each pixel across a small strip, the RGA repeats
-  the rows; no job scales, so nothing is filtered) and fractional ones stay
-  bilinear; `video.integer_scale` makes any panel whole. It draws the LCD
-  grid and a fading PiP inset, and the menu greys out what it cannot do
-  (seams, chunky cells). Rotated panels and everything else fall back to the
-  scanline scaler.
+  a Vulkan render pass, or by the Rockchip RGA (the RK3566's 2D accelerator,
+  through V4L2) where Vulkan does not work. Both draw the LCD grid and a
+  fading PiP inset. On the RGA, with bilinear off, whole-number scales are
+  exact nearest neighbour and fractional ones stay bilinear
+  (`video.integer_scale` makes any panel whole), and the menu greys out what
+  it cannot draw (seams, chunky cells). Where neither works, the scanline
+  scaler does the job on the CPU.
 - **Dual-window mode** for dual-panel handhelds: one fullscreen window per
   display, one DS screen each.
 - **On-screen overlays:** FPS counter, state slot number, screenshot flash,
@@ -188,8 +211,8 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
 ## Building
 
 Requires CMake ≥ 3.16, Ninja, a C++17 compiler, and SDL2 for the playable
-frontend. The only vendored third-party code is miniz's DEFLATE decompressor
-and rcheevos.
+frontend. The vendored third-party code is miniz's DEFLATE decompressor,
+rcheevos, ENet and libslirp.
 
     cmake --preset host && cmake --build --preset host && ctest --preset host
 
@@ -201,8 +224,9 @@ renderer.
 
 CMake switches: `DSPERATE_JIT`, `DSPERATE_NEON`, `DSPERATE_TESTS`,
 `DSPERATE_HEADLESS`, `DSPERATE_SDL`, `DSPERATE_WAYLAND`, `DSPERATE_CHEEVOS`,
-`DSPERATE_HARDEN`, and `DSPERATE_PGO=generate|use` (profiles for AArch64 and
-ARMv7 are committed under [pgo/](pgo/)).
+`DSPERATE_NET`, `DSPERATE_HARDEN`, `DSPERATE_TUNE` (extra `-mcpu`/`-mtune`
+flags, e.g. `-mcpu=cortex-a55`), and `DSPERATE_PGO=generate|use` (profiles for
+AArch64 and ARMv7 are committed under [pgo/](pgo/)).
 
 ## Running
 
@@ -236,4 +260,6 @@ replay, and `mkcart.py` for building a custom loader cart.
 
 GPLv3 — see [LICENSE](LICENSE). melonDS (GPLv3) is used as reference and, with
 attribution, as a code source. FreeBIOS is under its own licence in
-[src/core/bios/LICENSE.freebios](src/core/bios/LICENSE.freebios).
+[src/core/bios/LICENSE.freebios](src/core/bios/LICENSE.freebios). The built-in analog
+controls codes are shocoman's and not under the GPL; their provenance is in
+[src/core/cheat/analog_db/README.md](src/core/cheat/analog_db/README.md).

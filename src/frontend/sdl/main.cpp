@@ -14,6 +14,8 @@
 #include "core/host_cores.h"
 #include "core/cart/zip.h"
 #include "core/cart/zip_cache.h"
+#include "core/gpu/colour.h"
+#include "core/gpu/vk/vk_device.h"
 #include "core/profile.h"
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
@@ -22,6 +24,7 @@
 #include "core/io/dsi_title_install.h"
 #include "core/io/dsi_nand_launch.h"
 #include "core/cheat/database.h"
+#include "core/slot2/compat.h"
 #include "core/cart/miniz/miniz_tdef.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -49,6 +52,10 @@
 #include "input.h"
 #include "lid.h"
 #include "loader_cart.h"
+#include "frontend/i18n/i18n.h"
+
+using ds::i18n::tr;
+using ds::i18n::trf;
 #include "menu.h"
 #include "toast_queue.h"
 #include "level_indicator.h"
@@ -130,32 +137,31 @@ const char* kUsage =
     "                  size. Its BIOS is paths.gba_bios / --gba-bios F (a 16 KB dump), else the\n"
     "                  built-in Cult-of-GBA BIOS. Saves: SRAM, Flash or EEPROM, as the ROM says.\n"
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
-    "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
-    "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
-    "                  with its nocash footer; paths.dsi_nand), with --bios9/--bios7 as usual and the DSi's\n"
-    "                  firmware (--firmware, or paths.dsi_firmware for every DSi session).\n"
-    "                  EXPERIMENTAL. The NAND is opened\n"
-    "                  read-only; what a session changes is kept as files instead: title saves as\n"
-    "                  <GAMECODE>.pub/.prv/.bnr (paths.saves, else beside the dump), system settings in\n"
-    "                  <nand>.ovr and photos under <nand>.photos/, put back in at the next boot.\n"
-    "                  A DSiWare .nds/.cia given with it is installed into the session (not the dump) unless\n"
-    "                  the NAND has it; it needs its signed DSi TMD: embedded in the CIA, cached beside the\n"
-    "                  saves, downloaded from Nintendo's update CDN, or --dsi-tmd F (default <game>.tmd).\n"
-    "                  --dsi-offline never downloads; --dsi-hide-installed (emu.dsi_hide_installed) hides\n"
-    "                  the dump's own DSiWare.\n"
-    "                  The title starts straight away; --dsi-menu boots to the DSi Menu with it instead\n"
-    "                  With no title, the loader card is in the slot there as on the DS menu: launching\n"
-    "                  it raises the game list, and a DS game picked from it runs on a DS\n"
-    "                  Without --dsi-nand, a DSiWare .nds/.cia given with it runs with only the DSi BIOS\n"
-    "                  pair: the launcher's hand-off is emulated, the NAND and the DSi settings are made\n"
-    "                  up from [user], and saves go to paths.saves (else beside the game). The DSi system\n"
-    "                  font is DSperate's own (Noto Sans, WenQuanYi Micro Hei); --dsi-font F\n"
-    "                  (paths.dsi_font) uses a console's /sys/TWLFontTable.dat instead.\n"
-    "                  --dsi-sd DIR (paths.dsi_sd) puts a host folder in the DSi's SD card slot; what the\n"
-    "                  DSi changes on the card is written back to the folder (new, changed and removed files)\n"
-    "                  A DSiWare .nds/.dsi/.cia named without --dsi-mode runs this way too, and so does one\n"
-    "                  picked from the loader's game list (marked [DSi]); the DSi BIOS pair can be set as\n"
-    "                  paths.bios9i/paths.bios7i. When the title leaves (a soft reset), the session ends.\n"
+    "  --dsi-mode      EXPERIMENTAL. Boot a DSi from its NAND (boot2, then the DSi Launcher)\n"
+    "                  instead of the DS menu. Needs the DSi BIOS pair (--bios9i F --bios7i F, or\n"
+    "                  paths.bios9i/bios7i), a NAND dump with its nocash footer (--dsi-nand F, or\n"
+    "                  paths.dsi_nand), --bios9/--bios7 as usual, and the DSi's firmware (--firmware,\n"
+    "                  or paths.dsi_firmware for every DSi session).\n"
+    "                  The NAND is opened read-only; what a session changes is kept as files and put\n"
+    "                  back at the next boot: title saves as <GAMECODE>.pub/.prv/.bnr (paths.saves,\n"
+    "                  else beside the dump), system settings in <nand>.ovr, photos in <nand>.photos/.\n"
+    "                  --dsi-hide-installed (emu.dsi_hide_installed) hides the dump's own DSiWare.\n"
+    "                  A DSiWare .nds/.cia given with it is installed into the session (never the dump)\n"
+    "                  unless the NAND has it, and starts straight away (--dsi-menu: boot to the DSi\n"
+    "                  Menu with it instead). It needs its signed DSi TMD: embedded in the CIA, cached\n"
+    "                  beside the saves, downloaded from Nintendo's update CDN (not with --dsi-offline),\n"
+    "                  or --dsi-tmd F (default <game>.tmd). With no title, the loader card is in the\n"
+    "                  slot as on the DS menu: launching it raises the game list, and a DS game picked\n"
+    "                  from it runs on a DS.\n"
+    "                  DSiWare without a NAND: a .nds/.dsi/.cia named without --dsi-mode (or with it\n"
+    "                  but no --dsi-nand), or picked from the game list (marked [DSi]), runs with only\n"
+    "                  the DSi BIOS pair. The launcher's hand-off is emulated, the DSi settings come\n"
+    "                  from [user], saves go to paths.saves (else beside the game), and the system font\n"
+    "                  is DSperate's own (Noto Sans, WenQuanYi Micro Hei; --dsi-font F or paths.dsi_font\n"
+    "                  for a console's /sys/TWLFontTable.dat). When the title leaves (a soft reset), the\n"
+    "                  session ends.\n"
+    "                  --dsi-sd DIR (paths.dsi_sd) puts a host folder in the DSi's SD card slot; what\n"
+    "                  the DSi adds, changes or removes on the card is written back to the folder.\n"
     "  --scale N       window scale (default 2)\n"
     "  --hires3d N     the 3D drawn at N times the DS's resolution, 1-4 (video.hires3d; 2 is 512x384,\n"
     "                  4 the panels' 1024x768; needs video.sink = renderer and GLES). Wins over the\n"
@@ -180,19 +186,21 @@ const char* kUsage =
     "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        bilinear scaling instead of nearest (takes precedence over the grid, seams\n"
     "                  and chunky)\n"
-    "  --lcd-grid S    LCD pixel grid strength, 0 (off, default) .. 1 (software scaling, or the\n"
-    "                  display engine's overlay layer on the A30)\n"
+    "  --lcd-grid S    LCD pixel grid: one dark seam per DS pixel, strength 0 (off, default) .. 1\n"
+    "                  (black)\n"
+    "  --colour P      colour correction (video.colour): off (default) | nds (DS Phat) | nds_lite\n"
     "  --seam S        dark (default): the LCD grid, dimmed by --lcd-grid | blend: box-filter seams\n"
     "                  (sharp-shimmerless): the one panel pixel/row that straddles two DS pixels is their\n"
     "                  area-weighted blend, all others crisp | blend_linear: the same in linear light\n"
-    "  --chunky [M]    draw each 2x2 block of DS pixels as one cell (with the grid, one seam per\n"
-    "                  block); lower resolution, for panels at fractional scales. M: mean (default;\n"
-    "                  the area-weighted box) | extreme (the mean, unless the darkest or brightest\n"
-    "                  pixel stands more than --chunky-threshold N (0..255, default 180) from it) |\n"
-    "                  mode (dominant colour, mean when all differ) | tl (top-left pixel) | min | max\n"
+    "  --chunky [M]    draw blocks of DS pixels as one flat cell (size: --chunky-cell; with the grid,\n"
+    "                  one seam per cell): lower resolution, for panels at fractional scales.\n"
+    "                  M: mean (default; the area-weighted box) | extreme (the mean, unless the\n"
+    "                  darkest or brightest pixel stands more than --chunky-threshold N (0..255,\n"
+    "                  default 180) from it) | mode (dominant colour, mean when all differ) |\n"
+    "                  tl (top-left pixel) | min | max\n"
     "  --chunky-cell C panel pixels per chunky cell: auto (default; the smallest of 4..16 that divides the\n"
-    "                  screen, 4 on a 640x480 panel = 160x120 cells) | pair (2x2 DS pixels) | N (the\n"
-    "                  nearest size at or below N that divides the screen)\n"
+    "                  screen, 4 on a 640x480 panel = 160x120 cells) | pair (2x2 DS pixels) | N (N, or\n"
+    "                  the nearest smaller size, that divides the screen)\n"
     "  --sink S        where frames go: auto (the default: the best this device has) | disp (the\n"
     "                  display engine's scaler layer, Miyoo A30 class) | fbdev (/dev/fb0, the H700\n"
     "                  handhelds' mali-fbdev SDL2) | kms (page flips) | dmabuf (Wayland zero-copy) |\n"
@@ -215,10 +223,13 @@ const char* kUsage =
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
     "                  | exact (melonDS's per-access model); emu.timing\n"
-    "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the hardware's edge blend on the\n"
-    "                  CPU raster, 4x MSAA on the GPU raster\n"
-    "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default); the CPU\n"
-    "                  raster where there is no Vulkan\n"
+    "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the DS's own edge blend on the\n"
+    "                  CPU raster; 4x MSAA on the GPU raster under Vulkan, none under OpenGL ES\n"
+    "  --aa-enhanced   video.aa = enhanced: on the GPU raster with the Vulkan present, 3D edges\n"
+    "                  (texture cut-outs too) are cut at panel density from the polygons' own lines\n"
+    "                  instead: sharper, more CPU. Anywhere else the same as --aa\n"
+    "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default): Vulkan,\n"
+    "                  else OpenGL ES 3.1; the CPU raster where neither works\n"
     "  --frameskip N   skip drawing up to N frames in N+1 (0 = off); emu.frameskip. Skipping runs\n"
     "                  in whole display periods, so on a game that drives its screens on\n"
     "                  alternate frames the limit counts pairs (DS_DEBUG_SKIP=1 shows the period)\n"
@@ -226,10 +237,10 @@ const char* kUsage =
     "                  shown at that scale, evenly, before the 3D goes to 1x\n"
     "  --frameskip-mode M  adaptive (default; skip only while the emulator is behind, up to N)\n"
     "                  | fixed (always skip N of every N+1)\n"
-    "  --no-frameskip-capture  do not skip frames that display-capture. Exact, but a game that\n"
-    "                  captures every frame -- Pokemon B/W, Golden Sun -- then skips nothing,\n"
-    "                  so frameskip does nothing at all on it. On by default (the captured\n"
-    "                  VRAM holds the last drawn frame); emu.frameskip_capture\n"
+    "  --frameskip-capture / --no-frameskip-capture  skip frames that display-capture too\n"
+    "                  (on by default; INEXACT: the captured VRAM holds the last drawn frame). Off is\n"
+    "                  exact, but a game that captures every frame -- Pokemon B/W, Golden Sun -- then\n"
+    "                  skips nothing, so frameskip does nothing at all on it; emu.frameskip_capture\n"
     "  --limiter HZ    the rate the emulator is held to: auto (the console's own 59.8261 Hz, the\n"
     "                  default and the speed a game was written for), 30, 60 (what a player means\n"
     "                  by 60 fps: 0.29 % fast, and in step with a 60 Hz panel), 120, 144, 240, or\n"
@@ -278,8 +289,13 @@ const char* kUsage =
     "  --states DIR    save states and the auto slot go in DIR (paths.states; default beside the ROM)\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
+    "  --gba-rom F     the GBA game F in slot 2 for this run, without asking (slot2.gba)\n"
+    "  --rumble-pak    the Rumble Pak in slot 2, whatever the controller (slot2.rumble = on)\n"
+    "  --no-slot2      slot 2 empty: no GBA game, no prompt, no Rumble Pak\n"
     "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
-    "                  games and paths.cache) except the one being launched, then run as usual\n";
+    "                  games and paths.cache) except the one being launched, and the compiled\n"
+    "                  Vulkan pipelines (vk_pipelines.bin in paths.cache, else ~/.cache/dsperate),\n"
+    "                  then run as usual\n";
 
 std::string rom_dir_of(const std::string& rom) {
   const size_t slash = rom.find_last_of('/');
@@ -335,11 +351,30 @@ std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
 }
 
-// video.aa: true / false. The older mode words still read: accurate / enhanced / smooth as on, off as off.
+// video.aa: false / true / enhanced. On the GPU raster true is 4x MSAA and
+// enhanced the edge cut, texture cut-out edges included (the cut-out pass);
+// the CPU raster shows the hardware's blend either way. The older mode
+// words still read: accurate / smooth as on, off as off.
 bool aa_on(const std::string& v) {
   return v == "true" || v == "1" || v == "yes" || v == "on" || v == "accurate" || v == "enhanced" || v == "smooth";
 }
-void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
+bool aa_enhanced(const std::string& v) { return v == "enhanced"; }
+void apply_aa(NDS& nds, const std::string& v) { nds.gpu3d.renderer().set_aa(aa_on(v)); nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced(v)); }
+void apply_colour(NDS& nds, const std::string& v) {
+  ds::gpu::ColourProfile p;
+  if (!ds::gpu::parse_colour_profile(v, p)) std::fprintf(stderr, "video.colour: unknown profile '%s' (off | nds | nds_lite), off\n", v.c_str());
+  nds.gpu.set_colour_profile(p);
+}
+// Whether the edge cut runs (the frame loop has why): video.aa = enhanced on
+// the GPU raster (`gpu_on`: it is, or is about to be, the GPU's) through the
+// Vulkan present on every window. DS_EDGE_CUT=0 never, =1 with plain
+// video.aa and on the CPU raster too.
+bool edge_cut_wanted(NDS& nds, const ds::sdl::Display& d1, const ds::sdl::Display& d2, bool dual, bool gpu_on) {
+  static const int cut_env = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e ? *e - '0' : -1; }();
+  auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
+  return cut_env != 0 && vk_present(d1) && (!dual || vk_present(d2)) &&
+         nds.gpu3d.renderer().aa() && ((gpu_on && nds.gpu3d.renderer().aa_enhanced()) || cut_env == 1);
+}
 
 void load_save(NDS& nds, const std::string& path) {
   const ds::sdl::OffRealtime off_rt;
@@ -381,9 +416,55 @@ void write_save(NDS& nds, const std::string& path) {
   nds.cart->clear_sram_dirty();
 }
 
+// Slot 2. slot2.gba as a path: a bare file name lives in paths.gba_games;
+// empty or "none" is no game.
+std::string gba_path(const ds::sdl::Config& cfg) {
+  const std::string v = cfg.str("slot2.gba");
+  if (v.empty() || v == "none") return "";
+  const std::string dir = cfg.str("paths.gba_games");
+  return v.find('/') != std::string::npos || dir.empty() ? v : dir + "/" + v;
+}
+// How a picked game is remembered: by file name when it is in paths.gba_games,
+// so the folder can move without the per-game files going stale.
+std::string gba_setting(const std::string& path, const ds::sdl::Config& cfg) {
+  const std::string dir = cfg.str("paths.gba_games");
+  return !dir.empty() && rom_dir_of(path) == dir ? base_name(path) : path;
+}
+std::string gba_save_path(const std::string& gba, const ds::sdl::Config& cfg) { return save_path(gba, cfg.str("paths.gba_saves")); }
+
+// The GBA games in paths.gba_games that the DS game in slot 1 reads, by
+// name; empty for a game that reads none.
+std::vector<ds::sdl::Menu::GameEntry> gba_offers(const NDS& nds, const ds::sdl::Config& cfg) {
+  std::vector<ds::sdl::Menu::GameEntry> out;
+  const std::string dir = cfg.str("paths.gba_games");
+  const ds::slot2::Linkage* link = nds.cart && !nds.dsi ? ds::slot2::linkage_for(nds.cart->header().game_code) : nullptr;
+  if (!link || dir.empty()) return out;
+  DIR* d = opendir(dir.c_str());
+  if (!d) { std::fprintf(stderr, "slot2: cannot read %s\n", dir.c_str()); return out; }
+  while (dirent* e = readdir(d)) {
+    const std::string name = e->d_name;
+    if (name.empty() || name[0] == '.' || rom_ext(name) != ".gba") continue;
+    char code[5], title[13];
+    const std::string path = dir + "/" + name;
+    if (ds::slot2::peek_game(path, code, title) && ds::slot2::accepts(*link, code)) out.push_back({rom_stem(name), path});
+  }
+  closedir(d);
+  std::sort(out.begin(), out.end(), [](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) { return a.title < b.title; });
+  return out;
+}
+
+void write_gba_save(NDS& nds, const std::string& path) {
+  ds::slot2::GameCart* g = nds.gba_cart();
+  if (!g || !g->save_dirty() || path.empty()) return;
+  std::string err;
+  if (!ds::slot2::write_save(*g, path, err)) { std::fprintf(stderr, "slot2: %s\n", err.c_str()); return; }
+  g->clear_save_dirty();
+}
+
 // Both screens into one PNG at the layout's natural size. Reads the
-// framebuffers directly, so grid/chunky/seams/scaler layer are excluded.
-bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& shown) {
+// framebuffers directly (or `frames`, e.g. Gpu::raw_frame), so
+// grid/chunky/seams/scaler layer are excluded.
+bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& shown, const u32* const* frames = nullptr) {
   using Disp = ds::sdl::Display;
   int w = 0, h = 0;
   Disp::Layout layout = shown;
@@ -395,7 +476,7 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
   for (int i = 0; i < Disp::SCREENS; ++i) {
     const Disp::View& v = views[i];
     if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
-    const u32* fb = nds.gpu.framebuffer(v.screen);
+    const u32* fb = frames ? frames[v.screen] : nds.gpu.framebuffer(v.screen);
     // Inset at its resting opacity (the touch ramp is live-only).
     const u32 alpha = v.direct ? 255 : static_cast<u32>(std::clamp(layout.pip_alpha, 0.0, 1.0) * 255.0 + 0.5);
     for (int y = 0; y < v.rect.h; ++y) {
@@ -433,14 +514,14 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
 }
 
 // <GAMECODE>-<timestamp>.png in paths.screenshots (states dir unless set).
-void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout) {
+void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout, const u32* const* frames = nullptr) {
   ::mkdir(dir.c_str(), 0755);
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
   const std::string code = game_code(nds);
   const std::string path = dir + "/" + code + "-" + stamp + ".png";
-  if (write_png(nds, path, layout)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
+  if (write_png(nds, path, layout, frames)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
 }
 
 std::string state_path(NDS& nds, const std::string& dir, int slot) {
@@ -617,7 +698,7 @@ bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout
   std::string err;
   if (!nds.load_state(r, err)) {
     std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str());
-    g_state_refused = "REJECTED";
+    g_state_refused = tr("REJECTED");
     return false;
   }
   layout_loaded = read_layout_chunk(r, layout);
@@ -690,9 +771,9 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_library(const ds::sdl::Config& c
 
 // Everything keyed to the ROM in the slot: save/states/screenshots/cheats
 // paths and the per-game .ini a hotkey writes to. Boot fills this once; the
-// loader cart resets the machine and re-opens it without redoing config
-// layering (a second per-game .ini merge would accumulate, not replace) --
-// only game_ini is re-keyed, so a post-launch hotkey targets the right game.
+// loader cart resets the machine and re-opens it. Its one launch per run adds
+// the picked game's .ini to a config that has had no game's, since a second
+// merge would accumulate, not replace.
 struct Session {
   std::string rom_path;         // what is in the slot
   std::string rom_dir;          // its directory: the default home for everything below
@@ -700,6 +781,7 @@ struct Session {
   std::string states_dir;       // save states (and the autosave's PNG)
   std::string shots_dir;        // manual screenshots (F9); paths.screenshots, else states_dir
   std::string sav;              // battery save
+  std::string gba_sav;          // the slot-2 GBA game's save; empty with no game in slot 2
   std::string cheats_on_path;   // which cheats are on, one name per line
   ds::cheat::GameCheats cheats; // the database entry for this ROM; the menu points at its groups
 
@@ -707,6 +789,8 @@ struct Session {
   void open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom, const char* save_arg);
   void load_enabled(NDS& nds) const;
   void save_enabled(NDS& nds) const;
+  // NDS::analog_patch follows pad.analog plus an enabled CPAD cheat.
+  void refresh_analog(NDS& nds, const ds::sdl::Config& cfg) const;
 };
 
 void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom, const char* save_arg) {
@@ -725,7 +809,12 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   // usrcheat.dat from paths.cheats, beside the ROM, or the config dir.
   cheats = ds::cheat::GameCheats{};
   nds.cheats.codes.clear();
+  nds.cheats.forget_writes();
   cheats_on_path.clear();
+  // Header from the loaded cart, not the file at rom_path: a zipped game's
+  // file starts with the archive header, so every lookup would miss.
+  u8 header[512] = {};
+  if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
   std::string db = cfg.str("paths.cheats");
   // Path may name the file itself or its directory; avoid a double usrcheat.dat.
   if (!db.empty()) {
@@ -747,16 +836,38 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   }
   if (!db.empty()) {
     std::string err;
-    // Header from the loaded cart, not the file at rom_path: a zipped game's
-    // file starts with the archive header, so every lookup would miss.
-    u8 header[512] = {};
-    if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
     if (nds.cart && ds::cheat::load_for_header(db, header, cheats, err)) {
       VLOG("cheats: %s -- %zu codes in %zu groups\n", cheats.name.c_str(), cheats.codes.size(), cheats.groups.size());
       nds.cheats.codes = cheats.codes;
     } else if (!err.empty()) {
       std::fprintf(stderr, "cheats: %s\n", err.c_str());
     }
+  }
+  // The analog controls patches keep a database of their own, so a player's
+  // usrcheat.dat stays theirs: paths.analog_cheats ("none" for no analog
+  // codes), else usrcheat-analog.dat beside the ROM or in the config dir.
+  // The copy built in (an empty path) covers a game that file lacks.
+  std::string analog_db = cfg.str("paths.analog_cheats");
+  if (analog_db.empty()) {
+    for (const std::string& candidate : {rom_dir + "/usrcheat-analog.dat", ds::sdl::Config::dir() + "/usrcheat-analog.dat"}) {
+      if (FILE* f = std::fopen(candidate.c_str(), "rb")) { std::fclose(f); analog_db = candidate; break; }
+    }
+  }
+  const auto merge_analog_from = [&](const std::string& path) {
+    std::string err;
+    ds::cheat::GameCheats analog;
+    if (!ds::cheat::load_analog_for_header(path, header, analog, err)) {
+      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
+      return false;
+    }
+    if (!ds::cheat::merge_analog(cheats, std::move(analog), ds::cheat::header_checksum(header))) return false;
+    VLOG("cheats: analog codes from %s -- %zu codes in all\n", path.empty() ? "the built-in database" : path.c_str(), cheats.codes.size());
+    nds.cheats.codes = cheats.codes;
+    return true;
+  };
+  if (analog_db != "none" && nds.cart) {
+    const bool from_file = !analog_db.empty() && merge_analog_from(analog_db);
+    if (!from_file) merge_analog_from("");
   }
   // Names, not indices: a database update renumbers; a stale name is dropped.
   if (!cheats.codes.empty())
@@ -767,17 +878,50 @@ void Session::load_enabled(NDS& nds) const {
   if (cheats_on_path.empty()) return;
   FILE* f = std::fopen(cheats_on_path.c_str(), "rb");
   if (!f) return;
+  // The file is the player's choice, and it replaces the database's defaults.
+  for (ds::cheat::Code& c : nds.cheats.codes) c.enabled = false;
   char line[512];
-  size_t on = 0;
   while (std::fgets(line, sizeof line, f)) {
     std::string want(line);
     while (!want.empty() && (want.back() == '\n' || want.back() == '\r')) want.pop_back();
     if (want.empty()) continue;
     for (ds::cheat::Code& c : nds.cheats.codes)
-      if (!c.is_note() && c.name == want) { c.enabled = true; ++on; }
+      if (!c.is_note() && c.name == want) c.enabled = true;
   }
   std::fclose(f);
+  // A file can name two members of one exclusive group (written before the
+  // grouping existed, or by hand).
+  ds::cheat::enforce_exclusive(nds.cheats.codes, cheats.groups);
+  size_t on = 0;
+  for (const ds::cheat::Code& c : nds.cheats.codes) if (c.enabled) ++on;
   if (on) VLOG("cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
+}
+
+// Analog stays live only while the player wants sticks (pad.analog) and a
+// CPAD patch is enabled for this game; either one alone does nothing, so an
+// unpatched game never sees the 0x027FFDF0 writes.
+void Session::refresh_analog(NDS& nds, const ds::sdl::Config& cfg) const {
+  const bool wanted = ds::sdl::Input::analog_wanted(cfg);
+  const ds::cheat::AnalogRequest req = ds::cheat::analog_request(nds.cheats.codes);
+  if (req.schemes && !wanted)
+    std::fprintf(stderr, "analog: \"%s\" is enabled but pad.analog = off: the sticks will not reach it\n", req.name);
+  // Two schemes for one game install hooks over the same addresses; running
+  // both at once corrupts controls. Exclusive cheat groups keep the bundled
+  // schemes from ever being on together.
+  if (req.schemes > 1)
+    std::fprintf(stderr, "analog: %d CPAD codes are enabled at once; their hooks will fight. Enable exactly one.\n", req.schemes);
+  const bool on = wanted && req.schemes > 0, full = on && req.nub;
+  if (on != nds.analog_patch || full != nds.analog_full)
+    VLOG("analog: CPAD patch %s%s\n", on ? "active" : "inactive", full ? " (nub + ZL/ZR)" : "");
+  // With no feed, neither the last frame's stick values nor a state's may
+  // linger where a hook (or a later re-enable) reads.
+  if (!on && (nds.analog_patch || req.schemes)) ds::input::clear_analog(nds);
+  nds.analog_patch = on;
+  nds.analog_full = full;
+  const std::string layout = cfg.str("pad.analog_layout", "auto");
+  nds.analog_layout = layout == "extended" || (layout != "packed" && req.extended)
+                          ? NDS::AnalogLayout::Extended
+                          : NDS::AnalogLayout::Packed;
 }
 
 void Session::save_enabled(NDS& nds) const {
@@ -1090,6 +1234,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
     display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s); display2.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+    display.set_seam_blend(vs.seam_blend); display2.set_seam_blend(vs.seam_blend);
     display.set_integer_scale(vs.int_scale); display2.set_integer_scale(vs.int_scale);
     if (!display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 0, vs.upper_display) ||
         !display2.open("DSperate (Bottom)", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 1, vs.lower_display)) return false;
@@ -1103,6 +1248,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
   display.set_sinks(vs.panel_sink, vs.want_sink);
   display.set_integer_scale(vs.int_scale);
   display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+  display.set_seam_blend(vs.seam_blend);
   if (!vs.linear) display.set_disp_grid(static_cast<u8>(((256 - vs.grid) * 255) / 256));
   return display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout);
 }
@@ -1110,34 +1256,42 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
 // Controls page rows that are neither a DS button nor a hotkey.
 struct Extra { const char* key_keys; const char* key_pad; const char* label; };
 constexpr Extra kExtras[] = {
-  {"hotkeys.modifier", "padhotkeys.modifier", "MODIFIER"},
-  {nullptr,            "pad.stylus_button",   "STYLUS TAP"},
-  {nullptr,            "pad.stylus_button.alt", "STYLUS TAP (2)"},
-  {nullptr,            "pad.stylus_axis",     "STYLUS STICK"},
-  {nullptr,            "pad.stylus_dpad",     "STYLUS DPAD"},
-  {nullptr,            "pad.stick_dpad",      "STICK DPAD"},
-  {nullptr,            "pad.stick_face",      "STICK ABXY"},
+  {"hotkeys.modifier", "padhotkeys.modifier", N_("MODIFIER")},
+  {nullptr,            "pad.stylus_button",   N_("STYLUS TAP")},
+  {nullptr,            "pad.stylus_button.alt", N_("STYLUS TAP (2)")},
+  {nullptr,            "pad.stylus_axis",     N_("STYLUS STICK")},
+  {nullptr,            "pad.stylus_hold",     N_("STYLUS HOLD")},
+  {nullptr,            "pad.stick_dpad",      N_("STICK DPAD")},
+  {nullptr,            "pad.stick_face",      N_("STICK ABXY")},
+  // The Guitar Grip's frets, used only while it is in slot 2.
+  {"keys.grip_green",  "pad.grip_green",      N_("GRIP GREEN")},
+  {"keys.grip_red",    "pad.grip_red",        N_("GRIP RED")},
+  {"keys.grip_yellow", "pad.grip_yellow",     N_("GRIP YELLOW")},
+  {"keys.grip_blue",   "pad.grip_blue",       N_("GRIP BLUE")},
+  {"keys.strum",       "pad.strum",           N_("GRIP STRUM")},
+  {nullptr,            "pad.strum.alt",       N_("GRIP STRUM (2)")},
   // Axis remap: push the control the positive direction reads (stick
   // right/down, trigger pressed); stores physical axis + inverted flag.
-  {nullptr,            "pad.axis_leftx",      "L STICK RIGHT"},
-  {nullptr,            "pad.axis_lefty",      "L STICK DOWN"},
-  {nullptr,            "pad.axis_rightx",     "R STICK RIGHT"},
-  {nullptr,            "pad.axis_righty",     "R STICK DOWN"},
-  {nullptr,            "pad.axis_lefttrigger", "L2 AXIS"},
-  {nullptr,            "pad.axis_righttrigger", "R2 AXIS"},
+  {nullptr,            "pad.axis_leftx",      N_("L STICK RIGHT")},
+  {nullptr,            "pad.axis_lefty",      N_("L STICK DOWN")},
+  {nullptr,            "pad.axis_rightx",     N_("R STICK RIGHT")},
+  {nullptr,            "pad.axis_righty",     N_("R STICK DOWN")},
+  {nullptr,            "pad.axis_lefttrigger", N_("L2 AXIS")},
+  {nullptr,            "pad.axis_righttrigger", N_("R2 AXIS")},
 };
 // Rows holding a stick rather than a single control.
 bool extra_is_stick(const char* key) { return std::strcmp(key, "pad.stylus_axis") == 0 || std::strcmp(key, "pad.stick_dpad") == 0 || std::strcmp(key, "pad.stick_face") == 0; }
 bool extra_is_axis_remap(const char* key) { return std::strncmp(key, "pad.axis_", 9) == 0; }
 // e.g. "-righty" -> physical control + whether inverted.
 std::string axis_remap_label(const std::string& v0) {
-  if (v0 == "none") return "NONE";
+  if (v0 == "none") return tr("NONE");
   const bool inv = !v0.empty() && v0[0] == '-';
   const std::string v = !v0.empty() && (v0[0] == '-' || v0[0] == '+') ? v0.substr(1) : v0;
-  std::string n = v == "leftx" ? "L STICK X" : v == "lefty" ? "L STICK Y" : v == "rightx" ? "R STICK X" : v == "righty" ? "R STICK Y"
+  std::string n = v == "leftx" ? tr("L STICK X") : v == "lefty" ? tr("L STICK Y") : v == "rightx" ? tr("R STICK X") : v == "righty" ? tr("R STICK Y")
                 : v == "lefttrigger" ? "L2" : v == "righttrigger" ? "R2" : v;
-  for (char& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-  return inv ? n + " INV" : n;
+  if (v == n) for (char& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  // TRANSLATORS: an inverted axis: {1} is the stick axis, e.g. L STICK X.
+  return inv ? trf("{1} INV", {n}) : n;
 }
 bool extra_in_column(const Extra& e, bool pad) { return pad || e.key_keys; }
 int extra_count(bool pad) {
@@ -1157,9 +1311,20 @@ const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg)
   if (std::strcmp(key, "pad.stylus_button") == 0) return ds::sdl::Input::stylus_button_default();
   if (std::strcmp(key, "pad.stylus_button.alt") == 0) return "none";   // second binding has no default
   if (std::strcmp(key, "pad.stylus_axis") == 0)   return ds::sdl::Input::stylus_axis_default(cfg);
-  if (std::strcmp(key, "pad.stylus_dpad") == 0)   return ds::sdl::Input::stylus_dpad_default();
+  if (std::strcmp(key, "pad.stylus_hold") == 0) {
+    // pad.stylus_dpad is the old name, and still configures it while unset.
+    static std::string old;
+    old = cfg.str("pad.stylus_dpad", ds::sdl::Input::stylus_hold_default());
+    return old.c_str();
+  }
   if (std::strcmp(key, "pad.stick_face") == 0)    return ds::sdl::Input::stick_face_default();
   if (std::strcmp(key, "pad.stick_dpad") == 0)    return ds::sdl::Input::stick_dpad_default();
+  if (std::strcmp(key, "keys.strum") == 0) return ds::sdl::Input::strum_key_default();
+  if (std::strcmp(key, "pad.strum") == 0) return ds::sdl::Input::strum_pad_default(0);
+  if (std::strcmp(key, "pad.strum.alt") == 0) return ds::sdl::Input::strum_pad_default(1);
+  for (int i = 0; i < 4; ++i)
+    if (std::strcmp(std::strchr(key, '.') + 1, ds::sdl::Input::fret_name(i)) == 0)
+      return pad ? ds::sdl::Input::fret_pad_default(i) : ds::sdl::Input::fret_key_default(i);
   if (extra_is_axis_remap(key))
     for (int i = 0; i < ds::sdl::Input::axis_remap_count(); ++i)
       if (ds::sdl::Input::axis_remap_key(i) == key) {
@@ -1349,6 +1514,9 @@ static int run(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
     else if (arg("--saves")) cli.set("paths.saves", argv[++i]);
+    else if (arg("--gba-rom")) { cli.set("slot2.gba", argv[++i]); cli.set("slot2.ask", "false"); }
+    else if (flag("--rumble-pak")) cli.set("slot2.rumble", "on");
+    else if (flag("--no-slot2")) { cli.set("slot2.gba", "none"); cli.set("slot2.ask", "false"); cli.set("slot2.rumble", "off"); }
     else if (arg("--states")) cli.set("paths.states", argv[++i]);
     else if (arg("--load-state")) load_state = argv[++i];
     else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
@@ -1365,6 +1533,7 @@ static int run(int argc, char** argv) {
     else if (flag("--fullscreen")) cli.set("video.fullscreen", "true");
     else if (flag("--linear")) cli.set("video.linear", "true");
     else if (arg("--lcd-grid")) cli.set("video.lcd_grid", argv[++i]);
+    else if (arg("--colour")) cli.set("video.colour", argv[++i]);
     else if (flag("--chunky")) cli.set("video.chunky", optional("mean"));
     else if (arg("--chunky-threshold")) cli.set("video.chunky_threshold", argv[++i]);
     else if (arg("--chunky-cell")) cli.set("video.chunky_cell", argv[++i]);
@@ -1391,6 +1560,7 @@ static int run(int argc, char** argv) {
     else if (flag("--frameskip-capture")) cli.set("emu.frameskip_capture", "true");
     else if (flag("--no-frameskip-capture")) cli.set("emu.frameskip_capture", "false");
     else if (flag("--aa")) cli.set("video.aa", "true");
+    else if (flag("--aa-enhanced")) cli.set("video.aa", "enhanced");
     else if (flag("--no-aa")) cli.set("video.aa", "false");
     else if (flag("--gpu3d")) cli.set("video.gpu3d", "true");
     else if (flag("--preload-rom")) cli.set("cart.preload", "true");
@@ -1418,6 +1588,21 @@ static int run(int argc, char** argv) {
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
+  // The menus' language: from the global file only, set before anything is
+  // drawn (a game's own file is read later). User catalogs sit in lang/
+  // beside the config file in use.
+  {
+    const size_t slash = global_ini.rfind('/');
+    ds::i18n::set_user_dir((slash == std::string::npos ? std::string(".") : global_ini.substr(0, slash)) + "/lang");
+    const std::string lang = cfg.str("ui.language", "auto");
+    if (!ds::i18n::set_language(lang))
+      std::fprintf(stderr, "lang: no %s translation, so the menus stay in English\n", lang.c_str());
+    else if (ds::i18n::language() != "en")
+      std::fprintf(stderr, "lang: %s\n", ds::i18n::language().c_str());
+    std::vector<ds::sdl::UiLanguage> langs;
+    for (const ds::i18n::Language& l : ds::i18n::languages()) langs.push_back({l.code, l.name});
+    ds::sdl::set_ui_languages(langs);
+  }
   // paths.dsi_nand stands in for --dsi-nand only under --dsi-mode.
   const std::string dsi_nand_cfg = dsi_mode_asked && !dsi_nand ? cfg.str("paths.dsi_nand") : std::string();
   if (!dsi_nand_cfg.empty()) dsi_nand = dsi_nand_cfg.c_str();
@@ -1432,7 +1617,7 @@ static int run(int argc, char** argv) {
     if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.gba_bios", "paths.saves", "paths.states", "video.scale", "video.hires3d", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
-                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "emu.frame_end", "emu.input_at", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
 #if DSPERATE_CHEEVOS
@@ -1490,17 +1675,17 @@ static int run(int argc, char** argv) {
   // Per-game files on top of the global one, CLI on top of both: title ID
   // first, then filename-keyed, so the filename wins. Rerun after the cart
   // loads to cover a zip (game code unreadable until unpacked).
-  auto merge_game_config = [&](const char* code) {
+  auto merge_game_config = [&](const char* code, const std::string& game) {
     std::vector<std::string> paths;
     if (code) paths.push_back(ds::sdl::Config::game_path_code(code));
-    paths.push_back(ds::sdl::Config::game_path_rom(rom_path));
+    paths.push_back(ds::sdl::Config::game_path_rom(game));
     for (const std::string& p : paths)
       if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
     apply_cli();
   };
   if (!boot_firmware) {
     char code[4];
-    merge_game_config(peek_game_code(rom_path, code) ? code : nullptr);
+    merge_game_config(peek_game_code(rom_path, code) ? code : nullptr, rom_path);
   }
 
   // Set before any thread exists so every later thread inherits it. Needs
@@ -1828,6 +2013,25 @@ sdl_ready:
       }
     }
   }
+  // The Vulkan pipeline cache (Device::set_pipeline_cache_file), before the
+  // first window opens the device: vk_pipelines.bin in paths.cache, else
+  // $XDG_CACHE_HOME/dsperate or ~/.cache/dsperate (never /tmp, RAM on a
+  // handheld). The zip cache's sweep only touches unpacked games, so it
+  // stays until --clear-cache.
+  {
+    std::string dir = cfg.str("paths.cache", "");
+    if (dir.empty()) {
+      if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x) dir = std::string(x) + "/dsperate";
+      else if (const char* h = std::getenv("HOME"); h && *h) dir = std::string(h) + "/.cache/dsperate";
+    }
+    if (!dir.empty()) {
+      for (size_t i = 1; i <= dir.size(); ++i)
+        if (i == dir.size() || dir[i] == '/') ::mkdir(dir.substr(0, i).c_str(), 0755);
+      const std::string file = dir + "/vk_pipelines.bin";
+      if (clear_cache && std::remove(file.c_str()) == 0) std::fprintf(stderr, "cache: cleared the Vulkan pipeline cache\n");
+      ds::gpu::vk::Device::set_pipeline_cache_file(file);
+    }
+  }
   if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }
   // A reference of our own on SDL's GL library: SDL unloads it with the last
   // GL window and loads it again with the next, and the windows reopened
@@ -1866,8 +2070,11 @@ sdl_ready:
   {
     const char* g = std::getenv("DS_GPU3D");
     const bool want = g ? std::atoi(g) != 0 : cfg.flag("video.gpu3d", false);
-    nds.gpu3d.renderer().set_aa(aa_on(cfg.str("video.aa", "false")));   // before the raster starts: its MSAA is fixed at creation
-    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on\n"); }
+    apply_aa(nds, cfg.str("video.aa", "false"));   // before the raster starts: its MSAA is fixed at creation
+    // So is the edge cut: an enhanced launch builds the cut's raster once,
+    // not the MSAA one and then the cut on the first frame.
+    if (want) nds.gpu.set_edge_export(edge_cut_wanted(nds, display, display2, dual_window, true));
+    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
   }
   // Let fullscreen windows take their final size before the ROM loads (see
   // Display::settle_step); bounded, in case no configure comes.
@@ -1969,9 +2176,9 @@ sdl_ready:
     SDL_Quit();
     return code;
   };
-  // One frame of a centred notice over the game's screens, dimmed (black
-  // before a game has drawn anything).
-  auto draw_notice_frame = [&](const std::string& title, const char* line2, const char* line3) {
+  // One frame of `paint` over the game's screens, dimmed (black before a
+  // game has drawn anything): a notice, or the slot-2 prompt.
+  auto draw_overlay_frame = [&](const std::function<void(const ds::sdl::Canvas&)>& paint) {
     const int menu_screen = dual_window ? 0 : display.current_layout().primary;
     const u32* fb[2];
     for (int i = 0; i < 2; ++i) {
@@ -1981,7 +2188,7 @@ sdl_ready:
     }
     // Drawn on the panel's own pixels where writable, at panel resolution.
     const bool on_canvas = display.canvas_capable();
-    if (!on_canvas) ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()), title.c_str(), line2, line3);
+    if (!on_canvas) paint(ds_canvas(menu_fb[menu_screen].data()));
     ds::sdl::Display::Target target[2] = {};
     if (dual_window) sync_dual_modes(display, display2);
     bool scaled = display.begin_frame(target);
@@ -1994,7 +2201,7 @@ sdl_ready:
       if (dual_window) display2.finish_views();
       ds::sdl::Display::CanvasView cv;
       if (on_canvas && display.canvas(cv)) {
-        ds::sdl::draw_notice(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h}, title.c_str(), line2, line3);
+        paint(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
         // Whole canvas: nothing else redraws the letterbox around it.
         display.note_canvas_draw_all();
       }
@@ -2002,9 +2209,18 @@ sdl_ready:
       if (dual_window) display2.present();
       set_scale_targets(target, false);
     } else {
+      // GPU present scales on its own: the overlay goes on its plane, as the pause menu's does.
+      ds::sdl::Display::CanvasView cv;
+      if (on_canvas && display.canvas(cv)) {
+        paint(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
+        display.note_canvas_draw_all();
+      }
       display.draw(fb);
       if (dual_window) display2.draw(fb);
     }
+  };
+  auto draw_notice_frame = [&](const std::string& title, const char* line2, const char* line3) {
+    draw_overlay_frame([&](const ds::sdl::Canvas& c) { ds::sdl::draw_notice(c, title.c_str(), line2, line3); });
   };
   // Loads a ROM with an "unpacking" notice if it takes more than a moment.
   // Load runs on a worker; this thread pumps events (B/quit cancels) and
@@ -2038,11 +2254,11 @@ sdl_ready:
       if (!shown && now - start < 300) { SDL_Delay(10); continue; }   // a loose or cached game never shows it
       if (!shown) display.set_page(true);
       shown = true;
-      char line2[32];
-      if (cancel) std::snprintf(line2, sizeof line2, "STOPPING");
-      else if (now - last_change > 5000) std::snprintf(line2, sizeof line2, "WAITING ON THE CARD");
-      else std::snprintf(line2, sizeof line2, "UNPACKING%.*s", dots, "...");
-      draw_notice_frame(title, line2, "FIRST LAUNCH ONLY    B CANCELS");
+      std::string line2;
+      if (cancel) line2 = tr("STOPPING");
+      else if (now - last_change > 5000) line2 = tr("WAITING ON THE CARD");
+      else line2 = tr("UNPACKING") + std::string(static_cast<size_t>(dots), '.');
+      draw_notice_frame(title, line2.c_str(), tr("FIRST LAUNCH ONLY    B CANCELS"));
       SDL_Delay(50);
     }
     worker.join();
@@ -2104,7 +2320,7 @@ sdl_ready:
   // From the ROM to the starting state: still off the real-time class (startup_off_rt
   // above). Inflating a big zipped ROM alone can outlast RLIMIT_RTTIME.
   if (!bios_error.empty()) {
-    start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? "FIRMWARE IS BAD" : "DS BIOS IS BAD");
+    start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? tr("FIRMWARE IS BAD") : tr("DS BIOS IS BAD"));
     return quit_early(1);
   }
   if (dsi_hle && rom_shortcut) {
@@ -2125,7 +2341,7 @@ sdl_ready:
     }
     ds::sdl::print_gba_game(*nds.gba, cfg.str("paths.gba_bios"));
     if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
-    merge_game_config(game_code(nds).c_str());
+    merge_game_config(game_code(nds).c_str(), rom_path);
   }
   auto prepare_dsiware = [&]() -> bool {
     std::string err;
@@ -2155,15 +2371,16 @@ sdl_ready:
   }
   // Merge again now the game code is known (first time for a zip).
   if (nds.cart) {
-    merge_game_config(nds.cart->header().game_code);
+    merge_game_config(nds.cart->header().game_code, rom_path);
     VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
     if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
   }
   Session session;
   session.open(nds, cfg, rom_path, save_arg);
 
-  cfg.set("video.aa", aa_on(cfg.str("video.aa", "false")) ? "true" : "false");
-  apply_aa(nds, aa_on(cfg.str("video.aa", "false")));
+  cfg.set("video.aa", aa_enhanced(cfg.str("video.aa", "false")) ? "enhanced" : aa_on(cfg.str("video.aa", "false")) ? "true" : "false");
+  apply_aa(nds, cfg.str("video.aa", "false"));
+  apply_colour(nds, cfg.str("video.colour", "off"));
   if (!nds.gba_mode() && (!boot_firmware || nds.dsi)) nds.setup_direct_boot();   // on a DSi this is the NAND boot
   if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
   // Off in the core by default for reproducibility. Not under --replay: a
@@ -2180,6 +2397,114 @@ sdl_ready:
 #else
   (void)jit;
 #endif
+  // Slot 2, before anything runs: a game that reads GBA games looks for one
+  // in its first frames. Under --record/--replay nothing is asked and auto
+  // rumble stays out, so a run is the same on any controller.
+  const bool slot2_fixed = record || replay;
+  // What slot 2 holds this session: the GBA game at `gba` (empty: none),
+  // else the Rumble Pak when slot2.rumble wants one. Replaces what was there.
+  auto rumble_wanted = [&] {
+    const std::string r = cfg.str("slot2.rumble", "auto");
+    return r == "on" || (r == "auto" && !slot2_fixed && input.has_rumble());
+  };
+  auto fill_slot2 = [&](const std::string& gba) {
+    nds.slot2.reset();
+    session.gba_sav.clear();
+    input.set_guitar_grip(false);
+    if (nds.dsi || !nds.cart) return;
+    if (!gba.empty()) {
+      const std::string sav = gba_save_path(gba, cfg);
+      std::string err;
+      if (std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba, sav, err)) {
+        g->set_light_level(cfg.num("slot2.solar", 5));
+        std::fprintf(stderr, "slot2: %s [%s], save %s%s\n", rom_stem(base_name(gba)).c_str(), g->game_code(),
+                     ds::slot2::save_type_name(g->save_type()), g->solar_sensor() ? ", solar sensor" : "");
+        session.gba_sav = sav;
+        nds.slot2 = std::move(g);
+        return;
+      }
+      std::fprintf(stderr, "slot2: %s\n", err.c_str());
+    }
+    // The Guitar Hero games refuse to start without their grip. Its frets
+    // are in the input log, so it goes in under --record/--replay too.
+    if (cfg.str("slot2.guitar_grip", "auto") != "off" && ds::slot2::uses_guitar_grip(nds.cart->header().game_code)) {
+      nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>();
+      input.set_guitar_grip(true);
+      VLOG("slot2: Guitar Grip\n");
+      return;
+    }
+    if (rumble_wanted()) {
+      nds.slot2 = std::make_unique<ds::slot2::RumblePak>();
+      VLOG("slot2: Rumble Pak\n");
+    }
+  };
+  // The GBA game for slot 2: slot2.gba, unless the game reads GBA games,
+  // some are in paths.gba_games and slot2.ask says to offer them first.
+  auto choose_slot2 = [&]() -> std::string {
+    const std::string fixed = gba_path(cfg);
+    if (nds.dsi || !nds.cart || slot2_fixed || !cfg.flag("slot2.ask", true)) return fixed;
+    const std::vector<ds::sdl::Menu::GameEntry> offers = gba_offers(nds, cfg);
+    if (offers.empty()) return fixed;
+    std::vector<std::string> rows;
+    int sel = 0;
+    for (size_t i = 0; i < offers.size(); ++i) {
+      rows.push_back(offers[i].title);
+      if (offers[i].path == fixed) sel = static_cast<int>(i);
+    }
+    rows.push_back(rumble_wanted() ? tr("NO GBA GAME (RUMBLE PAK)") : tr("NO GBA GAME"));
+    const int none = static_cast<int>(rows.size()) - 1, toggle = none + 1;
+    if (cfg.str("slot2.gba") == "none") sel = none;
+    bool remember = false, moving = false;
+    int picked = -1;
+    Uint32 moved_at = SDL_GetTicks(), drawn_at = 0;
+    input.set_menu_open(true);
+    display.set_page(true);
+    for (bool dirty = true; picked < 0;) {
+      SDL_Event e;
+      while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
+      if (input.quit() || g_signalled) { picked = none; break; }
+      using B = ds::io::Io::Button;
+      const u32 p = input.take_menu_presses();
+      const auto pressed = [&](u32 b) { return ((p >> b) & 1) != 0; };
+      if (pressed(B::BTN_UP) || pressed(B::BTN_DOWN)) {
+        sel = (sel + (pressed(B::BTN_UP) ? toggle : 1)) % (toggle + 1);
+        moved_at = SDL_GetTicks();
+        dirty = true;
+      }
+      if (pressed(B::BTN_A)) {
+        if (sel == toggle) { remember = !remember; dirty = true; }
+        else picked = sel;
+      }
+      if (pressed(B::BTN_B)) { picked = none; remember = false; }   // B: nothing this time, nothing kept
+      // Redrawn now and then even unchanged: right after startup a Wayland
+      // window can drop the first frames committed before it is configured.
+      if ((dirty || moving || SDL_GetTicks() - drawn_at >= 200) && picked < 0) {
+        dirty = false;
+        drawn_at = SDL_GetTicks();
+        draw_overlay_frame([&](const ds::sdl::Canvas& c) {
+          moving = ds::sdl::draw_picker(c, tr("GBA CARTRIDGE"), tr("THIS GAME SUPPORTS THESE"), rows, sel, remember, tr("DON'T ASK AGAIN FOR THIS GAME"),
+                                        tr("A INSERT   B NO GBA GAME"), SDL_GetTicks() - moved_at);
+        });
+        display.flush();
+        if (dual_window) display2.flush();
+      }
+      SDL_Delay(moving ? 30 : 10);
+    }
+    (void)input.take_actions();   // a hotkey pressed over the prompt is not for the game
+    input.set_menu_open(false);
+    display.set_page(false);
+    const std::string path = picked < none ? offers[static_cast<size_t>(picked)].path : std::string();
+    if (remember && !session.game_ini.empty()) {
+      const std::string v = path.empty() ? "none" : gba_setting(path, cfg);
+      for (const auto& [k, val] : {std::pair<const char*, std::string>{"slot2.ask", "false"}, {"slot2.gba", v}}) {
+        cfg.set(k, val);
+        if (!ds::sdl::Config::store(session.game_ini, k, val)) std::fprintf(stderr, "settings: cannot write %s\n", session.game_ini.c_str());
+      }
+      VLOG("slot2: remembered %s for this game in %s\n", v.c_str(), session.game_ini.c_str());
+    }
+    return path;
+  };
+  fill_slot2(choose_slot2());
   // A replay must start from the same battery save every time, so it's loaded read-only.
   load_save(nds, session.sav);
   const bool save_readonly = replay != nullptr;
@@ -2203,12 +2528,15 @@ sdl_ready:
     bool got_layout = false;
     // Unreadable --load-state fails the run; an unreadable auto state just boots normally.
     if (!load_state_file(nds, start_state, layout, got_layout)) {
-      if (load_state) { start_failed(rom_path, "STATE NOT LOADED"); return quit_early(1); }
+      if (load_state) { start_failed(rom_path, tr("STATE NOT LOADED")); return quit_early(1); }
     } else {
       if (!load_state) std::fprintf(stderr, "state: autoloaded %s\n", start_state);
       // The state's view replaces the config's, dual-window aside.
       if (got_layout && !dual_window) { display.set_layout(layout); apply_visibility(); }
-      if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+      // A log made from this state starts at its frame; one from boot winds forward to it.
+      if (log.reading() && !log.wind_to(nds.frame_count))
+        std::fprintf(stderr, "replay: the log starts at frame %u, after this state's %llu; it will not line up\n", log.start(), static_cast<unsigned long long>(nds.frame_count));
+      if (log.writing()) log.set_start(static_cast<u32>(nds.frame_count));
     }
   }
   startup_off_rt.reset();
@@ -2405,6 +2733,7 @@ sdl_ready:
   VLOG("pause menu: %s\n", menu.panel_ui() ? "shared (nibkit)" : "DSperate's own");
   menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
   session.load_enabled(nds);
+  session.refresh_analog(nds, cfg);
   // DSI NAND LINKS: a .dspr.nds shortcut file per DSiWare title on
   // paths.dsi_nand while on, none while off. Refreshed at every start and
   // when the row is toggled. Reads its own NAND copy; session's untouched.
@@ -2452,6 +2781,7 @@ sdl_ready:
   // Same deferral, opposite reason: a screenshot wants the unadorned
   // picture, taken from fb_ after one deliberately unscaled frame.
   bool shot_pending = false;
+  bool shot_raw = false;   // shot_pending under colour correction: waiting on Gpu::raw_frame
   // Slot kAutoSlot is the auto state, which the slot page lists for deletion.
   auto slot_path = [&](int i) { return i == Menu::kAutoSlot ? auto_state_path(nds, session.states_dir) : state_path(nds, session.states_dir, i); };
   auto refresh_slots = [&] { for (int i = 0; i <= Menu::kAutoSlot; ++i) {
@@ -2508,8 +2838,15 @@ sdl_ready:
   };
   auto flush_save = [&] {
     if (!save_readonly && ((nds.cart && nds.cart->sram_dirty()) || (nds.gba && nds.gba->save.dirty))) write_save(nds, session.sav);
+    if (!save_readonly) write_gba_save(nds, session.gba_sav);
     flush_dsi(); flush_sd();
   };
+  // The slot-2 GBA game's save goes out like the battery save, once writes
+  // have stopped for a second. The Rumble Pak's motor follows the game: any
+  // change in a frame is a pulse a little over a frame long, so a game
+  // toggling it every frame (a steady buzz) never lets it drop between.
+  u32 gba_writes_seen = 0, rumble_seen = 0;
+  u64 gba_quiet_since = 0;
   // Whether fb_ holds the last run frame's picture (true after an unscaled
   // frame; false after a scanline-tier frame written straight to the panel).
   bool fb_current = false;
@@ -2645,7 +2982,11 @@ sdl_ready:
       if (std::strcmp(key, "video.layout") == 0) pending_mode = value;
       cfg.set(key, value);
       apply(key, value);
-      const std::string& path = per_game && !game_ini.empty() ? game_ini : global_ini;
+      // The slot-2 prompt's answer is kept per game whatever SAVE PER GAME says;
+      // the menu language is global whatever it says (it is set before a game's file is read).
+      const bool game_only = std::strcmp(key, "slot2.ask") == 0;
+      const bool global_only = std::strcmp(key, "ui.language") == 0;
+      const std::string& path = (per_game || game_only) && !global_only && !game_ini.empty() ? game_ini : global_ini;
       if (!ds::sdl::Config::store(path, key, value))
         std::fprintf(stderr, "settings: cannot write %s\n", path.c_str());
     }
@@ -2695,8 +3036,8 @@ sdl_ready:
       const std::string v = cfg.str(key, extra_default(key, pad, cfg));
       if (extra_is_axis_remap(key)) return axis_remap_label(v);
       if (extra_is_stick(key))   // true/false: stick_dpad's old spellings (Input::parse_stick)
-        return v == "left" || v == "true" || v == "1" ? "LEFT STICK" : v == "right" ? "RIGHT STICK" : "NONE";
-      return pad ? ds::sdl::Input::pad_label(v) : upper(v);
+        return v == "left" || v == "true" || v == "1" ? tr("LEFT STICK") : v == "right" ? tr("RIGHT STICK") : tr("NONE");
+      return pad ? ds::sdl::Input::pad_label(v) : v == "none" ? std::string(tr("NONE")) : upper(v);
     }
 
     Binding binding(bool pad, int i) const override {
@@ -2719,19 +3060,20 @@ sdl_ready:
           if (k >= extra_count(pad)) return out;   // past the end: no row
           const Extra& e = extra_at(pad, k);
           out.key = extra_key(e, pad);
-          out.label = e.label;
+          out.label = tr(e.label);
           out.value = extra_value(e, pad);
           return out;                              // already in the page's terms
         }
         const char* name = ds::sdl::action_name(static_cast<ds::sdl::Action>(a));
         out.key = (pad ? "padhotkeys." : "hotkeys.") + std::string(name) + ds::sdl::Input::hot_suffix(slot);
-        // "FAST FORWARD TOGGLE" doesn't fit the row at the menu's size.
-        out.label = upper(std::strcmp(name, "fast_forward_toggle") == 0 ? "ff_toggle" : name) + (slot ? " (2)" : "");
+        const char* label = tr(ds::sdl::action_label(static_cast<ds::sdl::Action>(a)));
+        // TRANSLATORS: a hotkey's second binding: {1} is the hotkey, e.g. SAVE STATE.
+        out.label = slot ? trf("{1} (2)", {label}) : std::string(label);
         out.value = hot_value(pad, a, slot);
       }
       // Display only: the file keeps SDL's lower-case names; pad values also
       // get position pips and L1/L2/SELECT spellings (pad_label).
-      out.value = pad ? ds::sdl::Input::pad_label(out.value) : upper(out.value);
+      out.value = pad ? ds::sdl::Input::pad_label(out.value) : out.value == "none" ? std::string(tr("NONE")) : upper(out.value);
       return out;
     }
 
@@ -2766,7 +3108,7 @@ sdl_ready:
       }
       // A modifier can't be built on itself, nor can the pen's tap.
       if ((key == "hotkeys.modifier" || key == "padhotkeys.modifier" ||
-           key == "pad.stylus_button" || key == "pad.stylus_button.alt" || key == "pad.stylus_dpad") &&
+           key == "pad.stylus_button" || key == "pad.stylus_button.alt" || key == "pad.stylus_hold") &&
           value.compare(0, 4, "mod+") == 0)
         value = value.substr(4);
       cfg.set(key, value);
@@ -2812,7 +3154,7 @@ sdl_ready:
     bool user_in_firmware() const { return !nds.firmware_synthetic; }
 
     const char* user_settings_note() const override {
-      return user_in_firmware() ? "IN THE FIRMWARE" : nullptr;
+      return user_in_firmware() ? tr("IN THE FIRMWARE") : nullptr;
     }
 
     static bool is_user_key(const char* key) { return std::strncmp(key, "user.", 5) == 0; }
@@ -2898,12 +3240,12 @@ sdl_ready:
       case ds::sdl::Dep::None: return "";
       case ds::sdl::Dep::FrameskipMode:
         // Frameskip is forced to 0 for a session, so its mode is moot too.
-        if (net_live && *net_live) return "NOT DURING A NETWORK SESSION";
-        return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
+        if (net_live && *net_live) return tr("NOT DURING A NETWORK SESSION");
+        return cfg.num("emu.frameskip", 0) > 0 ? "" : tr("ONLY WITH FRAMESKIP ON");
       case ds::sdl::Dep::PanelEffects:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         if (display.rga_present()) return "";   // off: exact at whole-number scales, bilinear between
-        return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
+        return panel_effects() ? "" : tr("THIS SCREEN SCALES IN HARDWARE");
       case ds::sdl::Dep::GridSeam:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? "THE RGA DRAWS THE DARK GRID ONLY" : "";
@@ -2911,41 +3253,47 @@ sdl_ready:
         return flag("video.linear", false) ? "BILINEAR IS ON" : "";
       case ds::sdl::Dep::Chunky:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
-        if (display.rga_present()) return "NOT ON THE RGA PRESENT";
         return flag("video.linear", false) ? "BILINEAR IS ON" : "";
       case ds::sdl::Dep::ChunkyCell:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
-        if (display.rga_present()) return "NOT ON THE RGA PRESENT";
         if (flag("video.linear", false)) return "BILINEAR IS ON";
         return cfg.str("video.chunky", "false") == "false" ? "ONLY WITH CHUNKY ON" : "";
       case ds::sdl::Dep::Windowed:
         // A tier that owns the panel is already filling it.
-        return display.scaling() && !display.window() ? "THIS SCREEN IS ALWAYS FULL" : "";
+        return display.scaling() && !display.window() ? tr("THIS SCREEN IS ALWAYS FULL") : "";
       case ds::sdl::Dep::OneWindow:
-        return vs.dual_window ? "NOT WITH TWO WINDOWS" : "";
+        return vs.dual_window ? tr("NOT WITH TWO WINDOWS") : "";
       case ds::sdl::Dep::Pip:
-        return pip ? "" : "PIP LAYOUT ONLY";
+        return pip ? "" : tr("PIP LAYOUT ONLY");
       case ds::sdl::Dep::PipTouchHold:
-        if (!pip) return "PIP LAYOUT ONLY";
-        return l.pip_alpha < 1.0 ? "" : "ONLY WHEN THE PIP FADES";
+        if (!pip) return tr("PIP LAYOUT ONLY");
+        return l.pip_alpha < 1.0 ? "" : tr("ONLY WHEN THE PIP FADES");
       case ds::sdl::Dep::Dominant:
-        return dominant ? "" : "DOMINANT LAYOUTS ONLY";
+        return dominant ? "" : tr("DOMINANT LAYOUTS ONLY");
       case ds::sdl::Dep::DominantThreshold:
-        if (!dominant) return "DOMINANT LAYOUTS ONLY";
-        return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : "ONLY WHEN THE RATIO IS AUTO";
+        if (!dominant) return tr("DOMINANT LAYOUTS ONLY");
+        return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : tr("ONLY WHEN THE RATIO IS AUTO");
       case ds::sdl::Dep::Net:
 #if DSPERATE_NET
         return "";
 #else
-        return "THIS BUILD HAS NO NETWORKING";
+        return tr("THIS BUILD HAS NO NETWORKING");
 #endif
       case ds::sdl::Dep::NetInternet:
         // Reads the config, not the session: the row is restart-only.
-        return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
+        return cfg.str("net.mode", "off") == "internet" ? "" : tr("ONLY WITH NETWORK FEATURES ON INTERNET");
       case ds::sdl::Dep::NetSession:
-        return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
+        return (net_live && *net_live) ? tr("NOT DURING A NETWORK SESSION") : "";
       case ds::sdl::Dep::ShortcutsPath:
-        return shortcuts_dir(cfg).empty() ? "NEEDS PATHS.DSI_GAMES OR PATHS.GAMES" : "";
+        return shortcuts_dir(cfg).empty() ? tr("NEEDS PATHS.DSI_GAMES OR PATHS.GAMES") : "";
+      case ds::sdl::Dep::Slot2Link:
+        if (nds.dsi) return tr("A DSI HAS NO GBA SLOT");
+        if (!nds.cart || !ds::slot2::linkage_for(nds.cart->header().game_code)) return tr("THIS GAME READS NO GBA GAMES");
+        return cfg.str("paths.gba_games").empty() ? tr("NEEDS PATHS.GBA_GAMES") : "";
+      case ds::sdl::Dep::RumblePak:
+        return nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak ? "" : tr("NO RUMBLE PAK IN SLOT 2");
+      case ds::sdl::Dep::SolarSensor:
+        return nds.gba_cart() && nds.gba_cart()->solar_sensor() ? "" : tr("NO BOKTAI CARTRIDGE IN SLOT 2");
       }
       return "";
     }
@@ -2993,6 +3341,12 @@ sdl_ready:
   host.apply = [&](const char* key, const std::string& v) {
     const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
     const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
+    if (is("pad.stylus_speed")) { host.reconfigure_input(); return; }
+    if (is("ui.language")) {
+      if (!ds::i18n::set_language(v)) std::fprintf(stderr, "lang: no %s translation, so the menus stay in English\n", v.c_str());
+      return;
+    }
+    if (is("slot2.solar")) { if (ds::slot2::GameCart* g = nds.gba_cart()) g->set_light_level(std::atoi(v.c_str())); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
     if (is("emu.dsi_nand_shortcuts")) {
@@ -3009,7 +3363,14 @@ sdl_ready:
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
     if (is("emu.autosave")) { autosave = on; return; }
-    if (is("video.aa")) { apply_aa(nds, aa_on(v)); return; }
+    if (is("pad.analog") || is("pad.analog_deadzone") || is("pad.analog_invert_y") || is("pad.analog_layout") ||
+        is("pad.analog_sensitivity_left") || is("pad.analog_sensitivity_right")) {
+      input.configure(cfg);
+      session.refresh_analog(nds, cfg);
+      return;
+    }
+    if (is("video.aa")) { apply_aa(nds, v); return; }
+    if (is("video.colour")) { apply_colour(nds, v); return; }
     // 3D RESOLUTION: at once, the windows kept, when they are GLES either way;
     // else the windows reopen as for the scaler's settings (which reads it).
     if (is("video.hires3d")) {
@@ -3408,6 +3769,16 @@ sdl_ready:
   // Starting a game from the loader cart's picker (and DS_LAUNCH_AT, which
   // does the same from a script).
   bool from_list = false;   // the game running was picked from the list: RESET goes back to the firmware
+  // Every way out of the menu, and of the session, goes through this. A cheat's enabled flag
+  // changes the moment it is toggled, so leaving without it (Reset, Load)
+  // runs the code while the stick channel it reads stays off, and a scheme
+  // that removes the digital controls then leaves the player with none.
+  auto apply_cheat_changes = [&] {
+    if (!menu.cheats_dirty()) return;
+    session.save_enabled(nds);
+    session.refresh_analog(nds, cfg);
+    menu.clear_cheats_dirty();
+  };
   auto launch_game = [&](const std::string& pick) {
     const ds::sdl::OffRealtime off_rt;   // reset, ROM, save and state: one-shot work
     VLOG("launcher: %s\n", pick.c_str());
@@ -3510,12 +3881,17 @@ sdl_ready:
     // --save deliberately not carried over: it pins one file for the command-line ROM.
     launcher = false;
     from_list = true;
+    merge_game_config(nds.cart ? nds.cart->header().game_code : nullptr, pick);
+    input.configure(cfg);
     session.open(nds, cfg, pick, nullptr);
 #if DSPERATE_CHEEVOS
     if (cheevos_on) { cheevos.change_game(nds, pick, dsi_title_cheevos_hash); indicators.clear(); }
 #endif
     menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
     session.load_enabled(nds);
+    session.refresh_analog(nds, cfg);
+    fill_slot2(choose_slot2());
+    rumble_seen = gba_writes_seen = 0;
     load_save(nds, session.sav);
     // After the battery save, so the state's SRAM wins; never during replay/recording.
     if (const std::string a = log.reading() || log.writing()
@@ -3523,6 +3899,7 @@ sdl_ready:
                                   : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
         !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
       std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
+      session.refresh_analog(nds, cfg);
       apply_loaded_layout();
       sd_note_toast();
     }
@@ -3554,7 +3931,7 @@ sdl_ready:
       case Menu::Result::None: break;
       case Menu::Result::Resume:
         state_slot = menu.slot();
-        if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
+        apply_cheat_changes();
         menu.set_open(false);
         display.set_page(false);
         set_paused(false);
@@ -3573,8 +3950,10 @@ sdl_ready:
         if (net_live) { std::fprintf(stderr, "state: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
+        apply_cheat_changes();
         // A load leaves the menu too: the player wants to see where they landed.
         if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
+          session.refresh_analog(nds, cfg);
           apply_loaded_layout();
           sd_note_toast();
           state_slot = menu.slot();
@@ -3586,9 +3965,9 @@ sdl_ready:
           flush_save();
         } else refresh_slots();
         break;
-      case Menu::Result::Launch: launch_game(menu.chosen()); break;
+      case Menu::Result::Launch: apply_cheat_changes(); launch_game(menu.chosen()); break;
       case Menu::Result::FastForward: ff_toggle = !ff_toggle; VLOG("fast forward %s\n", ff_toggle ? "on" : "off"); break;
-      case Menu::Result::Quit: input.request_quit(); break;
+      case Menu::Result::Quit: apply_cheat_changes(); input.request_quit(); break;
       case Menu::Result::Delete: {
         const std::string path = slot_path(menu.doomed_slot());
         if (std::remove(path.c_str()) != 0) std::fprintf(stderr, "state: cannot delete %s: %s\n", path.c_str(), std::strerror(errno));
@@ -3604,6 +3983,7 @@ sdl_ready:
         if (net_live) { std::fprintf(stderr, "reset: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "reset: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "reset: not while recording\n"); break; }
+        apply_cheat_changes();
         if (from_list) {
           std::fprintf(stderr, "reset: back to the firmware\n");
           g_restart = true;
@@ -3679,7 +4059,7 @@ sdl_ready:
         // this tests "is the menu up", not "is the machine stopped".
         if (paused || menu.open()) {
           state_slot = menu.slot();
-          if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
+          apply_cheat_changes();
           menu.set_open(false);
           display.set_page(false);
           set_paused(false);
@@ -3741,7 +4121,7 @@ sdl_ready:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (save_state_file(nds, state_path(nds, session.states_dir, state_slot), display.current_layout())) {
           flush_save();   // the .sav and the state never diverge
-          show_slot("STATE " + std::to_string(state_slot) + " SAVED");
+          show_slot(trf("STATE {1} SAVED", {std::to_string(state_slot)}));
         }
         break;
       case A::LoadState:
@@ -3749,12 +4129,13 @@ sdl_ready:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
         if (load_state_file(nds, state_path(nds, session.states_dir, state_slot), loaded_layout, got_layout)) {
+          session.refresh_analog(nds, cfg);
           apply_loaded_layout();
           audio.clear();
           pacer.reset();
           fs_debt_ms = 0;
           flush_save();
-          show_slot("STATE " + std::to_string(state_slot) + " LOADED");
+          show_slot(trf("STATE {1} LOADED", {std::to_string(state_slot)}));
           sd_note_toast();
         }
         break;
@@ -3850,6 +4231,7 @@ sdl_ready:
     // the game is handed a frame with nothing pressed.
     const bool menu_over_live = menu.open();
     if (menu_over_live) { pump_menu(); menu_dirty = menu_dirty || menu.dirty(); }
+    input.set_analog_patch(nds.analog_patch);
     input.update_stylus();
     ds::input::Frame in = input.frame();
     if (menu_over_live) {
@@ -3962,6 +4344,21 @@ sdl_ready:
       fs_in_skip = false; fs_left = 0; fs_blocks = 0;
       nds.gpu.set_frame_skip(false);
     }
+    // Colour correction rides the Vulkan present when every window has one:
+    // the frames stay the game's and the present thread corrects them as it
+    // uploads them, off the emulation's critical path (~0.6 ms a frame in
+    // GS:DD on the RG DS Plus). Anywhere else the core's output stage does.
+    // DS_COLOUR_CPU=1 keeps it in the core (A/B).
+    {
+      static const bool colour_cpu_forced = [] { const char* e = std::getenv("DS_COLOUR_CPU"); return e && std::atoi(e) != 0; }();
+      const bool on_gpu = nds.gpu.colour_lut() && !colour_cpu_forced && display.vk_present() && (!dual_window || display2.vk_present());
+      nds.gpu.set_colour_on_cpu(!on_gpu);
+      display.set_colour(on_gpu ? nds.gpu.colour_lut() : nullptr);
+      display2.set_colour(on_gpu ? nds.gpu.colour_lut() : nullptr);
+    }
+    // A screenshot keeps the game's own colours: when the core corrects, it
+    // waits for the next drawn frame, copied before the correction.
+    if (shot_pending && !shot_raw && nds.gpu.colour_on_cpu()) { nds.gpu.request_raw_frame(); shot_raw = true; }
     const bool skipped = nds.gpu.will_skip_frame();
     // Games that render one screen per frame (the other via capture) show one
     // stale screen right after a skip; draw the block through and present its last frame.
@@ -3996,16 +4393,22 @@ sdl_ready:
     }
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
+    bool at_src = false;   // a GPU presenter's chunky: the core draws the cells into the windows' source frames
     if (present && !pause_pending && !shot_pending) {
       // Scanout tiers block here until a buffer is free (DS_FPS "wait").
       const Uint64 tw = SDL_GetPerformanceCounter();
       if (dual_window) sync_dual_modes(display, display2);
       scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
+      if (!scaled) {
+        at_src = display.source_targets(target);
+        if (dual_window) at_src = display2.source_targets(target) && at_src;
+        if (!at_src) for (auto& t : target) t = {};
+      }
       wait_ticks += SDL_GetPerformanceCounter() - tw;
     }
-    set_scale_targets(target, scaled);
-    fb_current = present && !scaled;   // a skipped frame renders nothing
+    set_scale_targets(target, scaled || at_src);
+    fb_current = present && !scaled && !at_src;   // a skipped frame renders nothing
 
     const Uint64 t0 = SDL_GetPerformanceCounter();
 #if DSPERATE_NET
@@ -4091,6 +4494,7 @@ sdl_ready:
         else if (nds.firmware_override_dirty())
           std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
         std::fprintf(stderr, "power off: rebooting the firmware\n");
+        apply_cheat_changes();
         autosave_now();       // the reset below discards the session
 #if DSPERATE_JIT
         if (jit) ds::jit::flush_all();
@@ -4219,7 +4623,24 @@ sdl_ready:
         display.present();
         if (dual_window) display2.present();
       } else {
+        // The edge cut (core/gpu/edge_cut.h): video.aa = enhanced on the GPU
+        // raster cuts 3D edges at panel density in the Vulkan present (the RGA
+        // cannot) instead of drawing with 4x MSAA, which plain video.aa keeps:
+        // the cut's GPU frame is cheaper, but its edge plane costs the
+        // emulation thread (edge_line, the compositor's and capture's edge
+        // words) ~5 ms a frame in Golden Sun: Dark Dawn. The CPU raster shows
+        // the hardware's blend, its accurate AA. DS_EDGE_CUT=0 keeps MSAA;
+        // DS_EDGE_CUT=1 cuts with plain video.aa too, and the CPU raster's
+        // edges (the reference the GPU's are checked against). Takes effect
+        // from the next frame.
+        // Chunky cells are no edges to cut: no edge plane while they are drawn.
+        nds.gpu.set_edge_export(!display.source_chunky() && edge_cut_wanted(nds, display, display2, dual_window, nds.gpu3d.renderer().gpu_active()));
+        ds::sdl::EdgePlanes edges;
+        if (nds.gpu.edge_export() && !at_src)
+          for (int s = 0; s < 2; ++s) { edges.plane[s] = nds.gpu.edge_plane(s); edges.rows[s] = nds.gpu.edge_rows(s); edges.frame[s] = nds.gpu.framebuffer(s); }
         const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
+        if (at_src)   // each screen from the window that shows it
+          for (int s = 0; s < 2; ++s) fb[s] = (dual_window && display2.only_screen() == s ? display2 : display).source_frame(s);
         if (cursor) {
           std::memcpy(cursor_fb.data(), fb[1], cursor_fb.size() * 4);
           draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), cursor_size);
@@ -4259,7 +4680,7 @@ sdl_ready:
 
         if (!present_sync && display.gpu_present() && (!dual_window || display2.gpu_present())) {
           ds::sdl::Display* const ds_[2] = {&display, &display2};
-          ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb);
+          ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb, &edges);
         } else {
           // Pinned (thread layout), the emulation thread presents here as a
           // normal task: the kernel work a present queues on this core (a
@@ -4284,8 +4705,8 @@ sdl_ready:
           } else {
             ds::sdl::latlog::post(fb);
             if (pacer.lock_engaged()) vlock.posted(ds::sdl::VblankClock::now_ns());
-            display.draw(fb);
-            if (dual_window) display2.draw(fb);
+            display.draw(fb, &edges);
+            if (dual_window) display2.draw(fb, &edges);
             if (pacer.lock_engaged()) vlock.swapped(lock_frame, ds::sdl::VblankClock::now_ns());
           }
           if (drop_rt) sched_setscheduler(0, rt_pol, &rt_sp);
@@ -4294,9 +4715,14 @@ sdl_ready:
     }
     // Unlimited limiter outruns the speakers like fast forward: sheds audio the same way.
     audio.push(nds, fast || limiter_off);
-    if (shot_pending && present) {
+    if (shot_pending && present && (!shot_raw || nds.gpu.raw_frame_ready())) {
       shot_pending = false;
-      screenshot(nds, session.shots_dir, display.current_layout());
+      if (shot_raw) {
+        const u32* raw[2] = {nds.gpu.raw_frame(0), nds.gpu.raw_frame(1)};
+        screenshot(nds, session.shots_dir, display.current_layout(), raw);
+        nds.gpu.release_raw_frame();
+        shot_raw = false;
+      } else screenshot(nds, session.shots_dir, display.current_layout());
       flash_left = FLASH_FRAMES;   // from the next frame: this one is already on the panel and in the file
     }
     if (pause_pending && present) {
@@ -4447,6 +4873,14 @@ sdl_ready:
       if (nds.gba->save.writes != sram_writes_seen) { sram_writes_seen = nds.gba->save.writes; sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
     }
+    if (const ds::slot2::GameCart* g = nds.gba_cart(); g && g->save_dirty()) {
+      if (g->save_writes() != gba_writes_seen) { gba_writes_seen = g->save_writes(); gba_quiet_since = frames; }
+      else if (frames - gba_quiet_since >= 60) flush_save();
+    }
+    if (nds.slot2 && nds.slot2->rumble_events() != rumble_seen) {
+      rumble_seen = nds.slot2->rumble_events();
+      input.rumble(cfg.num("slot2.rumble_strength", 100), 40);
+    }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
       if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }
       else if (frames - nand_quiet_since >= 120) flush_dsi();
@@ -4483,6 +4917,7 @@ sdl_ready:
     }
   }
 
+  apply_cheat_changes();
   mark("leaving");
   autosave_now();
   flush_save();

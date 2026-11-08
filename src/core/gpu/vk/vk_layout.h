@@ -73,10 +73,11 @@ struct GpuPoly {
   uint   tex_w, tex_h;  // decoded texture dimensions, texels
   uint   flags;         // DS_PF_*
   DS_INT ytop, ybot;    // screen scanline range, inclusive
-  uint   vtop, vbot;    // slots of the top and bottom vertices: where the edge chains start and end
+  uint   span_base;     // first row of this polygon in the span table (gpu_span_rows), DS_SPAN_NONE for none
+  uint   vbot;          // slot of the bottom vertex (unused by the lean path)
   DS_INT xmin, xmax;    // screen x bounds, for the binning pass
-  uint   row_base;      // this polygon's first row in the span table
-  uint   pad_;
+  uint   row_base;      // lean path: the polygon's s range, min | max << 16, each + 32768 (the fragment stage's clamp)
+  uint   pad_;          // lean path: the t range, likewise
 };
 
 // One scanline of one polygon (the Y stage's output), computed once per
@@ -102,6 +103,21 @@ struct GpuRow {
 // not truncated, if it wants more. Worst case 2048*192 falls back to the CPU.
 #define DS_MAX_SPAN_ROWS 49152
 
+// The lean path's span table: the CPU raster's own per-row span endpoints
+// (Renderer3D::gpu_span_rows walks the polygon's edges with its Slope and
+// Interp code), so the fragment stage can interpolate colour and texcoords
+// along the row exactly as the hardware does and the GPU raster's texels
+// match the CPU raster's. Per row of a polygon's [max(ytop, 0),
+// min(ybot, 191)], from GpuPoly::span_base, DS_SPAN_WORDS words:
+//   0 xstart  1 xend (inclusive, the right-edge push applied)  2 wl  3 wr
+//   4 left r | g << 10 | b << 20 (9-bit)   5 left s | t << 16 (12.4, s16)
+//   6 right rgb                            7 right st
+// DS_SPAN_NONE marks a polygon without rows (a frame over DS_MAX_SPAN_ROWS,
+// or a recorded dump): the stage falls back to the hardware's interpolation.
+#define DS_SPAN_WORDS 8
+#define DS_SPAN_NONE 0xFFFFFFFFu
+#define DS_SPAN_TABLE_WORDS (DS_SPAN_WORDS * DS_MAX_SPAN_ROWS)
+
 // Per-frame constants; pushed, not a buffer (changes every frame, small).
 struct GpuFrame {
   uint   npoly;
@@ -120,6 +136,11 @@ struct GpuFrame {
   uint   nrows;         // span rows this frame, all polygons: the span pass is one lane per row
   uint   flags;         // DS_FF_*
   uint   flags2;        // DS_FF2_* (flags is full: bits 16-31 are the shadow run)
+  // GL raster, W-buffered frames under DS_WCLIP: the clip z carries
+  // wscale / w (float bits), wscale a little under the frame's nearest w, so
+  // the scene fills the clip range and the far end keeps its precision.
+  uint   wscale;
+  uint   pad2_[2];
 };
 
 #define DS_FF_WBUFFER 0x1u   // frame depth-tests on W (SWAP_BUFFERS bit 1); triangle path picks pipelines by it
@@ -133,6 +154,7 @@ struct GpuFrame {
 // record to the edge plane instead of blending; present stage splits it.
 #define DS_FF2_SMOOTH  0x1u
 #define DS_FF2_MSAA    0x2u   // 4x MSAA: vertices on pixel corners, so coverage is the polygon's true area
+#define DS_FF2_CUTOUT  0x4u   // the edge cut's cut-out pass (video.aa = enhanced): texture cut-out edges too
 
 // Render state too large for push constants (fog table, edge colours, toon
 // table). Uploaded every frame, 320 bytes, cheaper than tracking changes.

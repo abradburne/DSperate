@@ -9,9 +9,11 @@
 #include "core/gpu/vram_map.h"
 #include "core/gpu/line_worker.h"
 #include "core/gpu/render3d.h"
+#include "core/gpu/colour.h"
 #include "core/profile.h"
 
 #include <array>
+#include <memory>
 
 namespace ds { struct NDS; }
 
@@ -136,6 +138,35 @@ public:
   u32 display_mode_a() const { return shown_a_mode_; }
   u32 display_bank_a() const { return shown_a_bank_; }
   int screen_a() const { return screens_on_ ? shown_a_screen_ : -1; }
+  // Colour correction of every shown line (core/gpu/colour.h), after the
+  // output stage and before the scaler or framebuffer, so fb_ holds the
+  // corrected colours. Joins any lines in flight; set between frames.
+  void set_colour_profile(ColourProfile p);
+  ColourProfile colour_profile() const { return colour_; }
+  // The profile's tables, null when off. A presenter that corrects the
+  // frames itself (the Vulkan present, on its own thread) turns the
+  // output stage's pass off, so fb_ keeps the game's colours. Joins on a change.
+  const std::shared_ptr<const kern::ColourLut>& colour_lut() const { return colour_lut_; }
+  void set_colour_on_cpu(bool on);
+  bool colour_on_cpu() const { return colour_lut_ && colour_cpu_; }
+  // The next drawn frame as the output stage gave it before colour
+  // correction, for screenshots: request between frames, then after each
+  // frame poll raw_frame_ready(). raw_frame() holds until the next request;
+  // release_raw_frame() stops the copy if the caller gives up waiting.
+  void request_raw_frame();
+  bool raw_frame_ready() const { return raw_active_ && raw_lines_[0] >= SCREEN_H && raw_lines_[1] >= SCREEN_H && !lines_in_flight(); }
+  const u32* raw_frame(int screen) const { return raw_fb_[screen].data(); }
+  void release_raw_frame() { raw_active_ = false; }
+  // The edge cut (core/gpu/edge_cut.h): beside each screen's frame, a plane
+  // of the 3D edge pixels that show on it, 0xEERRGGBB: the edge byte
+  // (Renderer3D::set_edge_export) over the pixel's unblended colour as the
+  // output stage would show it; zero elsewhere, and everywhere on a screen
+  // no 3D layer reaches. edge_rows: which lines have any, one bit a line.
+  // Frontend side; the frame (framebuffer) is unaffected. Off by default.
+  void set_edge_export(bool on);
+  bool edge_export() const { return edge_export_; }
+  const u32* edge_plane(int screen) const { return edge_fb_[screen].data(); }
+  const u64* edge_rows(int screen) const { return edge_rows_[screen]; }
 
   // A screen the frontend does not show. Its driving engine skips drawing but
   // keeps journal/latches/windows/lazy-2D bookkeeping running so it's exact
@@ -257,6 +288,27 @@ private:
   alignas(16) std::array<u16, 256> fifo_line_{};
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
+  std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> edge_fb_{};   // edge_plane
+  u64 edge_rows_[2][3] = {};
+  bool edge_export_ = false;
+  // Edge bytes of captured pixels, one per 16-bit VRAM pixel of banks A-D:
+  // display capture fills them beside the colour, and VRAM display, bitmap
+  // BGs and bitmap sprites read them back, so a game that shows its 3D
+  // through a capture (On Tour, Golden Sun: Dark Dawn, Spirit Tracks) keeps
+  // its edges. CPU writes into a captured image are not tracked.
+  std::vector<u8> edge_vram_;
+  // Last frame's lines and edge words per screen, for output_edges' unchanged-line rule.
+  std::vector<u32> prev_fb_[2], prev_edge_[2];
+  u64 prev_rows_[2][3] = {};
+  void output_edges(const Engine2D& en, int screen, u32 line, const u32* shown);
+  void capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc);
+  std::shared_ptr<const kern::ColourLut> colour_lut_;   // null: off
+  ColourProfile colour_ = ColourProfile::Off;
+  bool colour_cpu_ = true;
+  // request_raw_frame: each engine's lines 0..191 copied once, from its first line 0 on.
+  bool raw_active_ = false;
+  u32 raw_lines_[2] = {};
+  std::vector<u32> raw_fb_[2];
   ScaleTarget scale_[2];
   static constexpr u32 SCALED_ROW_MAX = 4096;
   alignas(16) u32 chunk_even_[2][SCREEN_W];   // chunky: the even line, held until the odd one completes the block

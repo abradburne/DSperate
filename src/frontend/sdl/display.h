@@ -49,7 +49,6 @@ public:
   bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout, int only_screen = -1, int display_index = 0);
   void close();
 
-  void draw(const u32* const fb[SCREENS]);
   // A picture filling the window in place of the screens (RGBA bytes, rows
   // top first), at the window's resolution: the pause menu. The GLES present
   // and SDL_Renderer tiers only; false elsewhere, and nothing is drawn.
@@ -68,12 +67,15 @@ public:
   bool gl_present() const { return glp_ != nullptr; }   // each screen a texture, scaled on the GPU
   void draw_gl_now(const u32* const fb[SCREENS]) { if (glp_) { glp_->set_lat_screen(only_screen_ > 0); glp_->draw_now(views_, nviews_, fb); latlog::swapped(only_screen_ > 0); } }   // on the present thread
   bool shows(int screen) const { for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) return true; return false; }
+  // `edges`: the edge cut's planes for fb (core/gpu/edge_cut.h), or null.
+  // Only a Vulkan present cuts; the others ignore them.
+  void draw(const u32* const fb[SCREENS], const EdgePlanes* edges = nullptr);
   // The frame loop's present: each GPU-presenting window of `ds` takes the
   // frame on the present thread (present_thread.h) and this returns once the
   // frame is copied out, so `fb` may change straight after. The others draw
   // here, as draw() does. Every other call on a window waits for its present
   // first, so none of them sees one half done.
-  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS]);
+  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const EdgePlanes* edges = nullptr);
 
   // Per-scanline scaling: the core scales each line into place as it's
   // produced, straight into the window surface or a scanout tier's buffer
@@ -127,7 +129,15 @@ public:
   void set_page(bool on);
   // On the display-engine tier, chunky is applied by the scanline scaler at
   // 1:1 then rotated; grid/seams/bilinear need panel pixels and are off there.
-  bool effects_at_source() const { return disp_ != nullptr && scaled_; }
+  // The GPU presenters (Vulkan, RGA) take chunky the same way: the core draws
+  // the cells at 1:1 into src_side_ (source_targets), presented in place of
+  // the core's frame (source_frame); their grid, seams and bilinear are their own.
+  bool effects_at_source() const { return (disp_ != nullptr && scaled_) || src_gpu_; }
+  bool source_targets(Target out[SCREENS]);   // false: no chunky source on this window
+  const u32* source_frame(int screen) const { return src_side_[screen].data(); }
+  bool source_chunky() const { return src_gpu_; }
+  // video.seam for the Vulkan present: 0 dark (the grid), 1 blend, 2 blend in linear light.
+  void set_seam_blend(u8 mode) { seam_blend_ = mode; }
   // Chunky is left plain on a view shown smaller than the screen (PiP inset, dominant secondary).
   bool chunky_on(int screen) const { return src_chunky_[screen]; }
   void set_grid_strength(double s) { grid_strength_ = s; }   // 0..1; dimmed grid is an overlay, needs no seam-adjacent room
@@ -148,6 +158,11 @@ public:
   void set_gpu_present(bool on, GpuPresentMode mode = GpuPresentMode::Auto) { gpu_wanted_ = on; gpu_mode_ = mode; }
   bool gpu_present() const { return gpu_ != nullptr; }
   bool rga_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Rga; }   // no seams or chunky
+  bool vk_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Vulkan; }
+  // Colour correction for the Vulkan present to apply as it uploads the
+  // frames (Gpu::colour_lut), or null; ignored by every other route, where
+  // the core corrects.
+  void set_colour(std::shared_ptr<const gpu::kern::ColourLut> lut) { colour_ = std::move(lut); }
   const void* cell_map(int screen) const { return cells_[screen].x.cells ? &cells_[screen] : nullptr; }
   // Locks the panel-sized texture and fills in one target per screen. False
   // if the lock failed, in which case the caller must fall back to draw().
@@ -226,7 +241,9 @@ private:
   bool open_surface(int rot);
   bool open_surface_scaling(int rot);   // Dmabuf and Surface's shared setup
   bool open_renderer(bool linear, bool vsync, int rot);
-  void layout();
+  void layout();         // layout_views(), then the GPU presenters' chunky source (refresh_source)
+  void layout_views();
+  void refresh_source();
   void build_source_scale();   // display-engine tier w/ chunky: 1:1 run tables and source-side cell maps
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode (logical under rotation)
@@ -254,6 +271,8 @@ private:
   int           display_index_ = 0;
   bool          fullscreen_ = false;
   bool          linear_ = false;      // as opened: the GPU presenters filter by it
+  u8            seam_blend_ = 0;      // set_seam_blend
+  bool          src_gpu_ = false;     // a GPU presenter shows chunky cells the core draws into src_side_
   int           open_w_ = 0, open_h_ = 0;   // window size when the scanout sink opened (settle_step)
   Layout        layout_;
   u8            inset_alpha_ = 255;
@@ -271,6 +290,7 @@ private:
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
   double            grid_strength_ = 0.0;
+  std::shared_ptr<const gpu::kern::ColourLut> colour_;   // set_colour
   int               chunky_cell_ = 0;
   int               disp_divisor_ = 1;   // the divisor build_source_scale chose, restored after a page
   bool              page_ = false;
@@ -283,7 +303,7 @@ private:
   // the overlay's rect) so it can be presented on another.
   struct GpuFrame { FramePresenter* p = nullptr; FramePresenter::View v[SCREENS]; int n = 0; FramePresenter::Params params; };
   bool prepare_gpu(GpuFrame& f);        // false: nothing to present (the presenter was lost)
-  void draw_gpu(const u32* const fb[SCREENS]);
+  void draw_gpu(const u32* const fb[SCREENS], const EdgePlanes* edges);
   mutable u64       job_ = 0;             // present thread ticket of this window's last frame; 0 once waited for
   void sync() const;                    // wait for it
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL

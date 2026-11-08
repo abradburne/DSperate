@@ -72,6 +72,9 @@ public:
     chunk_end_ = p_ + n;
     return true;
   }
+  // Whether the next chunk is `tag`, for one that may be absent: unlike
+  // begin(), a different chunk there is not a failure.
+  bool peek(const char tag[4]) const { return ok_ && end_ - p_ >= 8 && std::memcmp(p_, tag, 4) == 0; }
   void end() { if (ok_) p_ = chunk_end_; }
   // Whether the next chunk is `tag` (an optional chunk a newer build adds).
   bool next_is(const char tag[4]) const { return ok_ && end_ - p_ >= 8 && std::memcmp(p_, tag, 4) == 0; }
