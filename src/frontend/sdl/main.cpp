@@ -59,6 +59,7 @@ using ds::i18n::trf;
 #include "menu.h"
 #include "toast_queue.h"
 #include "level_indicator.h"
+#include "battery_indicator.h"
 #if DSPERATE_NIBKIT_MENU
 #include "shelf_menu.h"
 #include <nibkit_menu.h>
@@ -3453,18 +3454,24 @@ sdl_ready:
   ds::sdl::LevelIndicator levels;
   bool levels_here = false;
   u64 levels_overlay_serial = 0;
+  // The low battery (battery_indicator.h): a toast each time it gets worse, and
+  // from 5% an indicator that stays at the top right till the charger goes in.
+  ds::sdl::BatteryIndicator battery;
+  bool battery_here = false;
+  u64 battery_overlay_serial = 0;
   int toast_overlay_lift = 0;   // how far up the toast in its slot was handed over
   // Draws them on `c` and says what they covered.
   auto draw_toast_on = [&](const ds::sdl::Canvas& c) -> ds::sdl::Rect {
     ds::sdl::Rect r = toast_here ? toasts.draw(c) : ds::sdl::Rect{};
-    if (levels_here) {
-      const ds::sdl::Rect l = levels.draw(c);
+    const auto add = [&r](const ds::sdl::Rect& l) {
       if (l.w && !r.w) r = l;
       else if (l.w) {
         const int x0 = std::min(r.x, l.x), y0 = std::min(r.y, l.y);
         r = ds::sdl::Rect{x0, y0, std::max(r.x + r.w, l.x + l.w) - x0, std::max(r.y + r.h, l.y + l.h) - y0};
       }
-    }
+    };
+    if (levels_here) add(levels.draw(c));
+    if (battery_here) add(battery.draw(c));
 #if DSPERATE_CHEEVOS
     const ds::sdl::Rect i = indicators_here ? indicators.draw(c) : ds::sdl::Rect{};
     if (i.w && !r.w) r = i;
@@ -4454,6 +4461,12 @@ sdl_ready:
 #if DSPERATE_CHEEVOS
     indicators.tick();
 #endif
+    battery.tick();
+    if (Toast t; battery.news(t.title, t.detail)) {
+      t.kind = ToastKind::Problem;
+      t.frames = TOAST_FRAMES * 2;
+      toasts.push(std::move(t));
+    }
 
     if (!shortcuts_note.empty()) {
       Toast t;
@@ -4547,6 +4560,7 @@ sdl_ready:
 #endif
       levels.tick();
       levels_here = levels.on();
+      battery_here = battery.on();
 #if DSPERATE_NIBKIT_MENU
       {
         int ow = 0, oh = 0;
@@ -4568,6 +4582,7 @@ sdl_ready:
             return drawn;
           };
           if (overlay(2, levels_here && levels.picture(ow, oh), levels.pic(), levels_overlay_serial)) levels_here = false;
+          if (overlay(3, battery_here && battery.picture(ow, oh), battery.pic(), battery_overlay_serial)) battery_here = false;
           if (overlay(0, toast_here && toasts.picture(ow, oh), toasts.pic(), toast_overlay_serial, levels.lift(ow, oh),
                       &toast_overlay_lift))
             toast_here = false;
@@ -4578,7 +4593,7 @@ sdl_ready:
         }
       }
 #endif
-      const bool osd_toasts = toast_here || indicators_here || levels_here;
+      const bool osd_toasts = toast_here || indicators_here || levels_here || battery_here;
       if (scaled) {
         // Crosshair first, still in DS pixels. Must go down before
         // finish_views(): a PiP-inset bottom screen's target is a side

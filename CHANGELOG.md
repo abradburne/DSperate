@@ -5,6 +5,14 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
 
 ## Unreleased
 
+### Low battery
+
+- **The low battery over a game** (nibkit-menu-c 0.4.0's `nib_battery_*`): when nibOS warns
+  (10%, 5%, empty) a toast says so, and from 5% a small red battery with the percent left stays
+  at the top right of the top screen till the charger goes in. nibOS then powers off near empty,
+  and DSperate writes its resume state on the way (SIGTERM, with `autosave`). Built against an
+  older nibkit-menu-c, or run with one, DSperate shows none.
+
 ### Volume and brightness
 
 - **The volume and brightness indicator** (nibkit-menu-c 0.2.3's `nib_levels_*`): when the volume

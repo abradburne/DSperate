@@ -39,8 +39,8 @@ public:
   // and blended by its alpha. A toast drawn at the panel's resolution. Copied
   // here; uploaded once, on the present thread, at the next present. Each
   // `slot` (0 to kOverlays - 1) holds one picture; higher slots go on top:
-  // the toast, the achievements' indicators, the volume and brightness.
-  static constexpr int kOverlays = 3;
+  // the toast, the achievements' indicators, the volume and brightness, the low battery.
+  static constexpr int kOverlays = 4;
   void set_overlay(int slot, const u8* rgba, int w, int h, int x, int y);
   // The window's size in pixels, what set_overlay's places are in.
   bool drawable_size(int& w, int& h) const;
