@@ -8,6 +8,7 @@ layout(push_constant) uniform P {
   uvec4 a;        // presented w, h; logical w, h
   uvec4 b;        // rotation (0/90/180/270), mode (0 view, 1 overlay), source base (words), view index | grid on << 8 | edge cut << 9 | blend width (DS px x16) << 10 | grid brightness << 16
   vec4 s;         // view: 256/w, 192/h, 0.5/w, 0.5/h
+  uvec4 c;        // LCD shader (present.frag's LCD): mask cell w, h, its first tab word, gain x256
 } pc;
 layout(location = 0) out vec2 d;
 

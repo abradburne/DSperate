@@ -14,6 +14,7 @@
 
 #include "core/types.h"
 #include "frontend/sdl/scanout.h"
+#include "frontend/video/lcd_shader.h"
 
 #include <SDL.h>
 #include <memory>
@@ -48,9 +49,14 @@ public:
   // (core/gpu/gpu.cpp emit_scaled): nearest (with the grid), bilinear (no
   // grid, no edge cut), or box-filter seams that stand in for the grid.
   enum Filter : u32 { kNearest = 0, kBilinear = 1, kSeamBlend = 2, kSeamLinear = 3 };
+  // `lcd`, `lcd_strength`: video.lcd_shader at the grid's strength (0..1).
+  // The looks other than the grid are drawn on a view at a whole-number
+  // scale (frontend/video/lcd_shader.h's one-cell mask), not bilinear; any
+  // other view keeps `grid` in their place.
   bool present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
                SDL_Rect drawn = SDL_Rect{0, 0, 0, 0}, u32 grid = 256, const EdgePlanes* edges = nullptr,
-               const gpu::kern::ColourLut* colour = nullptr, u32 filter = kNearest);
+               const gpu::kern::ColourLut* colour = nullptr, u32 filter = kNearest,
+               frontend::LcdShader lcd = frontend::LcdShader::Grid, double lcd_strength = 0.0);
   // Canvas for the frontend's overlays (OSD, pause menu, notices) for the
   // coming frame: `lw`x`lh`, pitch `lw`, 0xAARRGGBB, alpha honoured,
   // host-cached. Pre-cleared where the frame before last drew.

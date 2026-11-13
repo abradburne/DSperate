@@ -141,6 +141,12 @@ public:
   // Chunky is left plain on a view shown smaller than the screen (PiP inset, dominant secondary).
   bool chunky_on(int screen) const { return src_chunky_[screen]; }
   void set_grid_strength(double s) { grid_strength_ = s; }   // 0..1; dimmed grid is an overlay, needs no seam-adjacent room
+  // video.lcd_shader (frontend/video/lcd_shader.h), at the grid's strength.
+  // The GLES present draws every look; the Vulkan present the grid, and the
+  // others at whole-number scales; every other tier, and the Vulkan present
+  // between whole-number scales, draws the grid in their place. Off: no grid
+  // either. Set before open().
+  void set_lcd_shader(frontend::LcdShader s) { lcd_shader_ = s; }
   // Whether the LCD grid applies to `screen`'s view: panel cells, or >=2x
   // for the full grid and >=1x for a dimmed one (see Target::grid).
   bool grid_on(int screen) const {
@@ -290,6 +296,7 @@ private:
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
   double            grid_strength_ = 0.0;
+  frontend::LcdShader lcd_shader_ = frontend::LcdShader::Grid;
   std::shared_ptr<const gpu::kern::ColourLut> colour_;   // set_colour
   int               chunky_cell_ = 0;
   int               disp_divisor_ = 1;   // the divisor build_source_scale chose, restored after a page

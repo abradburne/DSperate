@@ -26,7 +26,10 @@ const Choice kSeam[]     = {{"dark", N_("DARK")}, {"blend", N_("BLEND")}, {"blen
 const Choice kChunky[]   = {{"false", N_("OFF")}, {"mean", N_("DEFAULT")}, {"extreme", N_("ADAPTIVE")},
                             {"mode", N_("COMMON")}, {"tl", N_("FIRST")}, {"min", N_("DARKEST")}, {"max", N_("LIGHTEST")}};
 const Choice kAa[]       = {{"false", N_("OFF")}, {"true", N_("ON")}, {"enhanced", N_("ENHANCED")}};
-const Choice kColourProfile[] = {{"off", N_("OFF")}, {"nds", N_("DS")}, {"nds_lite", N_("DS LITE")}};
+const Choice kColourProfile[] = {{"off", N_("OFF")}, {"nds", N_("DS")}, {"nds_lite", N_("DS LITE")}, {"gba", "GBA"}};
+// GBA DS's display shaders, in its order (frontend/video/lcd_shader.h).
+const Choice kLcdShader[] = {{"off", N_("OFF")}, {"grid", N_("LCD GRID")}, {"scanlines", N_("SCANLINES")}, {"soft", N_("SOFT CELLS")},
+                             {"subpixels_light", N_("SUBPIXELS LIGHT")}, {"subpixels", N_("SUBPIXELS")}, {"subpixels_strong", N_("SUBPIXELS STRONG")}};
 const Choice kScreen[]   = {{"top", N_("TOP")}, {"bottom", N_("BOTTOM")}};
 // GBATEK's order, matching the firmware.
 const Choice kColour[]   = {{"0", N_("GREY")}, {"1", N_("BROWN")}, {"2", N_("RED")}, {"3", N_("PINK")},
@@ -160,16 +163,18 @@ const Setting kVideoSettings[] = {
        N_("WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS")),
   boolean("video.linear", N_("BILINEAR"), "false", FlagDeferred, Dep::PanelEffects,
           N_("SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY")),
-  percent("video.lcd_grid", N_("LCD GRID"), 0, 100, 10, "0", FlagDeferred, Dep::GridSeam,
-          N_("A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN")),
+  pick("video.lcd_shader", N_("LCD SHADER"), kLcdShader, 7, "grid", FlagDeferred, Dep::LcdShader,
+       N_("A PATTERN OVER EVERY PIXEL. SUBPIXELS: RED, GREEN AND BLUE STRIPES, LIKE A GBA'S SCREEN")),
+  percent("video.lcd_grid", N_("LCD GRID"), 0, 100, 10, "0", FlagDeferred, Dep::LcdShader,
+          N_("HOW DARK THE GRID, SCANLINES AND SOFT CELLS ARE. 0 IS OFF")),
   pick("video.seam", N_("SEAM"), kSeam, 3, "dark", FlagDeferred, Dep::GridSeam,
        N_("DARK DRAWS THE GRID. BLEND SOFTENS ONLY THE STRADDLING PIXEL")),
   pick("video.chunky", N_("CHUNKY"), kChunky, 7, "false", FlagDeferred, Dep::Chunky,
        N_("DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES")),
   number("video.chunky_cell", N_("CHUNKY CELL"), 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          N_("PANEL PIXELS PER CELL"), "auto", N_("AUTO")),
-  pick("video.colour", N_("COLOUR"), kColourProfile, 3, "off", FlagLive, Dep::None,
-       N_("ANOTHER SCREEN'S COLOURS: THE ORIGINAL DS, OR THE BRIGHTER DS LITE")),
+  pick("video.colour", N_("COLOUR"), kColourProfile, 4, "off", FlagLive, Dep::None,
+       N_("ANOTHER SCREEN'S COLOURS: THE ORIGINAL DS, THE BRIGHTER DS LITE, OR THE GBA")),
   pick("video.aa", N_("ANTI-ALIASING"), kAa, 3, "false", FlagLive, Dep::None,
        N_("DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)")),
   pick("video.hires3d", N_("3D RESOLUTION"), kHires3d, 3, "1", FlagLive, Dep::None,

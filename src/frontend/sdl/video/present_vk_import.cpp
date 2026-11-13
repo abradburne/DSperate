@@ -33,7 +33,8 @@ public:
     GpuPresent::View v[frontend::SCREENS];
     for (int i = 0; i < nviews && i < frontend::SCREENS; ++i) v[i] = GpuPresent::View{views[i].screen, sdl(views[i].rect), views[i].shown, views[i].blends, views[i].grid};
     return gpu_->present(sink_, fb, v, nviews, p.rot, p.lw, p.lh, p.inset_alpha, sdl(p.drawn), p.grid, &p.edges, p.colour.get(),
-                         p.linear ? GpuPresent::kBilinear : p.seam_blend == 1 ? GpuPresent::kSeamBlend : p.seam_blend == 2 ? GpuPresent::kSeamLinear : GpuPresent::kNearest);
+                         p.linear ? GpuPresent::kBilinear : p.seam_blend == 1 ? GpuPresent::kSeamBlend : p.seam_blend == 2 ? GpuPresent::kSeamLinear : GpuPresent::kNearest,
+                         p.lcd, p.lcd_strength);
   }
   u32* overlay(int lw, int lh) override { return gpu_->overlay(lw, lh); }
   void flush() override { gpu_->flush(sink_); sink_.flush(); }

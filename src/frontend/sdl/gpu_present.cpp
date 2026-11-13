@@ -41,12 +41,18 @@ constexpr int kMaxBufs = 8;
 constexpr u32 kBindings = 3;               // storage buffers: source frames, overlay, grid table (bindings 1..3)
 constexpr u32 kImageBindings = 2;          // the frames as a sampled image, UNORM and sRGB views (bindings 4, 5)
 constexpr u32 kFilters = 4;                // GpuPresent::Filter
+// The grid table (two views' seam bitmasks), then each view's LCD shader
+// mask: one cell, up to 16 x 16 panel pixels (a 16x scale; the DS+ is 4x).
+constexpr u32 kGridWords = 128;
+constexpr u32 kMaskMax = 16 * 16;
+constexpr u32 kTabWords = kGridWords + 2 * kMaskMax;
 
 struct Push {      // present.vert / present.frag
   s32 rect[4];     // the quad in the logical frame
   u32 a[4];        // presented w, h; logical w, h
   u32 b[4];        // rot, mode (0 view, 1 overlay), source base (words), view | grid on << 8 | edge cut << 9 | blend width << 10 | grid brightness << 16
   float s[4];      // view: 256/w, 192/h, 0.5/w, 0.5/h
+  u32 c[4];        // LCD shader: mask cell w, h, its first tab word, gain x256
 };
 
 } // namespace
@@ -60,6 +66,9 @@ struct GpuPresent::Impl {
   struct Imported { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkFramebuffer fb = VK_NULL_HANDLE; VkDescriptorSet set[kSlots] = {VK_NULL_HANDLE, VK_NULL_HANDLE}; int fd = -1; u32 stride = 0; };
   Buffer over[kSlots];                 // frontend's overlay per slot (logical frame, pitch = lw)
   Buffer tab[kSlots];
+  // What each slot's tab holds as view v's LCD shader mask (built when it changes).
+  struct TabMask { frontend::LcdShader s = frontend::LcdShader::Off; double strength = -1; int w = 0, h = 0; };
+  TabMask tab_mask[kSlots][2];
   SDL_Rect over_dirty[kSlots] = {};    // drawn region per slot, cleared before next use
   int over_lw = 0, over_lh = 0;
   Imported bufs[kMaxBufs];
@@ -72,10 +81,11 @@ struct GpuPresent::Impl {
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkRenderPass rp = VK_NULL_HANDLE;            // on an imported buffer: cleared (the letterbox), stored
-  // Per filter (present.frag's FILTER, a specialisation constant, so each
-  // variant carries only its own sampling): built on first use.
-  VkPipeline pipe[kFilters] = {};              // views, opaque (a blend costs a fifth of the pass on Mali)
-  VkPipeline pipe_fade[kFilters] = {};         // a fading inset: blended at the constant alpha
+  // Per filter and LCD shader or none (present.frag's FILTER and LCD,
+  // specialisation constants, so each variant carries only its own
+  // sampling): built on first use. Index filter + kFilters * lcd.
+  VkPipeline pipe[2 * kFilters] = {};          // views, opaque (a blend costs a fifth of the pass on Mali)
+  VkPipeline pipe_fade[2 * kFilters] = {};     // a fading inset: blended at the constant alpha
   VkPipeline pipe_over = VK_NULL_HANDLE;       // the frontend overlay: blended at its own alpha
   // The frames again as a sampled image for the filters: the texture unit
   // blends bilinear and seam taps for nothing, where the same blends from the
@@ -100,11 +110,12 @@ struct GpuPresent::Impl {
   bool ok() const { return pipe[0] != VK_NULL_HANDLE; }
 
   // kind 0 opaque view, 1 fading view, 2 overlay.
-  VkPipeline make_pipeline(u32 filter, int kind) {
+  VkPipeline make_pipeline(u32 filter, int kind, u32 lcd = 0) {
     VkPipelineShaderStageCreateInfo st[2]{};
     for (int i = 0; i < 2; ++i) { st[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; st[i].pName = "main"; }
-    const VkSpecializationMapEntry me{0, 0, sizeof(u32)};
-    const VkSpecializationInfo spec{1, &me, sizeof(u32), &filter};
+    const u32 consts[2] = {filter, lcd};
+    const VkSpecializationMapEntry me[2] = {{0, 0, sizeof(u32)}, {1, sizeof(u32), sizeof(u32)}};
+    const VkSpecializationInfo spec{2, me, sizeof consts, consts};
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = vmod; st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fmod; st[1].pSpecializationInfo = &spec;
     VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
@@ -127,11 +138,12 @@ struct GpuPresent::Impl {
     dev->save_pipeline_cache();
     return p;
   }
-  VkPipeline view_pipeline(u32 filter, bool fade) {
-    VkPipeline& p = fade ? pipe_fade[filter] : pipe[filter];
+  VkPipeline view_pipeline(u32 filter, bool fade, bool lcd = false) {
+    const u32 k = filter + (lcd ? kFilters : 0u);
+    VkPipeline& p = fade ? pipe_fade[k] : pipe[k];
     if (!p) {
-      p = make_pipeline(filter, fade ? 1 : 0);
-      if (!p) { std::fprintf(stderr, "gpu present: the filter %u pipeline failed to compile; nearest instead\n", filter); p = fade ? pipe_fade[0] : pipe[0]; }
+      p = make_pipeline(filter, fade ? 1 : 0, lcd ? 1u : 0u);
+      if (!p) { std::fprintf(stderr, "gpu present: the filter %u%s pipeline failed to compile; nearest instead\n", filter, lcd ? " LCD shader" : ""); p = fade ? pipe_fade[0] : pipe[0]; }
     }
     return p;
   }
@@ -272,7 +284,7 @@ struct GpuPresent::Impl {
     for (int s = 0; s < kSlots; ++s) if (fence[s]) a->vkDestroyFence(vk->dev, fence[s], nullptr);
     if (cmdpool) a->vkDestroyCommandPool(vk->dev, cmdpool, nullptr);
     if (pool) a->vkDestroyDescriptorPool(vk->dev, pool, nullptr);
-    for (u32 f = 0; f < kFilters; ++f) {
+    for (u32 f = 0; f < 2 * kFilters; ++f) {
       if (pipe[f] && (f == 0 || pipe[f] != pipe[0])) a->vkDestroyPipeline(vk->dev, pipe[f], nullptr);
       if (pipe_fade[f] && (f == 0 || pipe_fade[f] != pipe_fade[0])) a->vkDestroyPipeline(vk->dev, pipe_fade[f], nullptr);
     }
@@ -320,7 +332,7 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut& out, std::string* why) 
 
   d.src = d.dev->alloc(sizeof(u32) * kSlotWords * kSlots, Access::CpuWrite);
   if (!d.src) return fail("source buffer allocation failed");
-  for (int s = 0; s < kSlots; ++s) { d.tab[s] = d.dev->alloc(sizeof(u32) * 128, Access::CpuWrite); if (!d.tab[s]) return fail("grid table allocation failed"); std::memset(d.tab[s].ptr, 0, sizeof(u32) * 128); }
+  for (int s = 0; s < kSlots; ++s) { d.tab[s] = d.dev->alloc(sizeof(u32) * kTabWords, Access::CpuWrite); if (!d.tab[s]) return fail("grid table allocation failed"); std::memset(d.tab[s].ptr, 0, sizeof(u32) * kTabWords); }
   {
     // The filters' image: 256x192, a layer per screen per slot, B8G8R8A8 as the
     // frame's 0xAARRGGBB words lie in memory, with an sRGB view beside the UNORM one.
@@ -461,7 +473,8 @@ bool GpuPresent::reimport(ScanoutOut& out) {
 void GpuPresent::flush(ScanoutOut& out) { d_->retire(out); }
 
 bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
-                         SDL_Rect drawn, u32 grid, const EdgePlanes* edges, const gpu::kern::ColourLut* colour, u32 filter) {
+                         SDL_Rect drawn, u32 grid, const EdgePlanes* edges, const gpu::kern::ColourLut* colour, u32 filter,
+                         frontend::LcdShader lcd, double lcd_strength) {
   Impl& d = *d_;
   const Api& a = *d.a;
   // The previous frame first: its fence, then its buffer to the tier. Only
@@ -529,7 +542,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   // ceil(scale) wide. Each axis decides independently.
   if (grid < 256) {
     u32* t = static_cast<u32*>(d.tab[slot].ptr);
-    std::memset(t, 0, sizeof(u32) * 128);
+    std::memset(t, 0, sizeof(u32) * kGridWords);
     for (int v = 0; v < std::min(nviews, 2); ++v) {
       if (!views[v].grid) continue;
       const int dim[2] = {views[v].rect.w, views[v].rect.h}, srcn[2] = {256, 192};
@@ -543,7 +556,31 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
         }
       }
     }
-    d.dev->flush(d.tab[slot], 0, sizeof(u32) * 128);
+    d.dev->flush(d.tab[slot], 0, sizeof(u32) * kGridWords);
+  }
+  // The LCD shaders other than the grid (the grid is the seams above), on a
+  // view at a whole-number scale of at least 1x, nearest or seams (which are
+  // nearest there): the mask is then one cell, repeated, and goes in this
+  // slot's table when it changes. Anywhere else (between whole-number
+  // scales, bilinear, an inset) the view keeps the grid in its place.
+  bool vlcd[2] = {false, false};
+  u32 lcd_cell[2][2] = {};
+  const bool look = lcd != frontend::LcdShader::Grid && frontend::lcd_shader_drawn(lcd, lcd_strength) && filter != kBilinear;
+  for (int v = 0; look && v < std::min(nviews, 2); ++v) {
+    const SDL_Rect& r = views[v].rect;
+    if (!views[v].shown || r.w < 256 || r.h < 192 || r.w % 256 != 0 || r.h % 192 != 0 || (r.w / 256) * (r.h / 192) > static_cast<int>(kMaskMax)) continue;
+    Impl::TabMask& tm = d.tab_mask[slot][v];
+    if (tm.s != lcd || tm.strength != lcd_strength || tm.w != r.w || tm.h != r.h) {
+      frontend::LcdMask m;
+      frontend::lcd_shader_mask(lcd, lcd_strength, r.w, r.h, 256, 192, m);
+      if (m.px.empty() || m.px.size() > kMaskMax) continue;
+      const size_t at = kGridWords + static_cast<size_t>(v) * kMaskMax;
+      std::memcpy(static_cast<u32*>(d.tab[slot].ptr) + at, m.px.data(), m.px.size() * sizeof(u32));
+      d.dev->flush(d.tab[slot], at * sizeof(u32), m.px.size() * sizeof(u32));
+      tm = Impl::TabMask{lcd, lcd_strength, r.w, r.h};
+    }
+    vlcd[v] = true;
+    lcd_cell[v][0] = static_cast<u32>(r.w / 256); lcd_cell[v][1] = static_cast<u32>(r.h / 192);
   }
   const bool has_over = drawn.w > 0 && drawn.h > 0 && d.over[slot] && d.over_lw == lw && d.over_lh == lh;
   if (has_over) {
@@ -565,7 +602,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   bool need_image = false;
   for (int v = 0; v < std::min(nviews, 2); ++v) {
     const SDL_Rect& r = views[v].rect;
-    vfilter[v] = filter & 3u; vgrid[v] = views[v].grid;
+    vfilter[v] = filter & 3u; vgrid[v] = views[v].grid && !vlcd[v];   // a look stands in for the grid
     if (filter == kSeamBlend || filter == kSeamLinear) {
       vgrid[v] = false;   // the seams stand in for the grid
       if (r.h < 192 || (r.w % 256 == 0 && r.h % 192 == 0)) vfilter[v] = kNearest;
@@ -615,8 +652,10 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
               (std::min<u32>(grid, 256) << 16);
     pc.s[0] = 256.0f / static_cast<float>(r.w); pc.s[1] = 192.0f / static_cast<float>(r.h);
     pc.s[2] = 0.5f / static_cast<float>(r.w);   pc.s[3] = 0.5f / static_cast<float>(r.h);
+    pc.c[0] = lcd_cell[v][0]; pc.c[1] = lcd_cell[v][1]; pc.c[2] = kGridWords + static_cast<u32>(v) * kMaskMax;
+    pc.c[3] = static_cast<u32>(frontend::lcd_shader_gain(lcd) * 256 / 100);
     const bool fade = views[v].blends && inset_alpha < 255;
-    if (VkPipeline want = d.view_pipeline(vfilter[v], fade); want != bound) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, want); bound = want; }
+    if (VkPipeline want = d.view_pipeline(vfilter[v], fade, vlcd[v]); want != bound) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, want); bound = want; }
     if (fade) { const float k = static_cast<float>(inset_alpha) / 255.0f, bc[4] = {k, k, k, k}; a.vkCmdSetBlendConstants(cb, bc); }
     a.vkCmdPushConstants(cb, d.layout, stages, 0, sizeof pc, &pc);
     a.vkCmdDraw(cb, 4, 1, 0, 0);
@@ -656,7 +695,7 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut&, std::string* why) { if
 GpuPresent::~GpuPresent() = default;
 bool GpuPresent::reimport(ScanoutOut&) { return false; }
 void GpuPresent::flush(ScanoutOut&) {}
-bool GpuPresent::present(ScanoutOut&, const u32* const*, const View*, int, int, int, int, u8, SDL_Rect, u32, const EdgePlanes*, const gpu::kern::ColourLut*, u32) { return false; }
+bool GpuPresent::present(ScanoutOut&, const u32* const*, const View*, int, int, int, int, u8, SDL_Rect, u32, const EdgePlanes*, const gpu::kern::ColourLut*, u32, frontend::LcdShader, double) { return false; }
 u32* GpuPresent::overlay(int, int) { return nullptr; }
 const std::string& GpuPresent::device_name() const { static const std::string none; return none; }
 } // namespace ds::sdl

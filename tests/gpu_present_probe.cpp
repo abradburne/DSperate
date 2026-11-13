@@ -5,12 +5,14 @@
 // pass) into dma-heap buffers behind a stand-in scanout tier, and checks
 // every pixel against a CPU model of the compute present it replaced
 // (present.comp): rotation, two views at whole and fractional scales, a
-// hidden view, the LCD grid, a fading PiP inset and the frontend overlay.
+// hidden view, the LCD grid, the LCD shaders, a fading PiP inset and the
+// frontend overlay.
 // Blends may differ by one step (fixed-function vs float mix); the rest must
 // match exactly. Device-only (Vulkan + /dev/dma_heap), not a test.
 #include "core/gpu/colour.h"
 #include "frontend/sdl/gpu_present.h"
 #include "frontend/sdl/dmaheap.h"
+#include "frontend/video/lcd_shader.h"
 
 #include <algorithm>
 #include <cmath>
@@ -87,6 +89,8 @@ struct Case {
   SDL_Rect over{0, 0, 0, 0};   // the overlay's drawn rectangle (filled with a pattern)
   ds::gpu::ColourProfile colour = ds::gpu::ColourProfile::Off;   // corrected on the GPU, modelled by kern::colour_pixel
   u32 filter = GpuPresent::kNearest;
+  frontend::LcdShader lcd = frontend::LcdShader::Grid;   // video.lcd_shader, at lcd_strength
+  double lcd_strength = 0.0;
 };
 
 // The CPU scanline scaler's filters (core/gpu/gpu.cpp), restated per panel pixel.
@@ -151,6 +155,18 @@ void seams(const Case& c, u32 t[128]) {
 // present.comp, per panel pixel, in float as the shader did it.
 std::vector<u32> model(const Case& c, int pw, int ph, const u32* const fb[2], const std::vector<u32>& over, const ds::gpu::kern::ColourLut* lut) {
   u32 tab[128]; seams(c, tab);
+  // gpu_present.cpp's LCD shader rule: the looks other than the grid on a
+  // view at a whole-number scale, not bilinear; the grid elsewhere.
+  frontend::LcdMask mask[2];
+  bool lcd[2] = {false, false};
+  for (int v = 0; v < std::min(c.nviews, 2); ++v) {
+    const SDL_Rect& rc = c.v[v].rect;
+    if (c.lcd == frontend::LcdShader::Grid || !frontend::lcd_shader_drawn(c.lcd, c.lcd_strength) || c.filter == GpuPresent::kBilinear) continue;
+    if (rc.w < SW || rc.h < SH || rc.w % SW || rc.h % SH || (rc.w / SW) * (rc.h / SH) > 256) continue;
+    frontend::lcd_shader_mask(c.lcd, c.lcd_strength, rc.w, rc.h, SW, SH, mask[v]);
+    lcd[v] = !mask[v].px.empty();
+  }
+  const float gain = static_cast<float>(frontend::lcd_shader_gain(c.lcd) * 256 / 100) / 256.0f;
   auto seam = [&](int v, int d, int axis) { return d >= 0 && d < 1024 && ((tab[v * 64 + axis * 32 + (d >> 5)] >> (d & 31)) & 1u) != 0; };
   std::vector<u32> out(static_cast<size_t>(pw) * ph);
   for (int py = 0; py < ph; ++py)
@@ -173,9 +189,14 @@ std::vector<u32> model(const Case& c, int pw, int ph, const u32* const fb[2], co
         const u32 s = c.filter == GpuPresent::kBilinear ? m_bilinear(px, ox, oy, rc.w, rc.h)
                     : seams ? m_seam(px, ox, oy, rc.w, rc.h, c.filter == GpuPresent::kSeamLinear) : px(sx, sy);
         float cr = static_cast<float>((s >> 16) & 255), cg = static_cast<float>((s >> 8) & 255), cb = static_cast<float>(s & 255);
-        if (c.filter == GpuPresent::kNearest && c.grid < 256 && c.v[v].grid && (seam(v, lx - rc.x, 0) || seam(v, ly - rc.y, 1))) {
+        if (c.filter == GpuPresent::kNearest && c.grid < 256 && c.v[v].grid && !lcd[v] && (seam(v, lx - rc.x, 0) || seam(v, ly - rc.y, 1))) {
           const float f = static_cast<float>(c.grid) / 256.0f;
           cr = std::floor(cr * f); cg = std::floor(cg * f); cb = std::floor(cb * f);
+        }
+        if (lcd[v]) {
+          const float k = std::min(gain, 255.0f / std::max(std::max(cr, std::max(cg, cb)), 1.0f));
+          const u32 m = mask[v].px[static_cast<size_t>(oy % mask[v].mh) * mask[v].mw + ox % mask[v].mw];
+          cr *= k * static_cast<float>((m >> 16) & 255) / 255; cg *= k * static_cast<float>((m >> 8) & 255) / 255; cb *= k * static_cast<float>(m & 255) / 255;
         }
         cr /= 255; cg /= 255; cb /= 255;
         if (c.v[v].blends && c.alpha < 255) {
@@ -233,6 +254,13 @@ int main() {
   { Case c{"seam blend", 0, 1024, 768, {frac[0], frac[1]}, 2}; c.filter = GpuPresent::kSeamBlend; c.grid = 128; cases.push_back(c); }
   { Case c{"seam blend 3.7x + colour", 0, 1024, 768, {{0, {30, 20, 947, 710}, true, false, false}, frac[1]}, 2}; c.filter = GpuPresent::kSeamBlend; c.colour = ds::gpu::ColourProfile::Nds; cases.push_back(c); }
   { Case c{"seam blend, linear light", 0, 1024, 768, {frac[0], frac[1]}, 2}; c.filter = GpuPresent::kSeamLinear; cases.push_back(c); }
+  // The LCD shaders (frontend/video/lcd_shader.h): at 4x and 2x their mask; at 3.7x the grid in their place.
+  const GpuPresent::View full[2] = {{0, {0, 0, 1024, 768}, true, false, true}, {1, {0, 0, 0, 0}, false, false, true}};
+  { Case c{"subpixels 4x + colour gba", 0, 1024, 768, {full[0], full[1]}, 1}; c.lcd = frontend::LcdShader::Sub; c.colour = ds::gpu::ColourProfile::Gba; cases.push_back(c); }
+  { Case c{"subpixels strong, rot 90", 90, 1024, 768, {full[0], full[1]}, 1}; c.lcd = frontend::LcdShader::SubStrong; cases.push_back(c); }
+  { Case c{"scanlines 2x + 3.7x grid", 0, 1024, 768, {two[0], {1, {30, 20, 947, 710}, true, false, true}}, 2}; c.v[0].grid = true;
+    c.grid = 166; c.lcd = frontend::LcdShader::Scanlines; c.lcd_strength = 0.35; cases.push_back(c); }
+  { Case c{"soft cells 4x, seam blend", 0, 1024, 768, {full[0], full[1]}, 1}; c.filter = GpuPresent::kSeamBlend; c.lcd = frontend::LcdShader::Soft; c.lcd_strength = 0.5; cases.push_back(c); }
 
   bool pass = true;
   for (const Case& c : cases) {
@@ -256,7 +284,7 @@ int main() {
     }
     std::unique_ptr<ds::gpu::kern::ColourLut> lut;
     if (c.colour != ds::gpu::ColourProfile::Off) { lut = std::make_unique<ds::gpu::kern::ColourLut>(); ds::gpu::build_colour_lut(c.colour, *lut); }
-    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, nullptr, lut.get(), c.filter)) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
+    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, nullptr, lut.get(), c.filter, c.lcd, c.lcd_strength)) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
     gp->flush(out);
     const std::vector<u32> got = out.shown(), want = model(c, pw, ph, fb, over, lut.get());
     u32 off1 = 0, bad = 0, fx = 0, fy = 0, fg = 0, fw = 0;
@@ -269,7 +297,9 @@ int main() {
         if (d <= 1 || (c.filter != GpuPresent::kNearest && d <= 3)) { ++off1; continue; }   // filters: the sampler's 8-bit weights (and sRGB decode), a few steps at worst
         if (!bad++) { fx = static_cast<u32>(x); fy = static_cast<u32>(y); fg = g; fw = w; }
       }
-    const bool blends = c.over.w > 0 || c.alpha < 255 || c.filter != GpuPresent::kNearest;   // filters: the sampler's 8-bit weights vs the CPU's integer steps
+    const bool blends = c.over.w > 0 || c.alpha < 255 || c.filter != GpuPresent::kNearest ||   // filters: the sampler's 8-bit weights vs the CPU's integer steps
+                        c.lcd != frontend::LcdShader::Grid;                                     // LCD shaders: float products, rounded once on the GPU
+
     const bool ok = bad == 0 && (blends || off1 == 0);
     pass &= ok;
     std::printf("%-24s %4dx%-4d %s", c.name, pw, ph, ok ? "ok" : "MISMATCH");

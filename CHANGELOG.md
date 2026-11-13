@@ -5,6 +5,21 @@ This fork's changes (abradburne/DSperate, the `pocketos` branch, packaged for ni
 
 ## Unreleased
 
+### LCD shaders
+
+- **GBA DS's display shaders** (`video.lcd_shader`, `--lcd-shader`, OPTIONS > VISUAL FX > LCD
+  SHADER): off, the LCD grid, scanlines, soft cells, and subpixels (red, green and blue stripes
+  with a gap, light, normal and strong, the picture brightened so it doesn't go dim), over DS
+  games a cell per DS pixel and over GBA games a cell per GBA pixel. The LCD GRID row now sets
+  how dark the grid, scanlines and soft cells are. nibOS's renderer sink (the GLES present) draws
+  every look; the Vulkan present draws them at whole-number scales; the CPU scaler, the RGA and
+  the display engine draw the LCD grid in their place. A config with only `lcd_grid` keeps its
+  grid (`grid` is the default), and `off` turns the grid off too. Ported from GBA DS by kyannon
+  (GPL-3.0, https://github.com/kyannon/gba-ds, `src/ui.c` at 7189176 "Release v1.5").
+- **The GBA's colours** (`video.colour = gba`, COLOUR > GBA): mGBA's GBA Color shader (Pokefan531
+  and hunterk), as GBA DS runs it. Colour correction now reaches GBA games on every route (it
+  used to on the Vulkan present only).
+
 ### Low battery
 
 - **The low battery over a game** (nibkit-menu-c 0.4.0's `nib_battery_*`): when nibOS warns

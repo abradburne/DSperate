@@ -3,6 +3,7 @@
 #pragma once
 #include "core/types.h"
 #include "frontend/video/layout.h"
+#include "frontend/video/lcd_shader.h"
 
 #include <cstring>
 #include <memory>
@@ -54,6 +55,11 @@ public:
     u8 inset_alpha = 255;
     frontend::Rect drawn;        // where the frontend drew on overlay() this frame
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
+    // video.lcd_shader at the grid's strength (0..1): the Vulkan present
+    // draws the looks other than the grid itself at whole-number scales, and
+    // the grid (above) in their place elsewhere; the RGA draws the grid.
+    frontend::LcdShader lcd = frontend::LcdShader::Grid;
+    double lcd_strength = 0.0;
     bool linear = false;         // video.linear; off: the RGA draws whole-number scales exactly
     u8 seam_blend = 0;           // video.seam: 1 blend, 2 blend in linear light (Vulkan only; the RGA draws dark seams)
     EdgePlanes edges;            // the edge cut (Vulkan only; the RGA cannot cut)

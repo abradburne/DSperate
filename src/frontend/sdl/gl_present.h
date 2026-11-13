@@ -8,6 +8,7 @@
 // shown by another.
 #include "core/types.h"
 #include "frontend/video/layout.h"
+#include "frontend/video/lcd_shader.h"
 
 #include <SDL2/SDL.h>
 
@@ -49,9 +50,15 @@ public:
   void set_may_skip(bool on) { may_skip_ = on; }
   // DS_LATENCY: the screen this window shows, for the GPU-done stamps (latency_log.h).
   void set_lat_screen(int screen) { lat_screen_ = screen; }
+  // video.lcd_shader at video.lcd_grid's strength (0..1), over every view at
+  // least a screen's size, nearest only (bilinear takes precedence, as over
+  // the grid). Set after open(), before the first draw.
+  void set_lcd(frontend::LcdShader s, double strength) { lcd_ = s; lcd_strength_ = strength; }
 
   struct Impl;
 private:
+  frontend::LcdShader lcd_ = frontend::LcdShader::Off;
+  double lcd_strength_ = 0.0;
   int lat_screen_ = 0;
   void gpu_stamp(Impl& d);
   std::unique_ptr<Impl> d_;

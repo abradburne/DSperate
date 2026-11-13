@@ -68,6 +68,27 @@ default = false
 args = ["--linear"]
 off = []
 
+# GBA DS's display shaders (by kyannon): a pattern over the picture, a cell per DS pixel, per GBA
+# pixel for GBA games. The subpixels are red, green and blue stripes, the picture brightened to make
+# up for them. Drawn by the renderer sink the seeded settings use (the GLES present).
+[[options]]
+key = "lcd_shader"
+label = "LCD shader"
+values = ["off", "grid", "scanlines", "soft", "subpixels_light", "subpixels", "subpixels_strong"]
+labels = ["Off", "LCD grid", "Scanlines", "Soft cells", "Subpixels (light)", "Subpixels", "Subpixels (strong)"]
+default = "grid"
+args = ["--lcd-shader", "{value}"]
+
+# How dark the LCD grid, scanlines and soft cells are (the subpixels have their own); 0 is off,
+# which is why the LCD grid shows nothing until this is set.
+[[options]]
+key = "lcd_grid"
+label = "LCD shader strength"
+values = [0.0, 0.2, 0.35, 0.5, 0.7, 1.0]
+labels = ["Off", "20%", "35%", "50%", "70%", "100% (black)"]
+default = 0.0
+args = ["--lcd-grid", "{value}"]
+
 # Actions on a game's files, in the Game page of DSlot's menu (asked twice).
 [[actions]]
 label = "Clear resume state"

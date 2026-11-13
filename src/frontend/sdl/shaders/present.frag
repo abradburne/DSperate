@@ -1,13 +1,13 @@
 #version 450
 // GPU present stage: shades one view's quad (nearest from the core's frame,
-// LCD grid seams) or the frontend overlay's. The letterbox is the render
+// LCD grid seams or an LCD shader's mask) or the frontend overlay's. The letterbox is the render
 // pass's clear; the PiP fade and the overlay are fixed-function blends.
 layout(location = 0) in vec2 d;
 layout(location = 0) out vec4 dst;
 layout(std430, binding = 1) readonly buffer Src { uint src[]; };   // slot base + screen * 49152 + y * 256 + x, 0xAARRGGBB; the edge planes 2 * 49152 further
 layout(std430, binding = 2) readonly buffer Over { uint over[]; };  // frontend overlay (OSD, menu), logical frame, pitch lw, 0xAARRGGBB
-layout(std430, binding = 3) readonly buffer Tab  { uint tab[]; };   // LCD grid seam bitmasks: per view, 32 words columns then 32 rows
-layout(push_constant) uniform P { ivec4 rect; uvec4 a; uvec4 b; vec4 s; } pc;   // present.vert's
+layout(std430, binding = 3) readonly buffer Tab  { uint tab[]; };   // LCD grid seam bitmasks: per view, 32 words columns then 32 rows; then the LCD shader masks
+layout(push_constant) uniform P { ivec4 rect; uvec4 a; uvec4 b; vec4 s; uvec4 c; } pc;   // present.vert's
 
 // LCD grid: dims the first panel pixel/row of each source pixel/line to
 // f/256. Columns/rows depend only on view size, so the CPU precomputes them
@@ -115,6 +115,13 @@ vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
 // a step from the CPU's. FILTER is a specialisation constant: each pipeline
 // carries only its own path.
 layout(constant_id = 0) const uint FILTER = 0u;   // GpuPresent::Filter: 0 nearest, 1 bilinear, 2 seams, 3 seams in linear light
+// An LCD shader (frontend/video/lcd_shader.h, after GBA DS): the view's
+// picture brightened by c.w / 256 (every channel alike, at most until the
+// brightest reaches 255, so the hue stays: GBA DS's ccGain), times the
+// mask, one cell (c.x x c.y panel pixels, at a whole-number scale) from tab
+// word c.z on, repeated. A specialisation constant like FILTER, so a view
+// without one carries none of it.
+layout(constant_id = 1) const uint LCD = 0u;
 layout(binding = 4) uniform sampler2DArray frame;
 layout(binding = 5) uniform sampler2DArray frame_srgb;   // the same, decoded to linear before filtering
 
@@ -166,5 +173,10 @@ void main() {
   else col = unpack(seams ? seam_px(o, sx, sy) : src[pc.b.z + uint(sy) * 256u + uint(sx)]);
   uint gf = (pc.b.w >> 16) & 0x1FFu;
   if (filt == 0u && (pc.b.w & 0x100u) != 0u && gf < 256u && (grid_seam(pc.b.w & 0xFFu, o.x, 0) || grid_seam(pc.b.w & 0xFFu, o.y, 1))) col = floor(col * (float(gf) / 256.0));
+  if (LCD != 0u) {
+    col *= min(float(pc.c.w) / 256.0, 255.0 / max(max(col.r, max(col.g, col.b)), 1.0));
+    uvec2 m = uvec2(o) % pc.c.xy;
+    col *= unpack(tab[pc.c.z + m.y * pc.c.x + m.x]) / 255.0;
+  }
   dst = vec4(col / 255.0, 1.0);
 }

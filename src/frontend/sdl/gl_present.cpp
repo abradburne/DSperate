@@ -60,6 +60,44 @@ uniform highp sampler2D u_tex;
 out vec4 o_col;
 void main() { o_col = vec4(texture(u_tex, v_uv).rgb, 1.0); }
 )";
+// The LCD shaders (frontend/video/lcd_shader.h, after GBA DS): the screen
+// nearest-scaled as above, brightened by u_gain (every channel alike, at
+// most until the brightest reaches 255, so the hue stays: GBA DS's ccGain),
+// times the view's mask, one ordinary texture read a pixel. The mask is one
+// cell at a whole-number scale, repeated by the sampler (GL_REPEAT), else the
+// whole view; u_ms is how many of it fit across and down the view, so v_uv *
+// u_ms lands on each mask texel's centre (nearest). On the Mali-G52 an
+// integer-texture fetch with a modulo per pixel (the first version) cost
+// ~3.8 ms a frame at 4x on both screens; this is a plain RGBA8 read.
+const char* kLcdCommon = R"(
+uniform mediump sampler2D u_mask;
+uniform highp vec2 u_ms;
+uniform float u_gain;
+vec3 unpack8(uint c) { return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)); }
+// The colour in mediump (the Mali's 16-bit floats, twice the rate; 8-bit
+// colours need no more), the mask's coordinate in highp (whole pixels to 1024).
+vec4 lcd(vec3 c) {   // c: 0..255
+  c *= min(u_gain, 255.0 / max(max(c.r, max(c.g, c.b)), 1.0));
+  return vec4(c * (1.0 / 255.0) * texture(u_mask, v_uv * u_ms).rgb, 1.0);
+}
+)";
+const std::string kFbLcdFS = std::string(R"(#version 310 es
+precision mediump float; precision highp int; precision highp usampler2D; precision mediump sampler2D;
+in highp vec2 v_uv;
+uniform highp usampler2D u_fb;
+out vec4 o_col;
+)") + kLcdCommon + R"(
+void main() { o_col = lcd(unpack8(texelFetch(u_fb, ivec2(min(v_uv * vec2(256.0, 192.0), vec2(255.0, 191.0))), 0).r)); }
+)";
+// The same over the hi-res screen (GlHires' texture, nearest here).
+const std::string kTexLcdFS = std::string(R"(#version 310 es
+precision mediump float; precision highp int; precision highp usampler2D; precision mediump sampler2D;
+in highp vec2 v_uv;
+uniform highp sampler2D u_tex;
+out vec4 o_col;
+)") + kLcdCommon + R"(
+void main() { o_col = lcd(texture(u_tex, v_uv).rgb * 255.0); }
+)";
 // The overlay keeps its alpha, for blending over the screens.
 const char* kOverlayFS = R"(#version 310 es
 precision highp float;
@@ -133,6 +171,13 @@ struct GlPresent::Impl {
     GLuint tex = 0; int tw = 0, th = 0, tx = 0, ty = 0; bool on = false;      // the present thread's
   } ov[kOverlays];
   GLuint p_ov = 0;
+  // The LCD shaders' programs (0: not built, the views go plain), their
+  // uniforms, and each view's mask, made when the view's size, the look or
+  // its strength changes (a layout change, a reopen).
+  GLuint p_fb_lcd = 0, p_tex_lcd = 0;
+  GLint fb_lcd_m = -1, fb_lcd_gain = -1, tex_lcd_m = -1, tex_lcd_gain = -1;
+  struct LcdMaskTex { GLuint tex = 0; int w = 0, h = 0, mw = 0, mh = 0; frontend::LcdShader s = frontend::LcdShader::Off; double strength = -1; };
+  LcdMaskTex lcd_mask[2];
   int fb_k[2] = {0, 0};
   std::vector<u32> shown;   // may_skip: the 1x frame this window shows
   u32 presents = 0;         // present-ppm
@@ -142,6 +187,38 @@ struct GlPresent::Impl {
   int index = 0;            // the window's order of opening
   int shown_screen = -1;
 };
+
+namespace {
+// View i's LCD shader mask at w x h, made when the view's size, the look or
+// its strength has changed; null: the view is drawn plain (no look, bilinear,
+// no program). On the present thread, the context current. A whole-number
+// scale builds one cell (4 x 4 words at the DS+'s 4x); any other, the
+// view's every pixel once, 16 samples each, a few tens of ms.
+const GlPresent::Impl::LcdMaskTex* lcd_mask(GlPresent::Impl& d, int i, int w, int h, frontend::LcdShader s, double strength) {
+  if (d.linear || !d.p_fb_lcd || !frontend::lcd_shader_drawn(s, strength)) return nullptr;
+  GlPresent::Impl::LcdMaskTex& m = d.lcd_mask[i];
+  if (m.tex && m.w == w && m.h == h && m.s == s && m.strength == strength) return &m;
+  frontend::LcdMask mask;
+  frontend::lcd_shader_mask(s, strength, w, h, 256, 192, mask);
+  if (mask.px.empty()) return nullptr;
+  if (m.tex) glDeleteTextures(1, &m.tex);
+  // 0x00RRGGBB words to RGBA8 bytes, the sampler repeating it over the view.
+  std::vector<u8> rgba(mask.px.size() * 4);
+  for (size_t k = 0; k < mask.px.size(); ++k) {
+    const u32 c = mask.px[k];
+    rgba[k * 4 + 0] = static_cast<u8>(c >> 16); rgba[k * 4 + 1] = static_cast<u8>(c >> 8);
+    rgba[k * 4 + 2] = static_cast<u8>(c); rgba[k * 4 + 3] = 255;
+  }
+  m.tex = gl::texture(GL_RGBA8, mask.mw, mask.mh);
+  glBindTexture(GL_TEXTURE_2D, m.tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mask.mw, mask.mh, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+  m.w = w; m.h = h; m.mw = mask.mw; m.mh = mask.mh; m.s = s; m.strength = strength;
+  return &m;
+}
+} // namespace
 
 GlPresent::GlPresent() = default;
 GlPresent::~GlPresent() { close(); }
@@ -166,6 +243,18 @@ bool GlPresent::open(SDL_Window* win, bool vsync, bool linear) {
   glUseProgram(d.p_fb); glUniform1i(glGetUniformLocation(d.p_fb, "u_fb"), 0);
   glUseProgram(d.p_tex); glUniform1i(glGetUniformLocation(d.p_tex, "u_tex"), 0);
   if (d.p_ov) { glUseProgram(d.p_ov); glUniform1i(glGetUniformLocation(d.p_ov, "u_tex"), 0); }
+  // The LCD shaders: without them (a driver that won't build them) the views are drawn plain.
+  d.p_fb_lcd = prog(kFbLcdFS.c_str()); d.p_tex_lcd = prog(kTexLcdFS.c_str());
+  if (d.p_fb_lcd) {
+    glUseProgram(d.p_fb_lcd);
+    glUniform1i(glGetUniformLocation(d.p_fb_lcd, "u_fb"), 0); glUniform1i(glGetUniformLocation(d.p_fb_lcd, "u_mask"), 1);
+    d.fb_lcd_m = glGetUniformLocation(d.p_fb_lcd, "u_ms"); d.fb_lcd_gain = glGetUniformLocation(d.p_fb_lcd, "u_gain");
+  }
+  if (d.p_tex_lcd) {
+    glUseProgram(d.p_tex_lcd);
+    glUniform1i(glGetUniformLocation(d.p_tex_lcd, "u_tex"), 0); glUniform1i(glGetUniformLocation(d.p_tex_lcd, "u_mask"), 1);
+    d.tex_lcd_m = glGetUniformLocation(d.p_tex_lcd, "u_ms"); d.tex_lcd_gain = glGetUniformLocation(d.p_tex_lcd, "u_gain");
+  }
   glGenVertexArrays(1, &d.vao);
   for (auto& ring : d.fbtex) for (GLuint& t : ring) {
     glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
@@ -188,6 +277,9 @@ void GlPresent::close() {
     glDeleteTextures(6, &d.fbtex[0][0]); if (d.pic_tex) glDeleteTextures(1, &d.pic_tex); glDeleteVertexArrays(1, &d.vao); glDeleteProgram(d.p_fb); glDeleteProgram(d.p_tex);
     for (Impl::Overlay& o : d.ov) if (o.tex) glDeleteTextures(1, &o.tex);
     if (d.p_ov) glDeleteProgram(d.p_ov);
+    for (Impl::LcdMaskTex& m : d.lcd_mask) if (m.tex) glDeleteTextures(1, &m.tex);
+    if (d.p_fb_lcd) glDeleteProgram(d.p_fb_lcd);
+    if (d.p_tex_lcd) glDeleteProgram(d.p_tex_lcd);
     if (--g_contexts == 0) g_first = nullptr;
     SDL_GL_DeleteContext(d.ctx);
   }
@@ -247,17 +339,32 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
   glClear(GL_COLOR_BUFFER_BIT);
   glBindVertexArray(d.vao);
   glActiveTexture(GL_TEXTURE0);
+  bool lcd_any = false;
   for (int i = 0; i < nviews; ++i) {
     const frontend::View& v = views[i];
     if (!v.shown) continue;
     glViewport(v.rect.x, wh - v.rect.y - v.rect.h, v.rect.w, v.rect.h);
-    if (hires_tex_ && v.screen == hires_screen_) {
-      glUseProgram(d.p_tex);
+    const bool hires = hires_tex_ && v.screen == hires_screen_;
+    // The LCD shader over a view at least the screen's size (smaller, a PiP
+    // inset or a dominant layout's second screen, has no room for its cells).
+    const Impl::LcdMaskTex* mask = i < 2 && v.rect.w >= 256 && v.rect.h >= 192 ? lcd_mask(d, i, v.rect.w, v.rect.h, lcd_, lcd_strength_) : nullptr;
+    const GLuint lp = mask ? (hires ? d.p_tex_lcd : d.p_fb_lcd) : 0;
+    if (lp) {
+      lcd_any = true;
+      glUseProgram(lp);
+      glUniform2f(hires ? d.tex_lcd_m : d.fb_lcd_m, static_cast<float>(v.rect.w) / static_cast<float>(mask->mw), static_cast<float>(v.rect.h) / static_cast<float>(mask->mh));
+      glUniform1f(hires ? d.tex_lcd_gain : d.fb_lcd_gain, static_cast<float>(frontend::lcd_shader_gain(lcd_)) / 100.0f);
+      glActiveTexture(GL_TEXTURE1);
+      glBindTexture(GL_TEXTURE_2D, mask->tex);
+      glActiveTexture(GL_TEXTURE0);
+    }
+    if (hires) {
+      if (!lp) glUseProgram(d.p_tex);
       glBindTexture(GL_TEXTURE_2D, hires_tex_);
       const GLint flt = d.linear ? GL_LINEAR : GL_NEAREST;
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, flt); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, flt);
     } else {
-      glUseProgram(d.p_fb);
+      if (!lp) glUseProgram(d.p_fb);
       // A ring per screen: rewriting the texture the GPU still reads made Panfrost shadow it.
       const GLuint t = d.fbtex[v.screen][d.fb_k[v.screen]]; d.fb_k[v.screen] = (d.fb_k[v.screen] + 1) % 3;
       glBindTexture(GL_TEXTURE_2D, t);
@@ -302,7 +409,7 @@ void GlPresent::draw_now(const frontend::View* views, int nviews, const u32* con
   const int hires_shown = hires_tex_ ? hires_screen_ : -1;
   hires_tex_ = 0;
   // A window one 1x screen fills exactly must show it scaled by nearest neighbour.
-  const bool filled = !overlaid && nviews == 1 && views[0].shown && hires_shown != views[0].screen && views[0].rect.x == 0 && views[0].rect.y == 0 &&
+  const bool filled = !overlaid && !lcd_any && nviews == 1 && views[0].shown && hires_shown != views[0].screen && views[0].rect.x == 0 && views[0].rect.y == 0 &&
                       views[0].rect.w == ww && views[0].rect.h == wh;
   hash_present(d.index, ww, wh, filled ? fb[views[0].screen] : nullptr);
   dump_present(d.index, ++d.presents, ww, wh);

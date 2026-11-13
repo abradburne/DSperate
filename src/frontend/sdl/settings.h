@@ -29,6 +29,7 @@ enum class Dep : u8 {
   FrameskipMode,      // emu.frameskip > 0: adaptive-or-fixed means nothing at 0
   PanelEffects,       // the tier has panel pixels at all (not the display engine)
   GridSeam,           // PanelEffects, and video.linear off, which overrides them
+  LcdShader,          // GridSeam, but the GLES present (no grid of its own) draws the looks too
   Chunky,             // video.linear off (chunky survives at DS resolution)
   ChunkyCell,         // Chunky, and video.chunky not off
   Windowed,           // the tier does not own the panel outright

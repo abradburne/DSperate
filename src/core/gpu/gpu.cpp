@@ -1156,6 +1156,10 @@ void Gpu::show_gba(const u32* px) {
   fb_[0].fill(0xFF000000u);
   fb_[1].fill(0xFF000000u);
   for (u32 y = 0; y < H; ++y) std::memcpy(fb_[0].data() + (Y0 + y) * SCREEN_W + X0, px + y * W, W * sizeof(u32));
+  // Colour correction (video.colour; gba: the GBA's own screen) as on a DS
+  // line, where the frontend leaves it to the core: the whole top screen, so
+  // a profile that lifts black lifts the border alike.
+  if (colour_lut_ && colour_cpu_) for (u32 y = 0; y < SCREEN_H; ++y) kern::active::colour_correct(*colour_lut_, fb_[0].data() + y * SCREEN_W);
   if (scaling()) for (int s = 0; s < 2; ++s) scale_image(s, fb_[s].data());
 }
 

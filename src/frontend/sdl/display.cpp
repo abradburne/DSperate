@@ -294,6 +294,7 @@ bool Display::open_renderer(bool linear, bool vsync, int rot) {
     auto g = std::make_unique<GlPresent>();
     if (g->open(win_, vsync, linear)) {
       glp_ = std::move(g);
+      glp_->set_lcd(lcd_shader_, grid_strength_);
       if (rot) std::fprintf(stderr, "video: rotation %d is not applied on the GLES path\n", rot);
       layout();
       return true;
@@ -466,6 +467,7 @@ bool Display::prepare_gpu(GpuFrame& f) {
   p.colour = gpu_->kind() == FramePresenter::Kind::Vulkan ? colour_ : nullptr;
   p.drawn = frontend::Rect{canvas_drawn_.x, canvas_drawn_.y, canvas_drawn_.w, canvas_drawn_.h};
   p.grid = grid_strength_ > 0.0 ? static_cast<u32>(std::lround((1.0 - grid_strength_) * 256.0)) : 256u;
+  p.lcd = lcd_shader_; p.lcd_strength = grid_strength_;
   canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
   f.p = gpu_.get();
   return true;

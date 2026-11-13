@@ -15,10 +15,11 @@ enum class ColourProfile : u8 {
   Off,
   Nds,       // DS Phat: hunterk's nds-color as modified by Pokefan531 (public domain), as ROCKNIX's lcd1x-nds-color
   NdsLite,   // DS Lite: the ds_lite tone of josegonzalez's minui-nintendo-dsperate-pak, after kleinrein/rgds-core (GPL-3.0-or-later)
+  Gba,       // GBA: mGBA's GBA Color shader (Pokefan531 and hunterk), as GBA DS (kyannon, GPL-3.0) runs it
   Count,
 };
 
-// "off" | "nds" | "nds_lite"; false (and Off) for anything else.
+// "off" | "nds" | "nds_lite" | "gba"; false (and Off) for anything else.
 bool parse_colour_profile(const std::string& v, ColourProfile& out);
 const char* colour_profile_name(ColourProfile p);
 

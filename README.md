@@ -183,10 +183,21 @@ This fork adds a Game Boy Advance mode and hi-res 3D on GLES for the RG DS+:
 - **Colour correction** (`video.colour`, `--colour`, the COLOUR menu row):
   `nds` gives the picture the original DS's colours (hunterk and Pokefan531's
   nds-color, as ROCKNIX's `lcd1x-nds-color` shader has it), `nds_lite` the
-  DS Lite's brighter ones (after the minui DSperate pak's `ds_lite` tone). It
+  DS Lite's brighter ones (after the minui DSperate pak's `ds_lite` tone), `gba`
+  the GBA's (mGBA's GBA Color shader by Pokefan531 and hunterk, as GBA DS runs
+  it), for GBA games. It
   works at DS resolution on every route to the panel: with the Vulkan present
   on the present thread as the frames are uploaded (free for the emulation),
   elsewhere in the core's output stage. Screenshots keep the game's own colours.
+- **LCD shaders** (`video.lcd_shader`, `--lcd-shader`, the LCD SHADER menu
+  row), GBA DS's display shaders: the LCD grid, scanlines, soft cells (darker
+  toward each cell's edges) and subpixels (red, green and blue stripes, in
+  light, normal and strong, the picture brightened to make up for them), one
+  cell per DS pixel, per GBA pixel in GBA mode. `video.lcd_grid` sets how dark
+  the grid, scanlines and soft cells are. The GLES present (the renderer sink
+  nibOS uses) draws every one, as a mask made once per view size and one fetch
+  a pixel; the Vulkan present draws them at whole-number scales; elsewhere the
+  LCD grid stands in.
 - **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
   pixels between the two screens of a stacked, side-by-side or dominant pair,
   or `auto`, which pushes them to the panel's edges when the fit leaves room.
@@ -263,3 +274,7 @@ attribution, as a code source. FreeBIOS is under its own licence in
 [src/core/bios/LICENSE.freebios](src/core/bios/LICENSE.freebios). The built-in analog
 controls codes are shocoman's and not under the GPL; their provenance is in
 [src/core/cheat/analog_db/README.md](src/core/cheat/analog_db/README.md).
+The LCD shaders (`src/frontend/video/lcd_shader.cpp`) and the `gba` colour
+profile are ported from [GBA DS](https://github.com/kyannon/gba-ds) by kyannon
+(GPL-3.0; `src/ui.c` at 7189176, "Release v1.5"); the profile is mGBA's GBA
+Color shader by Pokefan531 and hunterk.

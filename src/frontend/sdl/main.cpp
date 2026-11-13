@@ -188,8 +188,14 @@ const char* kUsage =
     "  --linear        bilinear scaling instead of nearest (takes precedence over the grid, seams\n"
     "                  and chunky)\n"
     "  --lcd-grid S    LCD pixel grid: one dark seam per DS pixel, strength 0 (off, default) .. 1\n"
-    "                  (black)\n"
-    "  --colour P      colour correction (video.colour): off (default) | nds (DS Phat) | nds_lite\n"
+    "                  (black); also the strength of --lcd-shader's scanlines and soft cells\n"
+    "  --lcd-shader L  the pattern over the screens (video.lcd_shader, after GBA DS): grid (default:\n"
+    "                  the LCD grid above) | off | scanlines | soft | subpixels_light | subpixels |\n"
+    "                  subpixels_strong (red, green and blue stripes, the picture brightened to\n"
+    "                  make up for them). The GLES present (the renderer sink) draws them all; the\n"
+    "                  Vulkan present all at whole-number scales; elsewhere the grid stands in\n"
+    "  --colour P      colour correction (video.colour): off (default) | nds (DS Phat) | nds_lite |\n"
+    "                  gba (mGBA's GBA Color, for GBA games)\n"
     "  --seam S        dark (default): the LCD grid, dimmed by --lcd-grid | blend: box-filter seams\n"
     "                  (sharp-shimmerless): the one panel pixel/row that straddles two DS pixels is their\n"
     "                  area-weighted blend, all others crisp | blend_linear: the same in linear light\n"
@@ -363,7 +369,7 @@ bool aa_enhanced(const std::string& v) { return v == "enhanced"; }
 void apply_aa(NDS& nds, const std::string& v) { nds.gpu3d.renderer().set_aa(aa_on(v)); nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced(v)); }
 void apply_colour(NDS& nds, const std::string& v) {
   ds::gpu::ColourProfile p;
-  if (!ds::gpu::parse_colour_profile(v, p)) std::fprintf(stderr, "video.colour: unknown profile '%s' (off | nds | nds_lite), off\n", v.c_str());
+  if (!ds::gpu::parse_colour_profile(v, p)) std::fprintf(stderr, "video.colour: unknown profile '%s' (off | nds | nds_lite | gba), off\n", v.c_str());
   nds.gpu.set_colour_profile(p);
 }
 // Whether the edge cut runs (the frame loop has why): video.aa = enhanced on
@@ -1098,7 +1104,8 @@ struct VideoSetup {
   int    scale = 2;
   bool   fullscreen = false, linear = false, vsync = true, dual_window = false;
   ds::sdl::Display::IntScale int_scale = ds::sdl::Display::IntScale::Off;
-  double grid_s = 0.0;      // 0..1 as configured
+  double grid_s = 0.0;      // 0..1 as configured (0 with lcd_shader off)
+  ds::frontend::LcdShader lcd = ds::frontend::LcdShader::Grid;   // video.lcd_shader
   u32    grid = 256;        // brightness kept on a seam, 0..256 (256 = off)
   u8     seam_blend = 0;    // 0 dark, 1 blend, 2 blend in linear light
   u8     chunky = 0;
@@ -1158,6 +1165,10 @@ bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
   vs.dual_window = cfg.flag("video.dual_window", false);
   if (!Disp::parse_int_scale(cfg.str("video.integer_scale", "off"), vs.int_scale)) { std::fprintf(stderr, "integer_scale must be off, under or over\n"); return false; }
   vs.grid_s = std::min(1.0, std::max(0.0, cfg.real("video.lcd_grid", 0.0)));
+  // The grid is lcd_shader's default, so a config with only lcd_grid keeps its grid.
+  if (!ds::frontend::parse_lcd_shader(cfg.str("video.lcd_shader", "grid"), vs.lcd))
+    std::fprintf(stderr, "unknown lcd_shader %s (off | grid | scanlines | soft | subpixels_light | subpixels | subpixels_strong), grid\n", cfg.str("video.lcd_shader").c_str());
+  if (vs.lcd == ds::frontend::LcdShader::Off) vs.grid_s = 0.0;
   vs.grid = static_cast<u32>(std::lround((1.0 - vs.grid_s) * 256.0));
   vs.seam_blend = 0;
   {
@@ -1235,6 +1246,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
     display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s); display2.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+    display.set_lcd_shader(vs.lcd); display2.set_lcd_shader(vs.lcd);
     display.set_seam_blend(vs.seam_blend); display2.set_seam_blend(vs.seam_blend);
     display.set_integer_scale(vs.int_scale); display2.set_integer_scale(vs.int_scale);
     if (!display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 0, vs.upper_display) ||
@@ -1249,6 +1261,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
   display.set_sinks(vs.panel_sink, vs.want_sink);
   display.set_integer_scale(vs.int_scale);
   display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+  display.set_lcd_shader(vs.lcd);
   display.set_seam_blend(vs.seam_blend);
   if (!vs.linear) display.set_disp_grid(static_cast<u8>(((256 - vs.grid) * 255) / 256));
   return display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout);
@@ -1534,6 +1547,7 @@ static int run(int argc, char** argv) {
     else if (flag("--fullscreen")) cli.set("video.fullscreen", "true");
     else if (flag("--linear")) cli.set("video.linear", "true");
     else if (arg("--lcd-grid")) cli.set("video.lcd_grid", argv[++i]);
+    else if (arg("--lcd-shader")) cli.set("video.lcd_shader", argv[++i]);
     else if (arg("--colour")) cli.set("video.colour", argv[++i]);
     else if (flag("--chunky")) cli.set("video.chunky", optional("mean"));
     else if (arg("--chunky-threshold")) cli.set("video.chunky_threshold", argv[++i]);
@@ -1618,7 +1632,7 @@ static int run(int argc, char** argv) {
     if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.gba_bios", "paths.saves", "paths.states", "video.scale", "video.hires3d", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
-                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.lcd_shader", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "emu.frame_end", "emu.input_at", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
 #if DSPERATE_CHEEVOS
@@ -3252,6 +3266,12 @@ sdl_ready:
         if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? "THE RGA DRAWS THE DARK GRID ONLY" : "";
         if (!panel_effects()) return "THIS SCREEN SCALES IN HARDWARE";
         return flag("video.linear", false) ? "BILINEAR IS ON" : "";
+      case ds::sdl::Dep::LcdShader:
+        // The GLES present has no grid of its own: it draws every LCD shader.
+        if (display.gl_present()) return flag("video.linear", false) ? "BILINEAR IS ON" : "";
+        if (display.rga_present()) return "";   // the RGA draws the grid for every look
+        if (!panel_effects()) return "THIS SCREEN SCALES IN HARDWARE";
+        return flag("video.linear", false) ? "BILINEAR IS ON" : "";
       case ds::sdl::Dep::Chunky:
         if (display.gl_present()) return "THE GPU SCALES THESE SCREENS";
         return flag("video.linear", false) ? "BILINEAR IS ON" : "";
@@ -3401,7 +3421,7 @@ sdl_ready:
       return;
     }
     // Baked into the scaler's tables at open, so applying means reopening.
-    if (is("video.linear") || is("video.lcd_grid") || is("video.seam") ||
+    if (is("video.linear") || is("video.lcd_grid") || is("video.lcd_shader") || is("video.seam") ||
         is("video.chunky") || is("video.chunky_cell") || is("video.integer_scale"))
       host.reopen_wanted = true;
   };

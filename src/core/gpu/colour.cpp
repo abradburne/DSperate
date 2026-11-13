@@ -17,6 +17,13 @@
 // (PR 15, "colour and pattern shaders"), itself after kleinrein/rgds-core
 // (GPL-3.0-or-later): gamma 2.2 in, a mild channel bleed, gamma 2.3 out,
 // black and white lifted to the panel's.
+//
+// gba: mGBA's GBA Color shader (res/shaders/gba-color.shader, by Pokefan531
+// and hunterk), as mGBA runs it by default (color_mode 1, sRGB; darken_screen
+// 0.5): gamma 2.5 in (the target gamma 2.0 + 0.5), lum 0.93, its colour
+// matrix (GLSL's mat4 is filled column by column: these are its rows), gamma
+// 2.0 out. The numbers as GBA DS (https://github.com/kyannon/gba-ds, by
+// kyannon, GPL-3.0; src/ui.c cc_build, commit 7189176) builds its table from.
 #include "core/gpu/colour.h"
 
 #include <algorithm>
@@ -47,7 +54,13 @@ constexpr Model kNdsLite = {2.2, 1.0,
                              0.03, 0.07, 0.90},
                             2.3, {0.025, 0.03, 0.04}, {0.97, 0.98, 1.0}};
 
-const Model& model(ColourProfile p) { return p == ColourProfile::NdsLite ? kNdsLite : kNds; }
+constexpr Model kGba = {2.5, 0.93,
+                        {0.80, 0.275, -0.075,
+                         0.135, 0.64, 0.225,
+                         0.195, 0.155, 0.65},
+                        2.0, {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}};
+
+const Model& model(ColourProfile p) { return p == ColourProfile::NdsLite ? kNdsLite : p == ColourProfile::Gba ? kGba : kNds; }
 
 double clamp01(double v) { return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v; }
 double powp(double x, double e) { return x <= 0.0 ? 0.0 : ds_pow_compat(x, e); }
@@ -59,7 +72,7 @@ double curve_out(const Model& md, int k, double v) {
 }
 u8 to_byte(double v) { return static_cast<u8>(std::lround(clamp01(v) * 255.0)); }
 
-constexpr const char* kNames[] = {"off", "nds", "nds_lite"};
+constexpr const char* kNames[] = {"off", "nds", "nds_lite", "gba"};
 static_assert(sizeof kNames / sizeof kNames[0] == static_cast<size_t>(ColourProfile::Count));
 
 } // namespace
